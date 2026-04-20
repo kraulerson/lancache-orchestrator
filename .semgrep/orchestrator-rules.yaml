@@ -25,9 +25,13 @@ rules:
 
   - id: no-sync-sqlite
     pattern: import sqlite3
+    paths:
+      exclude:
+        - "**/db/migrate.py"
     message: >
       Do not use synchronous `sqlite3` (ADR-0001, DQ3).
       Use `aiosqlite` for all database access.
+      Exception: db/migrate.py runs synchronously at container startup.
     languages: [python]
     severity: ERROR
 
