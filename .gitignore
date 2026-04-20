@@ -1,9 +1,17 @@
 # Dependencies
 node_modules/
 venv/
+.venv/
 __pycache__/
 *.pyc
+*.pyo
 .pip-cache/
+*.egg-info/
+
+# Python tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
 
 # Environment
 .env
