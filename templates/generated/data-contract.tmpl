@@ -1,0 +1,79 @@
+# Data Contract — [Project Name]
+
+<!--
+  Phase 0 Step 0.3 output. This document captures the full data input/output
+  specification before it is summarized into the Product Manifesto Section 4.
+
+  Save as: docs/phase-0/data-contract.md
+
+  This defines WHAT data flows through the system, not HOW (architecture is Phase 1).
+-->
+
+**Date:** YYYY-MM-DD
+**Status:** Draft
+
+---
+
+## Data Inputs
+
+| # | Input | Source | Format | Validation Rules | Sensitivity |
+|---|-------|--------|--------|-----------------|-------------|
+| 1 | [Input name] | [User / API / File / System] | [Type/format] | [Required? Range? Pattern?] | [Public / Internal / PII / Sensitive] |
+
+---
+
+## Data Transformations
+
+| # | Input(s) | Transformation | Output | Error Behavior |
+|---|----------|---------------|--------|----------------|
+| 1 | [Input ref] | [What happens to the data] | [Result] | [What if transformation fails] |
+
+---
+
+## Data Outputs
+
+| # | Output | Destination | Format | Retention | Sensitivity |
+|---|--------|-------------|--------|-----------|-------------|
+| 1 | [Output name] | [Screen / File / API / Database] | [Type/format] | [How long kept] | [Classification] |
+
+---
+
+## Third-Party Integrations
+
+| # | Service | Data Sent | Data Received | Fallback if Unavailable |
+|---|---------|-----------|---------------|------------------------|
+| 1 | [Service name] | [What we send] | [What we get back] | [Behavior when service is down] |
+
+*(If no third-party integrations: "None — this product operates entirely offline/self-contained.")*
+
+---
+
+## State Boundaries
+
+[Where does data live? What is ephemeral (lost on close) vs. persistent (survives restart)?]
+
+| Data | Lifecycle | Persistence | Backup Required |
+|------|-----------|-------------|-----------------|
+| [Data item] | [Created when → Destroyed when] | [Memory / Disk / Cloud] | [Yes / No] |
+
+---
+
+## Sensitivity Classification Summary
+
+| Classification | Data Items | Handling Requirements |
+|---------------|------------|----------------------|
+| **PII** | [List] | [Encryption, access control, retention limits] |
+| **Sensitive** | [List] | [Access control, audit logging] |
+| **Internal** | [List] | [Standard access control] |
+| **Public** | [List] | [No restrictions] |
+
+---
+
+## Review Checklist
+
+- [ ] Every input has a defined source and validation rules
+- [ ] Every transformation has an error/fallback behavior
+- [ ] Every output has a defined destination and retention policy
+- [ ] PII is identified and handling requirements are specified
+- [ ] Third-party integrations have fallback behavior defined
+- [ ] State boundaries are clear (ephemeral vs. persistent)
