@@ -1,0 +1,109 @@
+rules:
+  - id: no-requests-on-main-loop
+    patterns:
+      - pattern: import requests
+      - pattern-not-inside: |
+          # Allowed in steam adapter executor paths
+          ...
+    paths:
+      exclude:
+        - "**/src/orchestrator/adapters/steam/*"
+    message: >
+      Do not use `requests` on the main event loop (TM-015, ADR-0001).
+      Use `httpx.AsyncClient` for async HTTP or `loop.run_in_executor` for
+      blocking calls confined to the Steam adapter thread.
+    languages: [python]
+    severity: ERROR
+
+  - id: no-urllib-on-main-loop
+    pattern: import urllib.request
+    message: >
+      Do not use `urllib.request` on the main event loop (TM-015, ADR-0001).
+      Use `httpx.AsyncClient` instead.
+    languages: [python]
+    severity: ERROR
+
+  - id: no-sync-sqlite
+    pattern: import sqlite3
+    message: >
+      Do not use synchronous `sqlite3` (ADR-0001, DQ3).
+      Use `aiosqlite` for all database access.
+    languages: [python]
+    severity: ERROR
+
+  - id: no-time-sleep-in-async
+    patterns:
+      - pattern: |
+          async def $FUNC(...):
+              ...
+              time.sleep(...)
+              ...
+    message: >
+      Do not call `time.sleep()` inside an `async def` — it blocks the
+      event loop. Use `await asyncio.sleep()` or `loop.run_in_executor`.
+    languages: [python]
+    severity: ERROR
+
+  - id: no-shell-true
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.run(..., shell=True, ...)
+          - pattern: subprocess.call(..., shell=True, ...)
+          - pattern: subprocess.Popen(..., shell=True, ...)
+          - pattern: subprocess.check_call(..., shell=True, ...)
+          - pattern: subprocess.check_output(..., shell=True, ...)
+    message: >
+      Do not use `shell=True` in subprocess calls (TM-021).
+      Pass arguments as a list to avoid shell injection.
+    languages: [python]
+    severity: ERROR
+
+  - id: no-credential-log
+    patterns:
+      - pattern-either:
+          - pattern: $LOG.info(..., password=..., ...)
+          - pattern: $LOG.warning(..., password=..., ...)
+          - pattern: $LOG.error(..., password=..., ...)
+          - pattern: $LOG.debug(..., password=..., ...)
+          - pattern: $LOG.critical(..., password=..., ...)
+          - pattern: $LOG.info(..., refresh_token=..., ...)
+          - pattern: $LOG.warning(..., refresh_token=..., ...)
+          - pattern: $LOG.error(..., refresh_token=..., ...)
+          - pattern: $LOG.debug(..., refresh_token=..., ...)
+          - pattern: $LOG.critical(..., refresh_token=..., ...)
+          - pattern: $LOG.info(..., auth_code=..., ...)
+          - pattern: $LOG.warning(..., auth_code=..., ...)
+          - pattern: $LOG.error(..., auth_code=..., ...)
+          - pattern: $LOG.debug(..., auth_code=..., ...)
+          - pattern: $LOG.critical(..., auth_code=..., ...)
+          - pattern: $LOG.info(..., orchestrator_token=..., ...)
+          - pattern: $LOG.warning(..., orchestrator_token=..., ...)
+          - pattern: $LOG.error(..., orchestrator_token=..., ...)
+          - pattern: $LOG.debug(..., orchestrator_token=..., ...)
+          - pattern: $LOG.critical(..., orchestrator_token=..., ...)
+    message: >
+      Do not log credentials (TM-012). Use redacted summaries
+      (e.g., `token_sha256_prefix`) instead of raw values.
+    languages: [python]
+    severity: ERROR
+
+  - id: no-f-string-sql
+    patterns:
+      - pattern-either:
+          - pattern: $CURSOR.execute(f"...")
+          - pattern: $CURSOR.executemany(f"...")
+          - pattern: $CONN.execute(f"...")
+          - pattern: $CONN.executemany(f"...")
+          - pattern: $DB.execute(f"...")
+          - pattern: $DB.executemany(f"...")
+          - pattern: $CURSOR.execute("..." + ...)
+          - pattern: $CURSOR.executemany("..." + ...)
+          - pattern: $CONN.execute("..." + ...)
+          - pattern: $CONN.executemany("..." + ...)
+          - pattern: $DB.execute("..." + ...)
+          - pattern: $DB.executemany("..." + ...)
+    message: >
+      Do not use f-strings or string concatenation in SQL queries (TM-005).
+      Use parameterized queries with `?` placeholders.
+    languages: [python]
+    severity: ERROR
