@@ -29,11 +29,12 @@ This document records phase gate reviews for this project. For personal projects
 | Field | Value |
 |---|---|
 | **Gate** | Phase 0 → Phase 1 |
-| **Reviewer** | |
-| **Date** | |
-| **Artifacts reviewed** | PRODUCT_MANIFESTO.md |
-| **Decision** | Approved / Needs revision |
-| **Notes** | |
+| **Reviewer** | Karl (self-review — Light track, personal project) |
+| **Date** | 2026-04-20 |
+| **Method** | Self-approval via Claude Code session on 2026-04-20 |
+| **Artifacts reviewed** | PRODUCT_MANIFESTO.md (418 lines, 8 sections + Appendix B populated, A/C skipped), docs/phase-0/frd.md (17 Must-Haves expanded), docs/phase-0/user-journey.md (Skeptical PM review), docs/phase-0/data-contract.md (6 input surfaces, 12 transformations) |
+| **Decision** | **Approved** |
+| **Notes** | MVP scope expanded during Phase 0: OQ1 promoted Game_shelf integration (F14–F17) to MVP, adding ~1–2 weeks of cross-repo work (PR required to `kraulerson/Game_shelf`); OQ7 added F13 weekly validation sweep as MVP. 18 questions resolved in Manifesto §8. Standing policy from OQ4: `fabieu/steam-next` upstream silence >15 days triggers a fork to `kraulerson/steam-next`. OQ2 hardened `POST /api/v1/platforms/{name}/auth` to 127.0.0.1-only. JQ3 added scheduler-health to `/api/health`. Full Phase 0 OQ/JQ/DQ resolution history is preserved in docs/phase-0/*.md. Framework compliance: BUG-003 (missing Phase 0 intermediate-artifact templates) was fixed upstream in `solo-orchestrator` during this session; templates now present at `templates/generated/{frd,user-journey,data-contract}.tmpl` and downstream artifacts reconciled to canonical structure. |
 
 ---
 
@@ -82,4 +83,4 @@ _Record after deployment and go-live verification._
 
 | Date | Gate / Event | Decision | Notes |
 |---|---|---|---|
-| | | | |
+| 2026-04-20 | Phase 0 → Phase 1 gate | Approved | Self-reviewed. MVP scope includes 17 Must-Haves (original 12 + F13 validation sweep + F14–F17 Game_shelf integration). 18 questions resolved. Ready for Phase 1 Architecture & Technical Planning. |
