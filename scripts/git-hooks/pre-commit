@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# lancache_orchestrator — Pre-Commit Hook
+# Runs: gitleaks, ruff, mypy, semgrep (OWASP + custom rules)
+# Install: scripts/install-hooks.sh
+
+set -euo pipefail
+
+FAILED=0
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Collect staged Python files
+STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM -- '*.py' || true)
+
+# ── gitleaks ────────────────────────────────────────────────────
+if command -v gitleaks &>/dev/null; then
+    if ! gitleaks protect --staged --verbose --no-banner 2>/dev/null; then
+        echo ""
+        echo "[BLOCKED] gitleaks detected secrets in staged files."
+        FAILED=1
+    fi
+else
+    echo "[WARN] gitleaks not found — secret detection skipped."
+fi
+
+# ── ruff lint ───────────────────────────────────────────────────
+if [ -n "$STAGED_PY" ]; then
+    if command -v ruff &>/dev/null; then
+        RUFF=ruff
+    elif [ -x "$REPO_ROOT/.venv/bin/ruff" ]; then
+        RUFF="$REPO_ROOT/.venv/bin/ruff"
+    else
+        echo "[WARN] ruff not found — lint check skipped."
+        RUFF=""
+    fi
+
+    if [ -n "$RUFF" ]; then
+        if ! echo "$STAGED_PY" | xargs "$RUFF" check --config "$REPO_ROOT/pyproject.toml"; then
+            echo ""
+            echo "[BLOCKED] ruff found lint errors in staged files."
+            FAILED=1
+        fi
+        if ! echo "$STAGED_PY" | xargs "$RUFF" format --check --config "$REPO_ROOT/pyproject.toml"; then
+            echo ""
+            echo "[BLOCKED] ruff found formatting issues. Run: ruff format"
+            FAILED=1
+        fi
+    fi
+fi
+
+# ── mypy ────────────────────────────────────────────────────────
+if [ -n "$STAGED_PY" ]; then
+    if command -v mypy &>/dev/null; then
+        MYPY=mypy
+    elif [ -x "$REPO_ROOT/.venv/bin/mypy" ]; then
+        MYPY="$REPO_ROOT/.venv/bin/mypy"
+    else
+        echo "[WARN] mypy not found — type check skipped."
+        MYPY=""
+    fi
+
+    if [ -n "$MYPY" ]; then
+        if ! "$MYPY" --strict "$REPO_ROOT/src/" 2>/dev/null; then
+            echo ""
+            echo "[BLOCKED] mypy found type errors."
+            FAILED=1
+        fi
+    fi
+fi
+
+# ── semgrep (OWASP + custom rules) ─────────────────────────────
+if [ -n "$STAGED_PY" ]; then
+    if command -v semgrep &>/dev/null; then
+        if ! echo "$STAGED_PY" | tr '\n' '\0' \
+            | xargs -0 semgrep scan \
+                --config=p/owasp-top-ten \
+                --config="$REPO_ROOT/.semgrep/" \
+                --quiet --no-git-ignore 2>/dev/null; then
+            echo ""
+            echo "[BLOCKED] Semgrep detected issues in staged files."
+            FAILED=1
+        fi
+    else
+        echo "[WARN] semgrep not found — SAST skipped."
+    fi
+fi
+
+# ── schema migration warning (Phase 2+) ────────────────────────
+PHASE_STATE="$REPO_ROOT/.claude/phase-state.json"
+CURRENT_PHASE=0
+if [ -f "$PHASE_STATE" ]; then
+    CURRENT_PHASE=$(grep -o '"current_phase"[[:space:]]*:[[:space:]]*"*[0-9][0-9]*"*' \
+        "$PHASE_STATE" | grep -o '[0-9][0-9]*' || echo "0")
+fi
+
+if [ "$CURRENT_PHASE" -ge 2 ]; then
+    staged_schema=$(git diff --cached --name-only --diff-filter=ACM \
+        | grep -E '(schema\.sql|models\.py)$' \
+        | grep -vE '(migrations?/|migrate/)' \
+        || true)
+
+    if [ -n "$staged_schema" ]; then
+        echo ""
+        echo "[WARN] Direct schema file changes detected (Phase $CURRENT_PHASE):"
+        echo "$staged_schema" | sed 's/^/  /'
+        echo "  Data model changes should go through versioned migrations."
+    fi
+fi
+
+exit $FAILED
