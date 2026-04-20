@@ -1,0 +1,159 @@
+{
+  "platform": "mcp-server",
+  "suggestions": {
+    "transport": {
+      "default": [
+        {
+          "name": "stdio only",
+          "rank": 1,
+          "context": "Standard for Claude Code local use. Server launches per-session. Simplest to develop and test.",
+          "when": "Personal/local tool, single user, no remote access needed"
+        },
+        {
+          "name": "stdio + HTTP/SSE",
+          "rank": 2,
+          "context": "Supports both local Claude Code use and remote hosting. More complex but covers all deployment scenarios.",
+          "when": "Need remote access, multiple clients, or homelab deployment"
+        },
+        {
+          "name": "HTTP/SSE only",
+          "rank": 3,
+          "context": "Remote-only server. Cannot be used as a local stdio server. Requires always-on hosting.",
+          "when": "Centralized server for multiple users or always-on service"
+        }
+      ]
+    },
+    "persistence": {
+      "default": [
+        {
+          "name": "SQLite (better-sqlite3)",
+          "rank": 1,
+          "context": "Single-file embedded database. Zero-config, portable, fast reads. Best for local-first MCP servers with structured data.",
+          "when": "Most MCP servers with persistent state"
+        },
+        {
+          "name": "JSON files",
+          "rank": 2,
+          "context": "Maximum simplicity and portability. Easy to inspect and edit manually. No query capability beyond full scan.",
+          "when": "Simple key-value data, <100 records, or configuration-only persistence"
+        },
+        {
+          "name": "PostgreSQL (Supabase/Neon)",
+          "rank": 3,
+          "context": "Full SQL, concurrent access, managed hosting. Adds operational complexity and external dependency.",
+          "when": "Multi-user servers, complex queries, or cloud-hosted deployment"
+        }
+      ]
+    },
+    "mcp_sdk": {
+      "typescript": [
+        {
+          "name": "@modelcontextprotocol/sdk (TypeScript)",
+          "rank": 1,
+          "context": "Official MCP SDK. Most mature, best documented, aligns with Anthropic ecosystem. First to receive protocol updates.",
+          "when": "Most MCP servers"
+        }
+      ],
+      "python": [
+        {
+          "name": "mcp (Python)",
+          "rank": 1,
+          "context": "Official Python MCP SDK. Good for data-heavy servers or Python-native integrations.",
+          "when": "Python-based MCP servers"
+        }
+      ],
+      "default": [
+        {
+          "name": "@modelcontextprotocol/sdk (TypeScript)",
+          "rank": 1,
+          "context": "TypeScript SDK is the most mature and best documented. Recommended default.",
+          "when": "Most MCP servers"
+        }
+      ]
+    },
+    "scheduling": {
+      "default": [
+        {
+          "name": "Manual trigger tool only",
+          "rank": 1,
+          "context": "User invokes an update tool when they want fresh data. Simplest, no background process needed.",
+          "when": "Low-frequency updates, user-controlled refresh"
+        },
+        {
+          "name": "External cron + manual trigger",
+          "rank": 2,
+          "context": "OS cron or container cron runs a CLI command on a schedule. Server doesn't need to be long-running for stdio.",
+          "when": "stdio servers needing periodic updates"
+        },
+        {
+          "name": "In-process scheduling (node-cron) + manual trigger",
+          "rank": 3,
+          "context": "Built-in scheduler for long-running HTTP/SSE servers. Adds complexity but is self-contained.",
+          "when": "Always-on HTTP/SSE servers needing periodic background tasks"
+        }
+      ]
+    },
+    "llm_integration": {
+      "default": [
+        {
+          "name": "No internal LLM calls",
+          "rank": 1,
+          "context": "Server provides data and lets the client's LLM do the analysis. Simpler, no API costs.",
+          "when": "Data retrieval tools, formatters, simple lookups"
+        },
+        {
+          "name": "Anthropic API (Haiku for high-volume, Sonnet for analysis)",
+          "rank": 2,
+          "context": "Use Haiku for classification/extraction (~$0.25/M input tokens), Sonnet for complex analysis (~$3/M input tokens). Mix models by task.",
+          "when": "Servers that need to analyze, compare, or generate recommendations"
+        },
+        {
+          "name": "Anthropic API (Opus for deep analysis)",
+          "rank": 3,
+          "context": "Most capable model (~$15/M input tokens). Reserve for tasks where quality justifies cost.",
+          "when": "Complex advisory, architectural analysis, nuanced recommendations"
+        }
+      ]
+    },
+    "hosting": {
+      "default": [
+        {
+          "name": "Local only (stdio via Claude Code)",
+          "rank": 1,
+          "context": "No hosting needed. Server runs locally when Claude Code starts a session.",
+          "when": "Personal tool, single machine"
+        },
+        {
+          "name": "Docker on homelab/VPS",
+          "rank": 2,
+          "context": "Self-hosted, always-on, full control. Docker Compose for easy management.",
+          "when": "Homelab, LXC, or VPS with existing infrastructure"
+        },
+        {
+          "name": "Railway or Render",
+          "rank": 3,
+          "context": "Managed cloud hosting. Simple deployment, $5-20/month. No infrastructure management.",
+          "when": "Cloud hosting without infrastructure management"
+        }
+      ]
+    },
+    "schema_validation": {
+      "typescript": [
+        {
+          "name": "Zod",
+          "rank": 1,
+          "context": "TypeScript-first schema validation. Single source of truth for types and runtime validation. Integrates with MCP SDK.",
+          "when": "TypeScript MCP servers"
+        }
+      ],
+      "default": [
+        {
+          "name": "Zod (TypeScript) or Pydantic (Python)",
+          "rank": 1,
+          "context": "Language-native schema validation. Provides both type safety and runtime validation.",
+          "when": "Most MCP servers"
+        }
+      ]
+    }
+  }
+}

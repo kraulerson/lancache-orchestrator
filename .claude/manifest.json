@@ -1,0 +1,74 @@
+{
+  "frameworkVersion": "4.2.0",
+  "frameworkCommit": "b32fce5",
+  "frameworkRepo": "kraulerson/claude-dev-framework",
+  "localClonePath": "~/.claude-dev-framework",
+  "lastSyncDate": "2026-04-20T08:03:17Z",
+  "profile": "web-api",
+  "profileInherits": [
+    "_base"
+  ],
+  "files": {},
+  "activeRules": [
+    "evaluate-before-implement",
+    "plan-before-code",
+    "test-per-bugfix",
+    "test-strategy",
+    "naming-conventions",
+    "context-management",
+    "session-discipline",
+    "superpowers-workflow",
+    "verify-after-complete",
+    "plan-closure",
+    "version-bump",
+    "changelog-update",
+    "observability",
+    "future-scalability"
+  ],
+  "activeHooks": [
+    "session-start",
+    "config-guard",
+    "enforce-evaluate",
+    "enforce-superpowers",
+    "stop-checklist",
+    "pre-compact-reminder",
+    "marker-tracker",
+    "marker-guard",
+    "enforce-plan-tracking",
+    "enforce-context7",
+    "verification-gate",
+    "pre-commit-checks",
+    "branch-safety",
+    "scalability-check",
+    "pre-deploy-check"
+  ],
+  "projectConfig": {
+    "_base": {
+      "sourceExtensions": [
+        ".py",
+        ".js",
+        ".ts",
+        ".go",
+        ".rs",
+        ".java",
+        ".kt",
+        ".swift"
+      ],
+      "protectedBranches": [
+        "main"
+      ]
+    },
+    "branches": []
+  },
+  "discovery": {
+    "branch:HEAD\nmain": {
+      "purpose": "main development branch",
+      "devOS": "Darwin",
+      "targetPlatform": "other",
+      "buildTools": "other"
+    },
+    "futurePlatforms": null,
+    "discoveryDate": "2026-04-20",
+    "lastReviewDate": "2026-04-20"
+  }
+}

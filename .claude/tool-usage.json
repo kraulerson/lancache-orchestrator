@@ -1,0 +1,7 @@
+{
+  "session_id": null,
+  "calls": [],
+  "commits_since_last_context7": 0,
+  "qdrant_find_called": false,
+  "qdrant_store_called": false
+}
