@@ -1,14 +1,14 @@
 {
   "project": "lancache_orchestrator",
   "framework_version": "1.0",
-  "current_phase": 1,
+  "current_phase": 2,
   "track": "light",
   "deployment": "personal",
   "poc_mode": null,
   "compliance_ready": false,
   "gates": {
     "phase_0_to_1": "2026-04-20",
-    "phase_1_to_2": null,
+    "phase_1_to_2": "2026-04-20",
     "phase_3_to_4": null
   }
 }

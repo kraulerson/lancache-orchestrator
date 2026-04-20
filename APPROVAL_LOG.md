@@ -43,11 +43,12 @@ This document records phase gate reviews for this project. For personal projects
 | Field | Value |
 |---|---|
 | **Gate** | Phase 1 → Phase 2 |
-| **Reviewer** | |
-| **Date** | |
-| **Artifacts reviewed** | PROJECT_BIBLE.md, Threat Model |
-| **Decision** | Approved / Needs revision |
-| **Notes** | |
+| **Reviewer** | Karl (self-review — Light track, personal project) |
+| **Date** | 2026-04-20 |
+| **Method** | Self-approval via Claude Code session on 2026-04-20 |
+| **Artifacts reviewed** | PROJECT_BIBLE.md (791 lines, 16 sections, 0 placeholder dates), docs/phase-1/architecture-proposal.md (3-option evaluation), docs/ADR documentation/0001-orchestrator-architecture.md (Option A selected, Option B as Spike F fallback), docs/phase-1/threat-model.md (23 STRIDE threats + TM-023 multi-step chain + architecture stress test), docs/phase-1/data-model.md (canonical 0001_initial.sql + rollback + retention), docs/phase-1/interface-spec.md (CLI + REST + status page 4-state specs) |
+| **Decision** | **Approved** |
+| **Notes** | Selected architecture: single-container monolith with event-loop discipline (ADR-0001 Option A). **Spike F is a hard empirical gate** before Build Milestone B (Steam adapter) can begin — sustained 32-concurrent chunk downloads at ≥300 Mbps with `/api/v1/health` p99 < 100 ms on DXP4800 hardware. Option B (subprocess-isolated downloader) is the pre-documented fallback if Spike F fails; ADR-0005 will record the outcome. Six sub-ADRs scheduled for Phase 2: ADR-0002 (steam-next fork policy from OQ4), ADR-0003 (MemoryJobStore), ADR-0004 (raw SQL / no ORM), ADR-0005 (Spike F result), ADR-0006 (vendored legendary), ADR-0007 (Lancache compose service name). Self-review accepted per Light-track policy; external adversarial review not triggered. Ready for Phase 2 Project Initialization (Builder's Guide §2). |
 
 ---
 
@@ -84,3 +85,4 @@ _Record after deployment and go-live verification._
 | Date | Gate / Event | Decision | Notes |
 |---|---|---|---|
 | 2026-04-20 | Phase 0 → Phase 1 gate | Approved | Self-reviewed. MVP scope includes 17 Must-Haves (original 12 + F13 validation sweep + F14–F17 Game_shelf integration). 18 questions resolved. Ready for Phase 1 Architecture & Technical Planning. |
+| 2026-04-20 | Phase 1 → Phase 2 gate | Approved | Self-reviewed. ADR-0001 accepted Option A (single-container monolith with event-loop discipline) with Spike F as the hard empirical gate before Milestone B. 23 STRIDE threats documented (TM-001 through TM-023) with concrete mitigations. PROJECT_BIBLE.md has 16 of 16 sections populated, no placeholder dates. Six sub-ADRs scheduled for Phase 2. Ready for Phase 2 Project Initialization. |
