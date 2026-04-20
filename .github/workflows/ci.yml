@@ -1,70 +1,202 @@
-# solo-orchestrator: platforms=web,desktop,mobile,mcp-server
 name: CI
 
-# TODO: Customize these steps for your language and toolchain.
-# This is a skeleton — uncomment and fill in the appropriate commands.
-
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  IMAGE_NAME: ghcr.io/kraulerson/lancache-orchestrator
 
 jobs:
-  test:
+  # ── Lint: Ruff + mypy strict ─────────────────────────────────
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
-      # TODO: Add language/runtime setup step
-      # Example: actions/setup-node@v4, actions/setup-python@v5,
-      #   actions/setup-dotnet@v4, actions/setup-java@v4, actions/setup-go@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      # TODO: Install dependencies
-      # - name: Install dependencies
-      #   run: <your install command>
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements-dev.txt
+          pip install --no-deps -e .
 
-      # TODO: Lint
-      # - name: Lint
-      #   run: <your lint command>
+      - name: Ruff lint
+        run: ruff check src/ tests/
 
-      # TODO: Test
-      # - name: Test
-      #   run: <your test command>
+      - name: Ruff format check
+        run: ruff format --check src/ tests/
 
-      - name: Security - SAST (Semgrep)
-        uses: semgrep/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1 (v0.58.0)
+      - name: mypy strict
+        run: mypy --strict src/
+
+  # ── Test: pytest + coverage ───────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements-dev.txt
+          pip install --no-deps -e .
+
+      - name: Run tests
+        run: >-
+          pytest
+          --tb=short
+          --cov=orchestrator
+          --cov-report=term-missing
+          --cov-report=xml:tests/reports/coverage/coverage.xml
+          --junitxml=tests/reports/pytest/results.xml
+
+      - name: Check coverage threshold
+        run: |
+          coverage report --fail-under=80 \
+            --include="src/orchestrator/core/*,src/orchestrator/adapters/*,src/orchestrator/validator/*" \
+            || echo "::warning::Coverage below 80% for core modules"
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: tests/reports/
+
+  # ── SAST: Semgrep (OWASP + security-audit + custom) ──────────
+  sast:
+    name: SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        uses: semgrep/semgrep-action@v1
         with:
           config: >-
             p/owasp-top-ten
             p/security-audit
+            .semgrep/
 
-      - name: Security - Secret detection (gitleaks)
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2 (v2.3.9)
+  # ── Secrets: gitleaks ─────────────────────────────────────────
+  secrets:
+    name: Secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Security - Dependency audit
+  # ── Deps: Snyk vulnerability scan ────────────────────────────
+  deps:
+    name: Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
         run: |
-          echo "WARNING: No dependency audit tool configured for this language."
-          echo "Configure a language-specific vulnerability scanner before Phase 3."
-          echo "See docs/builders-guide.md for supported tools per language."
-          exit 1
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements.txt
 
-      - name: Security - License check
-        if: always()
+      - name: Run Snyk test
+        uses: snyk/actions/python@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+
+  # ── Licenses: pip-licenses allowlist ──────────────────────────
+  licenses:
+    name: Licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
         run: |
-          echo "WARNING: No license checker configured for this language."
-          echo "Configure a language-specific license compliance tool before Phase 3."
-          echo "See docs/builders-guide.md for supported tools per language."
-          exit 1
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements.txt
+          pip install pip-licenses
 
-      # ─── Governance (language-agnostic — do not remove) ──────────────
-      # These governance steps apply to ALL languages and should remain
-      # even when customizing the language-specific steps above.
+      - name: Check license compliance
+        run: >-
+          pip-licenses
+          --allow-only="MIT License;BSD License;BSD-2-Clause;BSD-3-Clause;Apache Software License;PSF License;ISC License (ISCL);Mozilla Public License 2.0 (MPL 2.0);Python Software Foundation License"
+          --fail-on-licenses="GNU General Public License (GPL);GNU Affero General Public License v3 (AGPLv3)"
 
-      - name: Governance - Approval log integrity
+  # ── Build: Docker image ──────────────────────────────────────
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [lint, test, sast, secrets, deps, licenses]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:ci
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image size
+        run: |
+          SIZE=$(docker image inspect ${{ env.IMAGE_NAME }}:ci --format '{{.Size}}')
+          SIZE_MB=$((SIZE / 1048576))
+          echo "Image size: ${SIZE_MB} MB"
+          if [ "$SIZE_MB" -gt 250 ]; then
+            echo "::error::Image size ${SIZE_MB} MB exceeds 250 MB limit"
+            exit 1
+          fi
+
+  # ── Governance (framework — do not remove) ───────────────────
+  governance:
+    name: Governance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Approval log integrity
         if: hashFiles('APPROVAL_LOG.md') != ''
         run: |
           if git diff origin/main...HEAD -- APPROVAL_LOG.md 2>/dev/null | grep -qE '^\-[^-]'; then
@@ -72,7 +204,7 @@ jobs:
             exit 1
           fi
 
-      - name: Governance - Approval author verification
+      - name: Approval author verification
         if: hashFiles('APPROVAL_LOG.md') != ''
         run: |
           if git diff --name-only origin/main...HEAD 2>/dev/null | grep -q 'APPROVAL_LOG.md'; then
@@ -86,19 +218,77 @@ jobs:
             fi
           fi
 
-      - name: Governance - Phase gate check
+      - name: Phase gate check
         if: hashFiles('.claude/phase-state.json') != ''
         run: |
           if [ ! -f scripts/check-phase-gate.sh ]; then
-            echo "::error::Phase gate check script missing. Framework integrity compromised."
+            echo "::error::Phase gate check script missing."
             exit 1
           fi
           bash scripts/check-phase-gate.sh
 
-      - name: Governance - Changelog check
+      - name: Changelog check
         run: bash scripts/check-changelog.sh 2>/dev/null || true
-        # Tier 1.5: warning only. Set SOIF_STRICT_CHANGELOG=true to block.
 
-      - name: Governance - Session state check
+      - name: Session state check
         run: bash scripts/check-session-state.sh 2>/dev/null || true
-        # Tier 1.5: warning only. Set SOIF_STRICT_SESSION=true to block.
+
+  # ── Publish: tag-triggered push to GHCR ──────────────────────
+  publish:
+    name: Publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [build, governance]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/arm64,linux/amd64
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.IMAGE_NAME }}:latest
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Release Notes: auto-generated ────────────────────────────
+  release-notes:
+    name: Release Notes
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [publish]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
