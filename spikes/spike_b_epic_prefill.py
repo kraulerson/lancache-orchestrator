@@ -30,9 +30,15 @@ EPIC_TOKEN_URL = (
     "https://account-public-service-prod03.ol.epicgames.com"
     "/account/api/oauth/token"
 )
-EPIC_ASSETS_URL = (
+EPIC_LIBRARY_URL = (
+    "https://library-service.live.use1a.on.epicgames.com"
+    "/library/api/public/items"
+)
+EPIC_MANIFEST_URL = (
     "https://launcher-public-service-prod06.ol.epicgames.com"
     "/launcher/api/public/assets/v2/platform/{platform}"
+    "/namespace/{namespace}/catalogItem/{catalog_item_id}"
+    "/app/{app_name}/label/{label}"
 )
 EPIC_CLIENT_ID = "34a02cf8f4414e29b15921876da36f9a"
 EPIC_CLIENT_SECRET = "daafbccc737745039dffe53d94fc76cf"
@@ -99,39 +105,78 @@ def authenticate(client: httpx.Client) -> AuthTokens:
 
 
 # -- Library enumeration -----------------------------------------------------
-def list_assets(client: httpx.Client, tokens: AuthTokens, platform: str) -> list[dict[str, Any]]:
-    """Fetch owned game assets for the given platform."""
-    url = EPIC_ASSETS_URL.format(platform=platform)
-    resp = client.get(url, headers={"Authorization": f"bearer {tokens.access_token}"})
-    if resp.status_code != 200:
-        print(f"[FAIL] Asset list failed ({resp.status_code}): {resp.text}"); sys.exit(1)
-    elements: list[dict[str, Any]] = resp.json().get("elements", [])
-    print(f"[OK]   Found {len(elements)} owned assets")
-    return elements
+def list_library(client: httpx.Client, tokens: AuthTokens) -> list[dict[str, Any]]:
+    """Fetch owned game library items (paginated)."""
+    headers = {"Authorization": f"bearer {tokens.access_token}"}
+    records: list[dict[str, Any]] = []
+    params: dict[str, Any] = {"includeMetadata": True}
+
+    while True:
+        resp = client.get(EPIC_LIBRARY_URL, headers=headers, params=params)
+        if resp.status_code != 200:
+            print(f"[FAIL] Library fetch failed ({resp.status_code}): {resp.text}")
+            sys.exit(1)
+        data = resp.json()
+        records.extend(data.get("records", []))
+        cursor = data.get("responseMetadata", {}).get("nextCursor")
+        if not cursor:
+            break
+        params["cursor"] = cursor
+
+    print(f"[OK]   Found {len(records)} library items")
+    return records
 
 
-def pick_asset(elements: list[dict[str, Any]], app_name: str | None) -> dict[str, Any]:
-    """Select a game asset by --app-name or interactive prompt."""
+def pick_asset(records: list[dict[str, Any]], app_name: str | None) -> dict[str, Any]:
+    """Select a library item by --app-name or interactive prompt."""
     if app_name:
-        for el in elements:
-            if el.get("appName", "").lower() == app_name.lower():
-                print(f"[OK]   Selected: {el.get('appName')}"); return el
-        print(f"[FAIL] App '{app_name}' not found in library."); sys.exit(1)
+        for rec in records:
+            if rec.get("appName", "").lower() == app_name.lower():
+                print(f"[OK]   Selected: {rec.get('appName')}")
+                return rec
+        print(f"[FAIL] App '{app_name}' not found in library.")
+        sys.exit(1)
 
-    show = elements[:10]
-    print("[INFO] First 10 assets:")
-    for i, el in enumerate(show):
-        print(f"  [{i}] {el.get('appName', '?')}  (ns={el.get('namespace', '?')})")
+    show = records[:20]
+    print("[INFO] First 20 library items:")
+    for i, rec in enumerate(show):
+        print(f"  [{i}] {rec.get('appName', '?')}  (ns={rec.get('namespace', '?')})")
     idx = int(input("Pick a number [0]: ").strip() or "0")
     print(f"[OK]   Selected: {show[idx].get('appName')}")
     return show[idx]
 
 
-def get_manifest_url(asset: dict[str, Any]) -> str:
-    """Extract the manifest download URL from an asset element."""
-    manifests = asset.get("manifests", [])
+def get_manifest_url(
+    client: httpx.Client, tokens: AuthTokens, record: dict[str, Any], platform: str,
+) -> str:
+    """Fetch manifest download URL for a library item via the v2 manifest API."""
+    namespace = record.get("namespace", "")
+    catalog_item_id = record.get("catalogItemId", "")
+    app_name = record.get("appName", "")
+
+    if not all([namespace, catalog_item_id, app_name]):
+        print(f"[FAIL] Missing fields: ns={namespace}, cat={catalog_item_id}, app={app_name}")
+        sys.exit(1)
+
+    url = EPIC_MANIFEST_URL.format(
+        platform=platform, namespace=namespace,
+        catalog_item_id=catalog_item_id, app_name=app_name, label="Live",
+    )
+    resp = client.get(url, headers={"Authorization": f"bearer {tokens.access_token}"})
+    if resp.status_code != 200:
+        print(f"[FAIL] Manifest API failed ({resp.status_code}): {resp.text}")
+        sys.exit(1)
+
+    elements = resp.json().get("elements", [])
+    if not elements:
+        print("[FAIL] No manifest elements returned.")
+        sys.exit(1)
+
+    manifests = elements[0].get("manifests", [])
     if not manifests or not manifests[0].get("uri"):
-        print("[FAIL] No manifest URI found."); sys.exit(1)
+        print("[FAIL] No manifest URI in response.")
+        sys.exit(1)
+
     return manifests[0]["uri"]
 
 
@@ -318,13 +363,13 @@ def main() -> None:
     cdn_hostname = url_pattern = ""
 
     try:
-        # Step 1-3: Auth, list assets, download manifest
+        # Step 1-3: Auth, list library, get manifest
         with httpx.Client() as client:
             tokens = authenticate(client)
             auth_ok = True
-            elements = list_assets(client, tokens, args.platform)
-            asset = pick_asset(elements, args.app_name)
-            manifest_url = get_manifest_url(asset)
+            records = list_library(client, tokens)
+            record = pick_asset(records, args.app_name)
+            manifest_url = get_manifest_url(client, tokens, record, args.platform)
             print(f"[INFO] Manifest URL: {manifest_url}")
             resp = client.get(manifest_url)
             if resp.status_code != 200:
