@@ -177,7 +177,15 @@ def get_manifest_url(
         print("[FAIL] No manifest URI in response.")
         sys.exit(1)
 
-    return manifests[0]["uri"]
+    manifest = manifests[0]
+    uri = manifest["uri"]
+    if "queryParams" in manifest:
+        params = "&".join(
+            f"{p['name']}={p['value']}" for p in manifest["queryParams"]
+        )
+        uri = f"{uri}?{params}"
+
+    return uri
 
 
 # -- Manifest binary parsing -------------------------------------------------
