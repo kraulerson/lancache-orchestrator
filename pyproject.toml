@@ -20,6 +20,8 @@ where = ["src"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+extend-exclude = ["spikes"]
+force-exclude = true
 
 [tool.ruff.format]
 quote-style = "double"
@@ -60,6 +62,10 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = ["apscheduler.*", "aiosqlite.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["spikes.*"]
+ignore_errors = true
 
 # --- pytest ---
 [tool.pytest.ini_options]

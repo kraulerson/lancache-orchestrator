@@ -1,0 +1,14 @@
+# Spike harness dependencies — install in a SEPARATE venv from the project.
+# These are exploration-only; production deps live in requirements.txt.
+#
+#   python -m venv .venv-spikes && source .venv-spikes/bin/activate
+#   pip install -r spikes/requirements-spikes.txt
+
+# Spikes A, D: Steam protocol client (includes gevent)
+steam[client]
+
+# Spikes A, B, D: async HTTP client
+httpx
+
+# Spike B (optional): AES-GCM for v22+ encrypted Epic manifests
+pycryptodomex
