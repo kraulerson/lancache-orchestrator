@@ -2,6 +2,7 @@
 node_modules/
 venv/
 .venv/
+.venv-spikes/
 __pycache__/
 *.pyc
 *.pyo
