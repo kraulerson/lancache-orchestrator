@@ -2,6 +2,7 @@
 -r requirements.in
 pytest==8.4.2
 pytest-asyncio==1.2.0
+pytest-cov==7.1.0
 mypy==1.19.1
 ruff==0.15.11
 pip-licenses==5.5.5

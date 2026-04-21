@@ -9,3 +9,5 @@ structlog==25.5.0
 pydantic==2.13.3
 pydantic-settings==2.11.0
 click==8.1.8
+# Transitive from pydantic-settings; pinned here to override CVE GHSA-mf9w-mj56-hr94 in 1.2.1.
+python-dotenv==1.2.2

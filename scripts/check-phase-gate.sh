@@ -477,7 +477,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESOLVER="$PROJECT_ROOT/scripts/resolve-tools.sh"
 TOOL_PREFS=".claude/tool-preferences.json"
 
-if [ -f "$TOOL_PREFS" ] && [ -x "$RESOLVER" ] && command -v jq &>/dev/null; then
+if [ -z "${CI:-}" ] && [ -f "$TOOL_PREFS" ] && [ -x "$RESOLVER" ] && command -v jq &>/dev/null; then
   dev_os=$(jq -r '.context.dev_os' "$TOOL_PREFS" 2>/dev/null || echo "")
   platform=$(jq -r '.context.platform' "$TOOL_PREFS" 2>/dev/null || echo "")
   language=$(jq -r '.context.language' "$TOOL_PREFS" 2>/dev/null || echo "")
