@@ -49,7 +49,7 @@ import httpx
 
 STEAM_VHOST = "lancache.steamcontent.com"
 STEAM_USER_AGENT = "Valve/Steam HTTP Client 1.0"
-DEFAULT_CHUNK_URI = "/depot/228981/chunk/652b6c9b4aa15a255b9cd513752dbb82169c9097"
+DEFAULT_CHUNK_URI = "/depot/1167451/chunk/11efdde129e6e196ded5e159b28a6b391c7236e0"
 
 # Targets
 TARGET_THROUGHPUT_MBPS = 300.0
