@@ -55,7 +55,7 @@ class AuthTokens:
 
 @dataclass
 class ChunkInfo:
-    guid: str
+    guid: tuple[int, int, int, int]
     hash: int
     sha_hash: bytes
     group_num: int
@@ -200,12 +200,9 @@ def _read_fstring(bio: BytesIO) -> str:
     return bio.read(length).decode("utf-8", errors="replace").rstrip("\x00")
 
 
-def _read_guid(bio: BytesIO) -> str:
-    """Read 16-byte GUID, return 8-4-4-4-12 hex string."""
-    raw = bio.read(16)
-    a, b, c = struct.unpack("<IHH", raw[:8])
-    t = raw[8:]
-    return f"{a:08X}-{b:04X}-{c:04X}-{t[:2].hex().upper()}-{t[2:].hex().upper()}"
+def _read_guid(bio: BytesIO) -> tuple[int, int, int, int]:
+    """Read 16-byte GUID as four little-endian uint32s (matches legendary)."""
+    return struct.unpack("<IIII", bio.read(16))
 
 
 def _read_array(bio: BytesIO, count: int, fmt: str) -> list[Any]:
@@ -278,15 +275,31 @@ def parse_manifest(raw: bytes) -> ManifestInfo:
     return manifest
 
 
+def _get_chunk_dir(version: int) -> str:
+    if version >= 22:
+        return "ChunksV5"
+    if version >= 15:
+        return "ChunksV4"
+    if version >= 6:
+        return "ChunksV3"
+    if version >= 3:
+        return "ChunksV2"
+    return "Chunks"
+
+
+def _guid_hex(guid: tuple[int, int, int, int]) -> str:
+    return "".join(f"{g:08X}" for g in guid)
+
+
 def chunk_path(chunk: ChunkInfo, manifest_version: int) -> str:
-    """Build the CDN-relative path for a chunk."""
+    """Build the CDN-relative path for a chunk (matches legendary format)."""
+    chunk_dir = _get_chunk_dir(manifest_version)
     if manifest_version >= 22:
         import base64
-        guid_bytes = bytes.fromhex(chunk.guid.replace("-", ""))
-        h64 = base64.urlsafe_b64encode(chunk.hash.to_bytes(8, "little")).rstrip(b"=").decode()
-        g64 = base64.urlsafe_b64encode(guid_bytes).rstrip(b"=").decode()
-        return f"ChunksV5/{chunk.group_num:02d}/{h64}_{g64}.chunk"
-    return f"ChunksV4/{chunk.group_num:02d}/{chunk.hash:016X}_{chunk.guid}.chunk"
+        h64 = base64.urlsafe_b64encode(struct.pack("<Q", chunk.hash)).rstrip(b"=").decode()
+        g64 = base64.urlsafe_b64encode(struct.pack("<IIII", *chunk.guid)).rstrip(b"=").decode()
+        return f"{chunk_dir}/{chunk.group_num:02d}/{h64}_{g64}.chunk"
+    return f"{chunk_dir}/{chunk.group_num:02d}/{chunk.hash:016X}_{_guid_hex(chunk.guid)}.chunk"
 
 
 # -- Chunk downloads through Lancache ----------------------------------------
