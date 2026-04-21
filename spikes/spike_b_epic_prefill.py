@@ -43,6 +43,7 @@ EPIC_MANIFEST_URL = (
 EPIC_CLIENT_ID = "34a02cf8f4414e29b15921876da36f9a"
 EPIC_CLIENT_SECRET = "daafbccc737745039dffe53d94fc76cf"
 EPIC_LOGIN_URL = "https://legendary.gl/epiclogin"
+EPIC_USER_AGENT = "EpicGamesLauncher/11.0.1-14907503+++Portal+Release-Live"
 
 
 # -- Data classes ------------------------------------------------------------
@@ -302,11 +303,13 @@ async def download_chunks(
     results: list[DownloadResult] = []
     async with httpx.AsyncClient(
         base_url=f"http://{lancache_host}",
-        headers={"Host": cdn_hostname},
+        headers={"Host": cdn_hostname, "User-Agent": EPIC_USER_AGENT},
         timeout=30.0,
     ) as client:
         for i, ch in enumerate(chunks):
             path = f"{base_path}/{chunk_path(ch, manifest.version)}"
+            if i == 0:
+                print(f"[DEBUG] First chunk URL path: {path}")
             t0 = time.monotonic()
             try:
                 resp = await client.get(path)
