@@ -318,6 +318,13 @@ async def download_chunks(
                 results.append(DownloadResult(i, path, resp.status_code, cs, ms, len(resp.content)))
                 tag = "[OK]  " if resp.status_code == 200 else "[FAIL]"
                 print(f"  {tag} chunk {i}: {resp.status_code} cache={cs} {ms:.0f}ms {len(resp.content)}B")
+                if resp.status_code != 200 and i == 0:
+                    print(f"  [DEBUG] 403 body: {resp.text[:300]}")
+                    direct_url = f"https://{cdn_hostname}{path}"
+                    print(f"  [DEBUG] Trying direct CDN: {direct_url[:120]}...")
+                    async with httpx.AsyncClient() as direct:
+                        dr = await direct.get(direct_url, headers={"User-Agent": EPIC_USER_AGENT})
+                        print(f"  [DEBUG] Direct result: {dr.status_code} {len(dr.content)}B")
             except httpx.HTTPError as exc:
                 ms = (time.monotonic() - t0) * 1000
                 results.append(DownloadResult(i, path, 0, "ERROR", ms, 0))
