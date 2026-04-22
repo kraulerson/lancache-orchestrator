@@ -1,19 +1,10 @@
 {
-  "session_id": "2026-04-21T19:00:56Z",
-  "calls": [
-    {
-      "tool": "mcp__qdrant__qdrant-find",
-      "timestamp": "2026-04-21T19:52:15Z"
-    },
-    {
-      "tool": "mcp__context7__resolve-library-id",
-      "timestamp": "2026-04-21T19:52:17Z"
-    }
-  ],
+  "session_id": "2026-04-22T04:45:02Z",
+  "calls": [],
   "commits_since_last_context7": 0,
-  "qdrant_find_called": true,
+  "qdrant_find_called": false,
   "qdrant_store_called": false,
-  "context7_called": true,
+  "context7_called": false,
   "mcp_gate_satisfied": false,
   "mcp_requirements": {
     "qdrant_required": true,
