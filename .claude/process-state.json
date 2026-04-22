@@ -1,9 +1,9 @@
 {
   "build_loop": {
-    "feature": "settings-module",
+    "feature": null,
     "step": 0,
     "steps_completed": [],
-    "started_at": "2026-04-22T01:39:59Z"
+    "started_at": null
   },
   "uat_session": {
     "session_id": null,
