@@ -308,3 +308,135 @@ def test_invalid_log_level_raises(level: str) -> None:
 
 def test_default_log_level_is_info() -> None:
     log_mod.configure_logging()
+
+
+# ---------------------------------------------------------------------------
+# Re-audit hardening — N1 nested request_context, N2 collision, N3 regex
+# boundary bug, N4 circular references
+# ---------------------------------------------------------------------------
+
+
+def test_nested_request_context_restores_outer_cid(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Re-audit N1: inner `request_context` exit must NOT clobber the outer
+    block's correlation_id. Uses structlog's token-based reset semantics."""
+    log_mod.configure_logging()
+    log = structlog.get_logger()
+
+    with log_mod.request_context("outer") as outer:
+        assert outer == "outer"
+        log.info("outer_before_nest")
+        with log_mod.request_context("inner") as inner:
+            assert inner == "inner"
+            log.info("inside_inner")
+        # After inner exits, outer CID must still be bound.
+        log.info("outer_after_nest")
+    log.info("truly_outside")
+
+    lines = _json_lines(capsys.readouterr().out)
+    by_event = {r["event"]: r for r in lines}
+    assert by_event["outer_before_nest"]["correlation_id"] == "outer"
+    assert by_event["inside_inner"]["correlation_id"] == "inner"
+    assert by_event["outer_after_nest"]["correlation_id"] == "outer"
+    assert "correlation_id" not in by_event["truly_outside"]
+
+
+def test_protect_reserved_keys_collision_uses_numbered_slot(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Re-audit N2: when both correlation_id and user_correlation_id are in the
+    user's kwargs, the processor must not silently overwrite the pre-existing
+    user_correlation_id — it falls back to user_correlation_id_2 (and so on)."""
+    log_mod.configure_logging()
+    log = structlog.get_logger()
+
+    with log_mod.request_context("real"):
+        log.info(
+            "evt",
+            correlation_id="spoofed",
+            user_correlation_id="legit-app-field",
+        )
+
+    record = _last_json_line(capsys.readouterr().out)
+    assert record["correlation_id"] == "real"
+    assert record["user_correlation_id"] == "legit-app-field"
+    assert record["user_correlation_id_2"] == "spoofed"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "user_pwd",
+        "my_pin",
+        "pin_code",
+        "otp_code",
+        "user_otp",
+        "mfa_code",
+        "tfa_token",  # hits 'token' substring — safe by accident
+        "user_sid",
+        "creds_list",
+        "nonce_bytes",
+        "salt_value",
+        "user_nonce",
+    ],
+)
+def test_short_token_redaction_in_compound_keys(
+    capsys: pytest.CaptureFixture[str], key: str
+) -> None:
+    """Re-audit N3: compound keys like `user_pwd` or `my_pin` must be redacted.
+    The original `\\b...\\b` regex silently passed them through because `_` is
+    a word character in Python regex — no word boundary fires between `_` and
+    the short token. Fix uses letter-class boundaries instead."""
+    log_mod.configure_logging()
+    structlog.get_logger().info("evt", **{key: "SENSITIVE-VALUE-123"})
+
+    out = capsys.readouterr().out
+    assert "SENSITIVE-VALUE-123" not in out, f"key {key!r} leaked the sensitive value in clear text"
+    record = _last_json_line(out)
+    assert record[key] == "<redacted>", f"key {key!r} was not redacted"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "pinnacle",  # contains 'pin' but bounded by letters
+        "spinner",  # contains 'pin' in the middle
+        "pinhead",  # 'pin' at start, letter follows
+        "saltwater",  # 'salt' at start, letter follows
+        "session_length",  # NOTE: redacted via substring `session` — still
+        # correct per aggressive-over-targeted posture.
+        # Listed here to document the over-redaction trade.
+    ],
+)
+def test_non_credential_like_keys_handled(capsys: pytest.CaptureFixture[str], key: str) -> None:
+    """Re-audit N3 false-positive guard. Long prefixes that HAPPEN to contain
+    a short token in the middle of a word must not trigger redaction. Longer
+    substring patterns (like `session`) may still over-redact — that's the
+    documented aggressive-over-targeted stance."""
+    log_mod.configure_logging()
+    structlog.get_logger().info("evt", **{key: "value-42"})
+
+    record = _last_json_line(capsys.readouterr().out)
+    # Keys containing substring patterns from the main regex (password, token,
+    # secret, session, etc.) are intentionally over-redacted. Only assert that
+    # purely-bounded short tokens don't trigger.
+    if key in {"pinnacle", "spinner", "pinhead", "saltwater"}:
+        assert record[key] == "value-42", f"false-positive redaction on non-credential key {key!r}"
+
+
+def test_cyclic_event_dict_does_not_recurse_infinitely(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Re-audit N4: a caller passing a cyclic structure as a log kwarg must
+    not crash the logger with RecursionError. The redactor tracks visited
+    object ids and substitutes `<cyclic>` on repeat."""
+    log_mod.configure_logging()
+    cycle: dict[str, object] = {"a": 1}
+    cycle["self"] = cycle  # classic self-reference
+
+    # Must not raise
+    structlog.get_logger().info("cyclic", payload=cycle)
+
+    out = capsys.readouterr().out
+    assert "<cyclic>" in out

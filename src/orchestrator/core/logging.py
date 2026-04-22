@@ -40,11 +40,18 @@ _VALID_LOG_LEVELS: frozenset[str] = frozenset({"DEBUG", "INFO", "WARNING", "ERRO
 _REDACTION_MARKER = "<redacted>"
 
 # Sensitive-key matcher. Union of substring patterns (aggressive — any key
-# containing these gets redacted) and word-bounded short tokens (bounded to
+# containing these gets redacted) and letter-bounded short tokens (bounded to
 # avoid matching "saltwater" etc.). Case-insensitive.
 #
 # Substring patterns are chosen over exhaustive word-boundary variants because
 # over-redaction is preferable to under-redaction for credential-handling code.
+#
+# Short tokens use letter-class boundaries `(?:^|[^a-zA-Z])...(?:[^a-zA-Z]|$)`
+# rather than `\b...\b` because Python's `\b` uses `\w` boundaries, and `_` is
+# a `\w` character — so `\b` does NOT fire between `_` and `pin` in `user_pin`.
+# The original `\b(?:pin|...)\b` pattern silently failed on every compound key
+# of the form `user_pwd`, `my_pin`, `otp_code`, `creds_list`, etc. Letter-class
+# boundaries treat underscore, digit, and separator as valid boundaries.
 _SENSITIVE_KEY_RE = re.compile(
     r"password|passwd|passphrase|"
     r"token|jwt|"
@@ -56,10 +63,7 @@ _SENSITIVE_KEY_RE = re.compile(
     r"credential|"
     r"private[_-]?key|privkey|"
     r"signature|"
-    # Short ambiguous tokens need word boundaries to avoid false positives
-    # (e.g., "pinnacle" must NOT match "pin"). `\b` here uses \w boundaries;
-    # `_pin_` triggers at either underscore.
-    r"\b(?:pwd|pin|otp|mfa|tfa|sid|creds|salt|nonce)\b",
+    r"(?:^|[^a-zA-Z])(?:pwd|pin|otp|mfa|tfa|sid|creds|salt|nonce)(?:[^a-zA-Z]|$)",
     re.IGNORECASE,
 )
 
@@ -95,10 +99,14 @@ def clear_request_context() -> None:
 
 @contextmanager
 def request_context(correlation_id: str | None = None) -> Iterator[str]:
-    """Bind a correlation_id for the duration of the block; clear on exit.
+    """Bind a correlation_id for the duration of the block; restore prior
+    contextvars on exit.
 
-    Exception-safe: the finally block clears contextvars even if the body
-    raises. Use this at request / job entrypoints rather than the raw
+    Exception-safe: the finally block runs even if the body raises. Nested
+    usage restores the enclosing context's correlation_id on inner exit
+    (rather than wiping everything), via structlog's token-based reset.
+
+    Use this at request / job entrypoints rather than the raw
     bind_correlation_id() + clear_request_context() pair, which is easy to
     forget and leaks across requests when pooled workers reuse threads.
 
@@ -106,11 +114,12 @@ def request_context(correlation_id: str | None = None) -> Iterator[str]:
         with request_context() as cid:
             log.info("handling_request", cid=cid)
     """
-    cid = bind_correlation_id(correlation_id)
+    cid = correlation_id or new_correlation_id()
+    tokens = structlog.contextvars.bind_contextvars(correlation_id=cid)
     try:
         yield cid
     finally:
-        clear_request_context()
+        structlog.contextvars.reset_contextvars(**tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -130,12 +139,23 @@ def _protect_reserved_keys(
     key is bound in contextvars and the event_dict has a different value, restore
     the contextvars value and save the user's under `user_<key>`.
 
+    Collision handling: if `user_<key>` is ALREADY present in the event_dict
+    (caller genuinely set that field), the rescued value is stashed at
+    `user_<key>_2`, `user_<key>_3`, etc. — never silently overwrites a
+    pre-existing user field.
+
     No-op for non-reserved keys and for reserved keys not currently bound.
     """
     ctx = structlog.contextvars.get_contextvars()
     for key in RESERVED_KEYS & ctx.keys():
         if key in event_dict and event_dict[key] != ctx[key]:
-            event_dict[f"user_{key}"] = event_dict[key]
+            target = f"user_{key}"
+            if target in event_dict:
+                i = 2
+                while f"{target}_{i}" in event_dict:
+                    i += 1
+                target = f"{target}_{i}"
+            event_dict[target] = event_dict[key]
             event_dict[key] = ctx[key]
     return event_dict
 
@@ -147,19 +167,27 @@ def _redact_sensitive_values(
 ) -> MutableMapping[str, Any]:
     """Recursively mask values of keys matching `_SENSITIVE_KEY_RE` with the
     redaction marker. Walks nested dicts, lists, and tuples. Non-string keys
-    are coerced to str for matching."""
+    are coerced to str for matching.
 
-    def _walk(obj: Any) -> Any:
+    Cycle-safe: tracks visited container ids in a seen-set and substitutes
+    the string `"<cyclic>"` on repeat. Prevents `RecursionError` when a caller
+    logs a self-referential structure (ORM backrefs, hand-rolled graphs)."""
+
+    def _walk(obj: Any, seen: frozenset[int]) -> Any:
+        if isinstance(obj, (dict, list, tuple)):
+            if id(obj) in seen:
+                return "<cyclic>"
+            seen = seen | {id(obj)}
         if isinstance(obj, dict):
             return {
-                k: (_REDACTION_MARKER if _SENSITIVE_KEY_RE.search(str(k)) else _walk(v))
+                k: (_REDACTION_MARKER if _SENSITIVE_KEY_RE.search(str(k)) else _walk(v, seen))
                 for k, v in obj.items()
             }
         if isinstance(obj, (list, tuple)):
-            return type(obj)(_walk(x) for x in obj)
+            return type(obj)(_walk(x, seen) for x in obj)
         return obj
 
-    return cast("MutableMapping[str, Any]", _walk(event_dict))
+    return cast("MutableMapping[str, Any]", _walk(event_dict, frozenset()))
 
 
 # ---------------------------------------------------------------------------
