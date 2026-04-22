@@ -53,6 +53,9 @@ section-order = ["future", "standard-library", "third-party", "first-party", "lo
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]  # allow assert in tests
+# test_logging.py asserts redaction by necessarily including fake credential
+# literals in test inputs; S105/S106 would flood the signal there.
+"tests/core/test_logging.py" = ["S101", "S105", "S106"]
 
 # --- mypy (strict) ---
 [tool.mypy]
