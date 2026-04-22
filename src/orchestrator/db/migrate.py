@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.resources as resources
+import os
 import re
 import sqlite3
 import subprocess
@@ -20,7 +21,6 @@ from typing import TYPE_CHECKING
 import structlog
 
 if TYPE_CHECKING:
-    import os
     from collections.abc import Iterator
     from importlib.resources.abc import Traversable
 
@@ -31,6 +31,7 @@ _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 _NETWORK_FSTYPES = frozenset(
     {
+        # Classical network filesystems
         "nfs",
         "nfs4",
         "nfsv4",
@@ -44,11 +45,26 @@ _NETWORK_FSTYPES = frozenset(
         "coda",
         "webdav",
         "webdavfs",
+        # FUSE-backed network / remote filesystems
         "fuse.sshfs",
         "fuse.davfs",
         "fuse.rclone",
         "fuse.cifs",
         "fuse.smb",
+        "fuse.glusterfs",
+        "fuse.s3fs",
+        "fuse.gcsfuse",
+        "fuse.goofys",
+        # Clustered / distributed filesystems (WAL mmap unsafe across nodes)
+        "glusterfs",
+        "ceph",
+        "cephfs",
+        "lustre",
+        "beegfs",
+        "gpfs",
+        "ocfs2",
+        "gfs2",
+        "moosefs",
     }
 )
 
@@ -118,13 +134,38 @@ def _detect_filesystem_type(path: Path) -> str:
 
 def _assert_local_filesystem(db_path: Path) -> None:
     """Raise MigrationError if `db_path` is on a known network filesystem.
-    SQLite WAL mode is incompatible with networked mmap, which silently corrupts."""
+    SQLite WAL mode is incompatible with networked mmap, which silently corrupts.
+
+    Behavior when detection returns 'unknown' (e.g., unreadable `/proc/self/mountinfo`
+    in a stripped container, or `stat` missing on the host):
+    - By default: emit a structured warning and proceed. The operator may be on
+      a perfectly local filesystem that just isn't probed by either path.
+    - If env var `ORCH_REQUIRE_LOCAL_FS=strict`: refuse to boot. Use this in
+      deployments where silent WAL corruption is strictly worse than a startup
+      failure (e.g., DXP4800 NAS with network-attached storage in the topology).
+    """
     fstype = _detect_filesystem_type(db_path)
     if fstype in _NETWORK_FSTYPES:
         raise MigrationError(
             f"database path {db_path} is on '{fstype}' — WAL journal mode "
             f"requires a local filesystem (ext4, btrfs, xfs, apfs). "
             f"Move the DB to a local disk or mount.",
+        )
+    if fstype == "unknown":
+        mode = os.environ.get("ORCH_REQUIRE_LOCAL_FS", "").strip().lower()
+        if mode == "strict":
+            raise MigrationError(
+                f"filesystem type for {db_path} could not be determined and "
+                f"ORCH_REQUIRE_LOCAL_FS=strict is set. Refusing to boot to "
+                f"prevent silent WAL corruption on an undetected network mount.",
+            )
+        log.warning(
+            "filesystem_type_unknown",
+            db_path=str(db_path),
+            hint=(
+                "WAL requires a local filesystem; detection returned 'unknown'. "
+                "Set ORCH_REQUIRE_LOCAL_FS=strict to fail-closed on unknown."
+            ),
         )
 
 
@@ -410,13 +451,16 @@ def run_migrations(
                 )
                 log.info("migration_applied", migration_id=mig.mid, name=mig.name)
 
+            # Post-apply sanity check runs INSIDE the transaction so failure
+            # triggers ROLLBACK — a sanity failure after COMMIT would leave the
+            # bad state durable and put the operator in a boot loop.
+            _verify_expected_objects(conn, _expected_tables_for(migrations))
+
             conn.execute("COMMIT")
         except Exception:
             with suppress(sqlite3.Error):
                 conn.execute("ROLLBACK")
             raise
-
-        _verify_expected_objects(conn, _expected_tables_for(migrations))
     finally:
         conn.close()
     log.info("migrations_complete", applied_count=len(migrations))

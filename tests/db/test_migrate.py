@@ -421,6 +421,100 @@ def test_local_filesystem_boots_normally(
     conn.close()
 
 
+@pytest.mark.parametrize(
+    "fstype",
+    [
+        "glusterfs",
+        "fuse.glusterfs",
+        "ceph",
+        "cephfs",
+        "lustre",
+        "beegfs",
+        "gpfs",
+        "ocfs2",
+        "gfs2",
+        "moosefs",
+        "fuse.s3fs",
+        "fuse.gcsfuse",
+        "fuse.goofys",
+    ],
+)
+def test_expanded_network_fstypes_refused(
+    one_valid_migration: Path,
+    migs_dir: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fstype: str,
+) -> None:
+    """Extended network-FS list (re-audit F2) refuses clustered + object-store mounts."""
+    monkeypatch.setattr(migrate, "_detect_filesystem_type", lambda _p: fstype)
+
+    with pytest.raises(migrate.MigrationError):
+        migrate.run_migrations(db_path, migrations_dir=migs_dir)
+
+
+def test_unknown_fstype_default_warns_but_proceeds(
+    one_valid_migration: Path,
+    migs_dir: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Re-audit F1: when fstype detection returns 'unknown' and strict mode is not
+    set, the runner proceeds but emits a structured warning so operators can see."""
+    monkeypatch.setattr(migrate, "_detect_filesystem_type", lambda _p: "unknown")
+    monkeypatch.delenv("ORCH_REQUIRE_LOCAL_FS", raising=False)
+
+    migrate.run_migrations(db_path, migrations_dir=migs_dir)  # no raise
+
+    conn = sqlite3.connect(db_path)
+    rows = list(conn.execute("SELECT id FROM schema_migrations"))
+    conn.close()
+    assert rows == [(1,)]
+
+
+def test_unknown_fstype_strict_mode_raises(
+    one_valid_migration: Path,
+    migs_dir: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-audit F1: ORCH_REQUIRE_LOCAL_FS=strict upgrades 'unknown' to hard failure,
+    for deployments where silent corruption is worse than refusing to boot."""
+    monkeypatch.setattr(migrate, "_detect_filesystem_type", lambda _p: "unknown")
+    monkeypatch.setenv("ORCH_REQUIRE_LOCAL_FS", "strict")
+
+    with pytest.raises(migrate.MigrationError):
+        migrate.run_migrations(db_path, migrations_dir=migs_dir)
+
+
+def test_post_apply_sanity_failure_rolls_back(
+    one_valid_migration: Path,
+    migs_dir: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-audit F6: if post-apply sanity check fails, the migration must NOT be
+    committed as applied. Proves verify runs BEFORE COMMIT, not after."""
+
+    def failing_verify(_conn: sqlite3.Connection, _expected: set[str]) -> None:
+        raise migrate.MigrationError("injected sanity failure")
+
+    monkeypatch.setattr(migrate, "_verify_expected_objects", failing_verify)
+
+    with pytest.raises(migrate.MigrationError):
+        migrate.run_migrations(db_path, migrations_dir=migs_dir)
+
+    # schema_migrations must NOT record the migration because verify ran inside
+    # the transaction and triggered ROLLBACK.
+    conn = sqlite3.connect(db_path)
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "schema_migrations" in tables:
+        rows = list(conn.execute("SELECT id FROM schema_migrations"))
+        assert rows == [], "migration committed despite post-apply verify failure"
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Issue #13 SEV-3 — migrations loaded via importlib.resources
 # ---------------------------------------------------------------------------
