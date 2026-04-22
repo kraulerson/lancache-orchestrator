@@ -1,12 +1,13 @@
 {
   "features_completed": [
-    "ID1-sqlite-migrations"
+    "ID1-sqlite-migrations",
+    "ID3-structured-logging"
   ],
-  "features_since_last_test": 1,
-  "features_since_last_health_check": 1,
+  "features_since_last_test": 2,
+  "features_since_last_health_check": 2,
   "test_interval": 2,
   "last_test_session": null,
-  "testing_required": false,
+  "testing_required": true,
   "tester_count": 1,
   "bug_tracker": "github_issues",
   "sessions_completed": 0
