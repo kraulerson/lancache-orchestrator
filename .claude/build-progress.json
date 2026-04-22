@@ -1,7 +1,9 @@
 {
-  "features_completed": [],
-  "features_since_last_test": 0,
-  "features_since_last_health_check": 0,
+  "features_completed": [
+    "ID1-sqlite-migrations"
+  ],
+  "features_since_last_test": 1,
+  "features_since_last_health_check": 1,
   "test_interval": 2,
   "last_test_session": null,
   "testing_required": false,

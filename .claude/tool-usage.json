@@ -10,7 +10,7 @@
       "timestamp": "2026-04-22T14:58:09Z"
     }
   ],
-  "commits_since_last_context7": 0,
+  "commits_since_last_context7": 2,
   "qdrant_find_called": true,
   "qdrant_store_called": false,
   "context7_called": true,
