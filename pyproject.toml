@@ -15,6 +15,9 @@ orchestrator-cli = "orchestrator.cli.main:cli"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"orchestrator.db.migrations" = ["*.sql", "CHECKSUMS"]
+
 # --- Ruff (linter + formatter) ---
 [tool.ruff]
 line-length = 100

@@ -28,10 +28,12 @@ rules:
     paths:
       exclude:
         - "**/db/migrate.py"
+        - "tests/db/test_migrate.py"
     message: >
       Do not use synchronous `sqlite3` (ADR-0001, DQ3).
       Use `aiosqlite` for all database access.
-      Exception: db/migrate.py runs synchronously at container startup.
+      Exception: db/migrate.py runs synchronously at container startup;
+      tests for it necessarily import sqlite3 to assert on DB state.
     languages: [python]
     severity: ERROR
 

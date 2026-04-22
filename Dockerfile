@@ -32,7 +32,8 @@ RUN groupadd -r -g 1000 orchestrator \
 
 COPY --from=builder /build/.venv /app/.venv
 COPY --from=builder /build/src /app/src
-COPY migrations/ /app/migrations/
+# Migrations ship as package data inside /app/src/orchestrator/db/migrations/ and
+# are loaded at runtime via importlib.resources. No separate COPY required.
 
 WORKDIR /app
 
