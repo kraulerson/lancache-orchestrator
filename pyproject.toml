@@ -77,3 +77,21 @@ ignore_errors = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+# --- coverage ---
+[tool.coverage.run]
+source = ["src/orchestrator"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+# Exclude lines that are defensive guards or platform-specific branches hard
+# to exercise in CI. Explicit rather than generic to keep the signal.
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "return NotImplemented",
+    "if sys.platform == \"darwin\":",
+    "if sys.platform.startswith\\(\"linux\"\\):",
+]
