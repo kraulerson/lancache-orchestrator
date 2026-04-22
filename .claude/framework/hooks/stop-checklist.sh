@@ -34,7 +34,7 @@ SESSION_START=$(cat "/tmp/.claude_session_start_${HASH}" 2>/dev/null || echo "")
 if [ "$HAS_SOURCE" = false ] && [ -z "$STAGED" ] && [ -n "$SESSION_START" ]; then
   UNTESTED_FIXES=""
   # Get all commits with files in one git call
-  COMMIT_LOG=$(git log --format="COMMIT %H %s" --name-only "${SESSION_START}..HEAD" 2>/dev/null || true)
+  COMMIT_LOG=$(git log --no-merges --format="COMMIT %H %s" --name-only "${SESSION_START}..HEAD" 2>/dev/null || true)
   CURRENT_SHA="" CURRENT_MSG="" CURRENT_HAS_TEST=false
   while IFS= read -r line; do
     if [[ "$line" == COMMIT\ * ]]; then
