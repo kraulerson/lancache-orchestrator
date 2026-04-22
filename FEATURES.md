@@ -31,4 +31,38 @@ Migrations ship as Python package data (read-only) loaded via `importlib.resourc
 
 ---
 
+## Feature 2: ID3 — Structured Logging with Correlation IDs
+
+**Phase Built:** 2 (Milestone B, Build Loop 2)
+**Status:** Complete (2026-04-22)
+**Summary:** JSON-line structured logging via structlog, with correlation-ID
+scoping (`request_context()` context manager using token-based reset that
+survives nesting and exceptions), reserved-key protection (user kwargs that
+collide with framework-owned keys like `correlation_id` are rescued to
+`user_<key>` with numbered-slot collision handling), recursive secret
+redaction (any value under a key matching the sensitive-key regex becomes
+`<redacted>`; cycle-safe), and strict log-level validation (unknown values
+raise `ValueError` instead of silently becoming INFO).
+**Key Interfaces:**
+  - `src/orchestrator/core/logging.py` — `configure_logging()`,
+    `request_context()`, `new_correlation_id()`, `bind_correlation_id()`,
+    `clear_request_context()`, `RESERVED_KEYS`
+**Related ADRs:**
+  - [`ADR-0009 — Logging Framework Architecture`](ADR%20documentation/0009-logging-framework-architecture.md)
+**Test Coverage:** Unit — 55 tests in `tests/core/test_logging.py`.
+Regression coverage for all 4 UAT-1 findings (GH #9, #10, #14, #15) plus
+the 4 re-audit hardening items. Parametrized across 12 compound-key shapes
+for redaction and 5 valid log-levels for validation. Integration coverage
+will follow once the API layer boots the logger at startup.
+**Known Limitations:**
+  - Value-content scanning is not implemented; relies on callers using
+    descriptive field names for the key-based redactor to catch secrets.
+  - `_redact_sensitive_values` rebuilds dicts even when nothing redactable;
+    minor perf ([#22](https://github.com/kraulerson/lancache-orchestrator/issues/22)).
+  - Low-level `bind_correlation_id()` / `clear_request_context()` primitives
+    are retained for unusual cases but callers should prefer
+    `request_context()`.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->
