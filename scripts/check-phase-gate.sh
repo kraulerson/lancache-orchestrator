@@ -129,7 +129,7 @@ validate_manifesto_content() {
     else
       # Check if section has content beyond template placeholders
       local section_content
-      section_content=$(sed -n "/^## ${section_num}\./,/^## [0-9]/p" "$file" | grep -v "^##" | grep -v "^---" | grep -v "^$" | grep -v "^<!--" | grep -v -e '-->$' | grep -v "^\[" | grep -v "^|.*|.*|$" | head -5)
+      section_content=$(sed -n "/^## ${section_num}\./,/^## [0-9]/p" "$file" | grep -v "^##" | grep -v "^---" | grep -v "^$" | grep -v "^<!--" | grep -v -e '-->$' | grep -v "^\[" | grep -v "^|.*|.*|$" | awk 'NR<=5')
       if [ -z "$section_content" ]; then
         placeholder_sections="${placeholder_sections} ${section_num}"
       fi
@@ -246,7 +246,7 @@ if [ "$current_phase" -ge 1 ]; then
   fi
   # Check for Phase 0 intermediate outputs (P0-002)
   if [ -d "docs/phase-0" ]; then
-    local p0_files=0
+    p0_files=0
     [ -f "docs/phase-0/frd.md" ] && p0_files=$((p0_files + 1))
     [ -f "docs/phase-0/user-journey.md" ] && p0_files=$((p0_files + 1))
     [ -f "docs/phase-0/data-contract.md" ] && p0_files=$((p0_files + 1))
@@ -436,7 +436,7 @@ if [ "$current_phase" -ge 3 ]; then
 
   # P3-007: Cross-reference process-state.json for Phase 3 completion
   if [ -f ".claude/process-state.json" ] && command -v jq &>/dev/null; then
-    local p3_steps_done
+    p3_steps_done=""
     p3_steps_done=$(jq '.phase3_validation.steps_completed | length' .claude/process-state.json 2>/dev/null || echo "0")
     if [ "$p3_steps_done" -ge 9 ]; then
       echo -e "${GREEN}  [OK]${NC} Phase 3 process checklist: $p3_steps_done steps completed"
@@ -477,7 +477,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESOLVER="$PROJECT_ROOT/scripts/resolve-tools.sh"
 TOOL_PREFS=".claude/tool-preferences.json"
 
-if [ -f "$TOOL_PREFS" ] && [ -x "$RESOLVER" ] && command -v jq &>/dev/null; then
+if [ -z "${CI:-}" ] && [ -f "$TOOL_PREFS" ] && [ -x "$RESOLVER" ] && command -v jq &>/dev/null; then
   dev_os=$(jq -r '.context.dev_os' "$TOOL_PREFS" 2>/dev/null || echo "")
   platform=$(jq -r '.context.platform' "$TOOL_PREFS" 2>/dev/null || echo "")
   language=$(jq -r '.context.language' "$TOOL_PREFS" 2>/dev/null || echo "")
