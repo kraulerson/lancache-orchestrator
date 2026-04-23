@@ -212,9 +212,9 @@ Full matrix in `docs/phase-1/threat-model.md` §5 cross-references every TM to i
 
 ## 5. Data Model
 
-<!-- Last Updated: 2026-04-20 -->
+<!-- Last Updated: 2026-04-23 -->
 
-Full artifact: `docs/phase-1/data-model.md`. Canonical SQL for `migrations/0001_initial.sql` in §7 of that file.
+Full artifact: `docs/phase-1/data-model.md`. Canonical SQL lives at `src/orchestrator/db/migrations/0001_initial.sql` (packaged as Python package-data per ADR-0008, loaded via `importlib.resources`).
 
 ### 5.1 Entity inventory
 
@@ -250,7 +250,7 @@ Seven entity tables + one meta table:
 
 ### 5.4 Migration strategy
 
-Numbered `.sql` files in `migrations/`: `NNNN_snake_case_description.sql` (+ optional `NNNN_..._down.sql` for rollback). Applied atomically per-file. Runner (~50 LoC) checksums every applied migration; **content drift aborts startup** (CRITICAL `migration_content_drift`). Schema-version-ahead-of-code aborts with `schema_version_ahead`.
+Numbered `.sql` files in `src/orchestrator/db/migrations/` (ships as Python package-data via `importlib.resources` — see ADR-0008): filename format `NNNN_snake_case_description.sql`. Down-migrations are NOT in MVP scope (rollback removed in BL1; re-introducing requires a dedicated ADR covering versioning + data-preservation). Every file has a pinned SHA-256 entry in the sibling `CHECKSUMS` manifest (also package-data). The runner (~500 LoC at `src/orchestrator/db/migrate.py`) wraps the full read-applied-and-apply pass in a single `BEGIN IMMEDIATE` / `COMMIT` so same-process concurrent callers serialize; a module-level `threading.Lock` handles same-process races that busy_timeout alone doesn't cover. Pre-apply checks: manifest checksum cross-check (file vs pinned SHA), gap detection (applied ∪ available must be contiguous from 1), local-filesystem assertion (refuses NFS/CIFS/Gluster/Ceph/... because WAL + networked mmap silently corrupts; `ORCH_REQUIRE_LOCAL_FS=strict` upgrades `unknown` fstype to fail-closed). Post-apply sanity check (inside the transaction, before COMMIT) verifies the expected table set derived from each migration's SQL. Any of these checks failing raises `MigrationError` and the container refuses to start.
 
 ### 5.5 Retention policy
 
@@ -701,14 +701,14 @@ Recorded per Builder's Guide §1.6 completeness requirement.
 
 ## 16. Context Management Plan
 
-<!-- Last Updated: 2026-04-20 -->
+<!-- Last Updated: 2026-04-23 -->
 
 Per Builder's Guide §1.6 item 16: small / medium / large project categorization.
 
 **This project is small.** MVP file count projection:
 
 - `src/` — 25–35 Python modules (api, adapters/steam, adapters/epic, core, db, validator, cli, status)
-- `migrations/` — 1–2 SQL files at MVP
+- `src/orchestrator/db/migrations/` — 1–2 SQL files at MVP, shipped as package-data
 - `vendor/legendary/` — ~5 files vendored
 - `tests/` — mirrors `src/` structure, ~30–40 test modules
 - `docs/` — ADRs, Phase 0/1 intermediates, interface docs, guides
