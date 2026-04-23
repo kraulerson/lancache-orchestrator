@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- AGENT: Replace UAT Session 1 — lancache_orchestrator with the session title, e.g., "UAT Session 4" -->
+<title>UAT Session 1 — lancache_orchestrator</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0f0f17; color: #cdd6f4; line-height: 1.5; padding: 24px; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin-bottom: 4px; }
+  .meta { color: #a6adc8; font-size: 0.9rem; margin-bottom: 24px; }
+  .progress-bar { background: #1e1e2e; border-radius: 8px; height: 8px; margin-bottom: 24px; overflow: hidden; }
+  .progress-fill { background: #a6e3a1; height: 100%; width: 0%; transition: width 0.3s; }
+  .progress-text { text-align: center; color: #a6adc8; font-size: 0.85rem; margin-bottom: 24px; }
+  h2 { font-size: 1.2rem; color: #89b4fa; margin: 32px 0 16px; padding-bottom: 8px; border-bottom: 1px solid #313244; }
+  .fixture-ref { background: #11111b; border: 1px solid #313244; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 0.85rem; color: #a6adc8; }
+  .fixture-ref strong { color: #cdd6f4; }
+  .fixture-ref code { background: #313244; padding: 2px 6px; border-radius: 3px; color: #f9e2af; }
+  .scenario { background: #1e1e2e; border-radius: 8px; margin-bottom: 12px; overflow: hidden; border-left: 4px solid #45475a; transition: border-color 0.2s; }
+  .scenario.pass { border-left-color: #a6e3a1; }
+  .scenario.fail { border-left-color: #f38ba8; }
+  .scenario-header { padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+  .scenario-num { background: #313244; color: #a6adc8; font-size: 0.8rem; font-weight: 600; padding: 2px 8px; border-radius: 4px; min-width: 28px; text-align: center; }
+  .scenario-title { flex: 1; font-weight: 500; }
+  .btn-group { display: flex; gap: 4px; }
+  .btn { padding: 6px 14px; border: 1px solid #45475a; border-radius: 4px; background: transparent; color: #cdd6f4; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
+  .btn:hover { background: #313244; }
+  .btn.pass-btn.active { background: #a6e3a1; color: #1e1e2e; border-color: #a6e3a1; font-weight: 600; }
+  .btn.fail-btn.active { background: #f38ba8; color: #1e1e2e; border-color: #f38ba8; font-weight: 600; }
+  .btn.skip-btn.active { background: #f9e2af; color: #1e1e2e; border-color: #f9e2af; font-weight: 600; }
+  .scenario-details { padding: 0 16px 8px 16px; display: none; }
+  .scenario-details.open { display: block; }
+  .steps { background: #11111b; padding: 10px 14px; border-radius: 4px; font-size: 0.85rem; color: #a6adc8; margin-bottom: 8px; }
+  .steps strong { color: #cdd6f4; }
+  .scenario-notes { padding: 4px 16px 12px 16px; }
+  .notes-input { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; resize: vertical; min-height: 36px; }
+  .notes-input:focus { outline: none; border-color: #89b4fa; }
+  .toggle-details { background: none; border: none; color: #6c7086; cursor: pointer; font-size: 0.75rem; padding: 4px 8px; }
+  .toggle-details:hover { color: #89b4fa; }
+  .bugs-section { margin-top: 40px; }
+  .bug-entry { background: #1e1e2e; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #f38ba8; }
+  .bug-row { display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .bug-field { flex: 1; min-width: 200px; }
+  .bug-field label { display: block; color: #a6adc8; font-size: 0.8rem; margin-bottom: 4px; }
+  .bug-field input, .bug-field select, .bug-field textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; }
+  .bug-field textarea { resize: vertical; min-height: 60px; }
+  .bug-field input:focus, .bug-field select:focus, .bug-field textarea:focus { outline: none; border-color: #89b4fa; }
+  .bug-field select { appearance: auto; }
+  .add-bug-btn { background: #313244; border: 1px dashed #45475a; color: #a6adc8; padding: 10px; border-radius: 8px; width: 100%; cursor: pointer; font-size: 0.85rem; margin-bottom: 12px; }
+  .add-bug-btn:hover { border-color: #f38ba8; color: #f38ba8; }
+  .remove-bug { background: none; border: none; color: #f38ba8; cursor: pointer; font-size: 0.8rem; float: right; }
+  .overall-notes { margin-top: 32px; }
+  .overall-notes textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 12px; border-radius: 8px; font-size: 0.9rem; font-family: inherit; resize: vertical; min-height: 100px; }
+  .overall-notes textarea:focus { outline: none; border-color: #89b4fa; }
+  .export-section { margin-top: 32px; text-align: center; padding: 24px; }
+  .export-btn { background: #89b4fa; color: #1e1e2e; border: none; padding: 12px 32px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; }
+  .export-btn:hover { background: #74c7ec; }
+  .export-btn:active { transform: scale(0.98); }
+  .copy-msg { color: #a6e3a1; margin-top: 8px; font-size: 0.85rem; display: none; }
+</style>
+</head>
+<body>
+
+<!-- AGENT: Replace UAT Session 1 — lancache_orchestrator with the session title, e.g., "UAT Session 4" -->
+<h1>UAT Session 1 — lancache_orchestrator</h1>
+<!-- AGENT: Replace 2026-04-22 with the date in YYYY-MM-DD format -->
+<!-- AGENT: Replace ID1 migrations, ID3 logging, infrastructure hardening with comma-separated feature names being tested -->
+<div class="meta">Date: 2026-04-22 | Features: ID1 migrations, ID3 logging, infrastructure hardening | Tester: <input id="tester-name" type="text" placeholder="Your name" style="background:#1e1e2e;border:1px solid #45475a;color:#cdd6f4;padding:4px 8px;border-radius:4px;font-size:0.85rem;width:140px;"></div>
+
+<div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+<div class="progress-text" id="progress-text">0 / 0 completed</div>
+
+<!--
+  Session setup / environment notes for the tester.
+-->
+<h2>Before you start</h2>
+<div class="fixture-ref">
+  <strong>System under test:</strong> macOS (darwin/arm64). Commands use POSIX shell
+  and should run unchanged on Linux if your paths differ.<br>
+  <strong>Project root:</strong> <code>/Users/karl/Documents/Claude Projects/lancache_orchestrator</code><br>
+  <strong>Python:</strong> 3.12.13 inside <code>.venv/</code> at the project root.<br>
+  <strong>Required tools:</strong> <code>python</code>, <code>pip</code>, <code>sqlite3</code>,
+  <code>git</code>. <em>Optional:</em> <code>docker</code> (scenario 13 only), <code>unzip</code>
+  (scenario 12).<br>
+  <br>
+  <strong>Open one terminal window and run this setup once, before any scenario:</strong><br>
+  <code>cd "/Users/karl/Documents/Claude Projects/lancache_orchestrator"</code><br>
+  <code>source .venv/bin/activate</code><br>
+  <code>python --version   # must print 3.12.x</code><br>
+  <br>
+  Every scenario below assumes:<br>
+  1. You are in the project-root terminal above.<br>
+  2. The <code>.venv</code> is active (your prompt should show <code>(.venv)</code>).<br>
+  3. If a scenario changes directory, it says so and returns you to the project root at the end.<br>
+  <br>
+  <strong>How to run a scenario:</strong> click "details" on the scenario card, copy the
+  commands into the terminal, compare your output to the "Expected" block, then click
+  Pass / Fail / Skip. Use the per-scenario Notes field for anything surprising. Use the
+  "Bugs Found" section at the bottom for issues that span multiple scenarios or that the
+  pre-audit agents missed.
+</div>
+
+<h2>Feature 1: ID1 — SQLite Migrations Framework</h2>
+<div class="fixture-ref">
+  <strong>Test files</strong>:<br>
+  <code>src/orchestrator/db/migrate.py</code> — runner<br>
+  <code>src/orchestrator/db/migrations/0001_initial.sql</code> — packaged migration<br>
+  <code>src/orchestrator/db/migrations/CHECKSUMS</code> — pinned SHA-256 manifest<br>
+  <code>tests/db/test_migrate.py</code> — 42 regression + baseline tests<br>
+  <code>docs/ADR documentation/0008-migration-runner-architecture.md</code> — design<br>
+  <code>docs/security-audits/id1-sqlite-migrations-security-audit.md</code> — audit trail
+</div>
+<div id="feature1"></div>
+
+<h2>Feature 2: ID3 — Structured Logging with Correlation IDs</h2>
+<div class="fixture-ref">
+  <strong>Test files</strong>:<br>
+  <code>src/orchestrator/core/logging.py</code> — structlog pipeline<br>
+  <code>tests/core/test_logging.py</code> — 55 regression + baseline tests<br>
+  <code>docs/ADR documentation/0009-logging-framework-architecture.md</code> — design<br>
+  <code>docs/security-audits/id3-structured-logging-security-audit.md</code> — audit trail
+</div>
+<div id="feature2"></div>
+
+<h2>Feature 3: Infrastructure (Docker + CI + test tooling)</h2>
+<div class="fixture-ref">
+  <strong>Test files</strong>:<br>
+  <code>Dockerfile</code> — both FROM lines pin <code>sha256:520153e2…</code><br>
+  <code>.github/workflows/ci.yml</code> — arm64 + amd64 buildx matrix<br>
+  <code>pyproject.toml</code> — pytest-cov + [tool.coverage] config
+</div>
+<div id="feature3"></div>
+
+<h2>Feature 4: Agent Pre-Audit Review</h2>
+<div class="fixture-ref">
+  <strong>Pre-audit reports generated by parallel sub-agents:</strong><br>
+  <code>tests/uat/sessions/2026-04-22-session-1/agent-results/01-integration.md</code><br>
+  <code>tests/uat/sessions/2026-04-22-session-1/agent-results/02-adversarial.md</code><br>
+  <code>tests/uat/sessions/2026-04-22-session-1/agent-results/03-docs-handoff.md</code>
+</div>
+<div id="feature4"></div>
+
+<div class="bugs-section">
+  <h2>Bugs Found</h2>
+  <div id="bugs-list"></div>
+  <button class="add-bug-btn" onclick="addBug()">+ Add Bug</button>
+</div>
+
+<div class="overall-notes">
+  <h2>Overall Notes</h2>
+  <textarea id="overall-notes" placeholder="Free-form observations, UX concerns, suggestions, things that felt wrong even if they technically worked..."></textarea>
+</div>
+
+<div class="export-section">
+  <button class="export-btn" onclick="exportResults()">Copy Results to Clipboard</button>
+  <div class="copy-msg" id="copy-msg">Copied! Paste into terminal or save to submissions folder.</div>
+</div>
+
+<script>
+// AGENT INSTRUCTIONS: Replace __SCENARIOS_JSON__ with a JavaScript array.
+// Each element MUST be an object with ALL of the following fields.
+// Do not omit any field. Do not add fields not listed here.
+// Do not modify any code outside the __PLACEHOLDER__ tokens.
+//
+// SCHEMA:
+// [
+//   {
+//     "id": number,        // Sequential integer starting at 1, unique across all features
+//     "feature": number,   // Feature number this scenario tests (must match a __FEATURE_SECTIONS__ div id)
+//     "title": string,     // Short imperative description, e.g., "Repair fills holes on open mesh"
+//     "steps": string,     // Numbered steps separated by \\n, e.g., "1. Open file\\n2. Click Analyze"
+//     "expected": string   // What should happen if the feature works correctly
+//   }
+// ]
+//
+// EXAMPLE (do not copy verbatim — write scenarios specific to the features under test):
+// [
+//   {
+//     "id": 1,
+//     "feature": 7,
+//     "title": "Repair disabled after clean analysis",
+//     "steps": "1. Open cube.stl\\n2. Click Analyze (A)\\n3. Check Repair button",
+//     "expected": "Repair button stays disabled. Analysis shows 0 holes, 0 degenerate faces."
+//   }
+// ]
+const scenarios = [
+  /* ───────────────── Feature 1: ID1 migrations ───────────────── */
+  {
+    "id": 1, "feature": 1,
+    "title": "Fresh install — migrations apply to an empty DB",
+    "steps": "You are in the project root with .venv active (see 'Before you start').\n\n1. Remove any leftover test DB from a previous run:\n   rm -f /tmp/orch-uat.db\n\n2. Run the packaged migrations runner:\n   python -c \"from orchestrator.db.migrate import run_migrations; run_migrations('/tmp/orch-uat.db')\"\n\n   You should see two JSON log lines on stdout (migration_applying, migration_applied) and then migrations_complete. No traceback.\n\n3. List the tables that were created:\n   sqlite3 /tmp/orch-uat.db \"SELECT name FROM sqlite_master WHERE type='table' ORDER BY name\"",
+    "expected": "Step 2: exits 0, three JSON lines including migration_applied and migrations_complete.\n\nStep 3 prints exactly 8 lines in this order:\n   block_list\n   cache_observations\n   games\n   jobs\n   manifests\n   platforms\n   schema_migrations\n   validation_history\n\nPASS if all 8 present; FAIL if any missing or extra table appears."
+  },
+  {
+    "id": 2, "feature": 1,
+    "title": "Idempotent re-apply — running again is a no-op",
+    "steps": "Depends on scenario 1 having created /tmp/orch-uat.db. If not, run scenario 1 first.\n\n1. Run the exact same migration command a second time:\n   python -c \"from orchestrator.db.migrate import run_migrations; run_migrations('/tmp/orch-uat.db')\"\n\n   You should see NO 'migration_applying' log line this time (the runner sees 0001 is already applied and skips). Only a final migrations_complete line.\n\n2. Count the rows in schema_migrations:\n   sqlite3 /tmp/orch-uat.db \"SELECT COUNT(*) FROM schema_migrations\"",
+    "expected": "Step 1: output contains 'migrations_complete' and does NOT contain 'migration_applying'.\n\nStep 2 prints exactly:\n   1\n\nPASS if count is 1; FAIL if 2 or higher (would indicate a duplicate apply)."
+  },
+  {
+    "id": 3, "feature": 1,
+    "title": "Strict mode — refuses to boot on unknown filesystem",
+    "steps": "This one is easier via the test suite than a live shell, because we need to inject the 'unknown' filesystem type.\n\n1. Run the single test case that exercises strict-mode refusal:\n   pytest tests/db/test_migrate.py::test_unknown_fstype_strict_mode_raises -v",
+    "expected": "Output ends with '1 passed' and shows PASSED on the test line.\n\nPASS if the test passes. FAIL if it errors or fails. (The test sets ORCH_REQUIRE_LOCAL_FS=strict and monkeypatches _detect_filesystem_type to return 'unknown', then asserts MigrationError is raised.)"
+  },
+  {
+    "id": 4, "feature": 1,
+    "title": "CHECKSUMS drift — tampered migration is detected",
+    "steps": "This scenario modifies a file briefly and then restores it. Do NOT commit between steps.\n\n1. Save an untouched copy of the migration:\n   cp src/orchestrator/db/migrations/0001_initial.sql /tmp/saved-0001.sql\n\n2. Tamper with the file by appending a comment:\n   echo '-- tampered for UAT' >> src/orchestrator/db/migrations/0001_initial.sql\n\n3. Remove any stale test DB:\n   rm -f /tmp/orch-uat-drift.db\n\n4. Try to run migrations. It should fail:\n   python -c \"from orchestrator.db.migrate import run_migrations; run_migrations('/tmp/orch-uat-drift.db')\"\n\n5. Restore the original file immediately:\n   cp /tmp/saved-0001.sql src/orchestrator/db/migrations/0001_initial.sql\n\n6. Verify the file is restored (no diff against git):\n   git diff --exit-code src/orchestrator/db/migrations/0001_initial.sql && echo RESTORED",
+    "expected": "Step 4 exits with a traceback ending in a MigrationError whose message contains 'checksum mismatch' and the text 'file=' and 'manifest='.\n\nStep 6 prints 'RESTORED' and exits 0.\n\nPASS if both: step 4 raised MigrationError AND step 6 restored cleanly. FAIL if step 4 succeeded silently (bug) or step 6 shows a diff (your file needs manual restore from git)."
+  },
+  {
+    "id": 5, "feature": 1,
+    "title": "Migration test suite passes (42 tests)",
+    "steps": "1. Run only the migration tests:\n   pytest tests/db/test_migrate.py -v",
+    "expected": "Last line of output reads '42 passed' and nothing failed/errored.\n\nPASS if 42 passed and 0 failed. FAIL otherwise."
+  },
+
+  /* ───────────────── Feature 2: ID3 logging ───────────────── */
+  {
+    "id": 6, "feature": 2,
+    "title": "Boot log emits valid JSON on stdout",
+    "steps": "1. Run a minimal one-liner that configures logging and emits a single event:\n   python -c \"from orchestrator.core import logging as l; l.configure_logging(); import structlog; structlog.get_logger().info('boot', version='0.1.0')\"\n\n2. Re-run with stdout piped through Python's JSON validator:\n   python -c \"from orchestrator.core import logging as l; l.configure_logging(); import structlog; structlog.get_logger().info('boot', version='0.1.0')\" | python -m json.tool",
+    "expected": "Step 1: exactly one line of output. Looks like JSON: { \"version\": \"0.1.0\", \"event\": \"boot\", \"timestamp\": \"2026-04-...\", \"level\": \"info\" }.\n\nStep 2: json.tool pretty-prints it without any 'invalid JSON' error and the output contains a line with \"event\": \"boot\".\n\nPASS if step 2 prints pretty-formatted JSON with all four keys (version, event, timestamp, level). FAIL if json.tool errors."
+  },
+  {
+    "id": 7, "feature": 2,
+    "title": "Redaction — password and api_key values are masked",
+    "steps": "1. Log a fake auth event with credential-shaped kwargs and pipe through grep for safety:\n   python -c \"from orchestrator.core import logging as l; l.configure_logging(); import structlog; structlog.get_logger().info('auth', password='hunter2', api_key='AKIA_FAKE', user='alice')\" | tee /tmp/orch-uat-redact.log\n\n2. Check that the secret values did NOT leak:\n   grep -q hunter2 /tmp/orch-uat-redact.log && echo LEAKED || echo CLEAN\n   grep -q AKIA_FAKE /tmp/orch-uat-redact.log && echo LEAKED || echo CLEAN\n\n3. Check that non-credential values DID pass through:\n   grep -q alice /tmp/orch-uat-redact.log && echo USER_PRESENT\n\n4. Clean up:\n   rm -f /tmp/orch-uat-redact.log",
+    "expected": "Step 1: output line contains \"password\": \"<redacted>\" and \"api_key\": \"<redacted>\" and \"user\": \"alice\".\n\nStep 2 prints:\n   CLEAN\n   CLEAN\n\nStep 3 prints:\n   USER_PRESENT\n\nPASS if all three (CLEAN, CLEAN, USER_PRESENT) appear. FAIL if either grep says LEAKED."
+  },
+  {
+    "id": 8, "feature": 2,
+    "title": "log_level='WARN' raises ValueError (no silent fallback)",
+    "steps": "1. Try to configure with an invalid level and check the exit code:\n   python -c \"from orchestrator.core import logging as l; l.configure_logging(log_level='WARN')\" ; echo \"exit=$?\"",
+    "expected": "Traceback ends with:\n   ValueError: log_level must be one of ['CRITICAL', 'DEBUG', 'ERROR', 'INFO', 'WARNING'], got 'WARN'\n\nFinal line prints:\n   exit=1\n\nPASS if ValueError is raised AND exit=1. FAIL if exit=0 (silent fallback, bug)."
+  },
+  {
+    "id": 9, "feature": 2,
+    "title": "request_context() clears contextvars even on exception",
+    "steps": "This test proves the context manager's finally block runs when the body raises.\n\n1. Enter a request_context, log inside, raise, and check that contextvars are empty afterwards. Copy this whole script into a file /tmp/uat9.py:\n\ncat > /tmp/uat9.py <<'PY'\nfrom orchestrator.core import logging as l\nimport structlog\nl.configure_logging()\ntry:\n    with l.request_context() as cid:\n        structlog.get_logger().info('inside', cid=cid)\n        raise RuntimeError('boom')\nexcept RuntimeError:\n    pass\nprint('---after:', structlog.contextvars.get_contextvars())\nPY\n\n2. Run it:\n   python /tmp/uat9.py\n\n3. Clean up:\n   rm /tmp/uat9.py",
+    "expected": "Step 2 prints:\n- One JSON line with \"event\": \"inside\" and a 32-char hex correlation_id.\n- The final line prints exactly:\n   ---after: {}\n\nPASS if final line is '---after: {}'. FAIL if it shows any correlation_id (would mean the finally block didn't clear)."
+  },
+  {
+    "id": 10, "feature": 2,
+    "title": "Logging test suite passes (55 tests)",
+    "steps": "1. Run only the logging tests:\n   pytest tests/core/test_logging.py -v",
+    "expected": "Last line of output reads '55 passed' and nothing failed/errored.\n\nPASS if 55 passed and 0 failed. FAIL otherwise."
+  },
+
+  /* ───────────────── Feature 3: Infrastructure ───────────────── */
+  {
+    "id": 11, "feature": 3,
+    "title": "Full project test suite + coverage report",
+    "steps": "1. Run the entire test suite with coverage measurement:\n   pytest --cov=src/orchestrator -q\n\n2. Read the 'TOTAL' line from the coverage report at the bottom.",
+    "expected": "Top of output ends with '112 passed' and no 'failed' or 'error' strings anywhere.\n\nBottom TOTAL line shows coverage ≥ 80% (baseline is 85%). Example shape:\n   TOTAL   265   40   88   11   85%\n\nPASS if 112 passed AND coverage ≥ 80%. FAIL if fewer tests, any failures, or coverage < 80%."
+  },
+  {
+    "id": 12, "feature": 3,
+    "title": "Build a wheel and verify packaged migrations are inside",
+    "steps": "1. Ensure the build tool is available (quick check — installs if missing):\n   pip show build >/dev/null 2>&1 || pip install --quiet build\n\n2. Build both sdist and wheel:\n   python -m build --sdist --wheel\n\n3. Inspect the wheel's packaged files:\n   unzip -l dist/lancache_orchestrator-0.1.0-py3-none-any.whl | grep -E 'migrations/0001|CHECKSUMS'",
+    "expected": "Step 2: ends with 'Successfully built lancache_orchestrator-0.1.0.tar.gz and lancache_orchestrator-0.1.0-py3-none-any.whl'.\n\nStep 3 prints two lines (order may vary):\n   ...  orchestrator/db/migrations/0001_initial.sql\n   ...  orchestrator/db/migrations/CHECKSUMS\n\nPASS if both files are present in the wheel. FAIL if either missing (means the package-data config is broken)."
+  },
+  {
+    "id": 13, "feature": 3,
+    "title": "Docker image builds from the digest-pinned base (OPTIONAL — requires Docker)",
+    "steps": "SKIP this scenario if you don't have a Docker daemon available. It's tested in CI as well.\n\n1. Check Docker is running:\n   docker info >/dev/null 2>&1 && echo DOCKER_OK || echo SKIP_DOCKER_UNAVAILABLE\n\n2. If DOCKER_OK above, build:\n   docker build -t lancache-orch:uat1 --build-arg GIT_SHA=$(git rev-parse --short HEAD) .\n\n3. Check image size (must be ≤ 250 MB):\n   docker image inspect lancache-orch:uat1 --format '{{.Size}}' | awk '{ mb=$1/1048576; printf \"%.1f MB\\n\", mb }'\n\n4. Check HEALTHCHECK is configured:\n   docker image inspect lancache-orch:uat1 --format '{{.Config.Healthcheck.Test}}'",
+    "expected": "Step 1: prints DOCKER_OK (continue) or SKIP_DOCKER_UNAVAILABLE (mark Skip).\n\nStep 2: ends with 'Successfully tagged lancache-orch:uat1'. Uses the pinned digest — you'll see 'sha256:520153e2' referenced during the pull.\n\nStep 3: a size under 250 MB (e.g., 'X.X MB' where X.X < 250).\n\nStep 4: prints a list that includes 'python' and '/api/v1/health'.\n\nPASS if steps 2/3/4 all succeed OR if step 1 said SKIP (click Skip instead). FAIL if Docker was available but build failed."
+  },
+
+  /* ───────────────── Feature 4: Agent pre-audit review ───────────────── */
+  {
+    "id": 14, "feature": 4,
+    "title": "Review the integration agent report",
+    "steps": "1. Open the integration report:\n   cat tests/uat/sessions/2026-04-22-session-1/agent-results/01-integration.md\n\n2. Skim the 'Checks' section — eight numbered checks. Confirm each says PASS.\n\n3. Skim the 'Integration concerns' section. These are low-severity notes, not blockers. Read them and decide whether any are worth filing as GH issues (use the Notes field below).",
+    "expected": "Report has a 'Checks' section with 8 numbered PASS lines, coverage shown at ≥ 80%, 112 tests passed, 'Ready-for-tester assessment' line is affirmative.\n\nPASS if all 8 checks read PASS and nothing says FAIL. FAIL if any check failed."
+  },
+  {
+    "id": 15, "feature": 4,
+    "title": "Review the adversarial agent report — triage the 7 new findings",
+    "steps": "1. Open the adversarial report:\n   cat tests/uat/sessions/2026-04-22-session-1/agent-results/02-adversarial.md\n\n2. Read the 'Findings — cross-feature interactions' section (3 findings) and 'Findings — infra hardening surfaces' section (4 findings). Total 7 findings, 4 SEV-3 + 3 SEV-4.\n\n3. For EACH of the 7 findings, decide one of:\n   - 'Fix now' (this session, before I start the next feature)\n   - 'Defer to issue' (file as GH issue for later)\n   - 'Won't fix' (accept the risk, note why)\n\n4. Write your triage decisions into the Notes field below, one line per finding.",
+    "expected": "Report clearly lists 7 findings, each with file:lineno evidence and a fix hint. Your triage decisions are recorded in the Notes field so the main agent can act on them in the remediation step.\n\nPASS if all 7 findings are triaged in your Notes. FAIL if the report is missing findings or has no evidence."
+  },
+  {
+    "id": 16, "feature": 4,
+    "title": "Review the docs-handoff agent report — decide what to refresh",
+    "steps": "1. Open the docs-handoff report:\n   cat tests/uat/sessions/2026-04-22-session-1/agent-results/03-docs-handoff.md\n\n2. Under 'Staleness in PROJECT_BIBLE / CLAUDE.md', the agent flagged ~5 items in PROJECT_BIBLE §5/§16 that are out-of-date (path references, rollback mentions, LoC count, non-existent event codes, Last Updated marker).\n\n3. Under 'Accuracy findings', the agent noted the ID1 audit file has line-number drift after the hardening pass — flagged as cosmetic only.\n\n4. Decide: should PROJECT_BIBLE.md be refreshed this session, or deferred? Record in Notes.",
+    "expected": "Report lists specific line/section references for each staleness item. Verdict near the bottom reads 'ship-ready for handoff' (or equivalent).\n\nPASS if staleness items are specific (line numbers, actual text references) and your refresh decision is in Notes. FAIL if the report is hand-wavy or cites no evidence."
+  }
+];
+
+function renderScenarios() {
+  scenarios.forEach(s => {
+    const container = document.getElementById('feature' + s.feature);
+    if (!container) return;
+    container.innerHTML += '<div class="scenario" id="scenario-' + s.id + '">' +
+      '<div class="scenario-header">' +
+        '<span class="scenario-num">' + s.id + '</span>' +
+        '<span class="scenario-title">' + s.title + '</span>' +
+        '<button class="toggle-details" onclick="toggleDetails(' + s.id + ')">details</button>' +
+        '<div class="btn-group">' +
+          '<button class="btn pass-btn" onclick="setResult(' + s.id + ',\'pass\',this)">Pass</button>' +
+          '<button class="btn fail-btn" onclick="setResult(' + s.id + ',\'fail\',this)">Fail</button>' +
+          '<button class="btn skip-btn" onclick="setResult(' + s.id + ',\'skip\',this)">Skip</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="scenario-details" id="details-' + s.id + '">' +
+        '<div class="steps"><strong>Steps:</strong><br>' + s.steps.replace(/\n/g,'<br>') + '</div>' +
+        '<div class="steps"><strong>Expected:</strong><br>' + s.expected + '</div>' +
+      '</div>' +
+      '<div class="scenario-notes">' +
+        '<textarea class="notes-input" id="notes-' + s.id + '" placeholder="Notes — observations, issues, anything worth recording"></textarea>' +
+      '</div>' +
+    '</div>';
+  });
+}
+
+const results = {};
+
+function setResult(id, result, btn) {
+  results[id] = result;
+  const sc = document.getElementById('scenario-' + id);
+  sc.className = 'scenario ' + (result === 'skip' ? '' : result);
+  sc.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  updateProgress();
+}
+
+function toggleDetails(id) {
+  document.getElementById('details-' + id).classList.toggle('open');
+}
+
+function updateProgress() {
+  const done = Object.keys(results).length;
+  const pct = (done / scenarios.length * 100).toFixed(0);
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent = done + ' / ' + scenarios.length + ' completed';
+}
+
+var bugCount = 0;
+// AGENT: Replace __FEATURE_OPTIONS__ (inside the addBug function below) with one
+// JS string fragment per feature being tested, concatenated into the select's innerHTML.
+// Example:
+//   '<option>7 - Mesh Repair</option><option>8 - Scale/Rotate/Mirror</option>'
+// The number must match the feature numbers used in __SCENARIOS_JSON__ and __FEATURE_SECTIONS__.
+function addBug() {
+  bugCount++;
+  var n = bugCount;
+  document.getElementById('bugs-list').innerHTML +=
+    '<div class="bug-entry" id="bug-' + n + '">' +
+      '<button class="remove-bug" onclick="document.getElementById(\'bug-' + n + '\').remove()">remove</button>' +
+      '<div class="bug-row">' +
+        '<div class="bug-field"><label>Severity</label><select id="bug-sev-' + n + '">' +
+          '<option>SEV-1 (crash/data loss)</option><option>SEV-2 (broken, workaround exists)</option>' +
+          '<option selected>SEV-3 (minor UX)</option><option>SEV-4 (polish/enhancement)</option>' +
+        '</select></div>' +
+        '<div class="bug-field"><label>Feature</label><select id="bug-feat-' + n + '">' +
+          '<option>1 - ID1 Migrations</option><option>2 - ID3 Logging</option><option>3 - Infrastructure</option><option>4 - Agent Pre-Audit</option>' +
+        '</select></div>' +
+      '</div>' +
+      '<div class="bug-field"><label>Description</label><input id="bug-desc-' + n + '" placeholder="What went wrong?"></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Steps to Reproduce</label><textarea id="bug-steps-' + n + '" placeholder="1. ...\n2. ...\n3. ..."></textarea></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Expected vs Actual</label><textarea id="bug-exp-' + n + '" placeholder="Expected: ...\nActual: ..."></textarea></div>' +
+    '</div>';
+}
+
+function exportResults() {
+  var tester = document.getElementById('tester-name').value || 'Unknown';
+  var md = '# ' + document.querySelector('h1').textContent + ' Results\n\n';
+  md += '**Date:** 2026-04-22\n';
+  md += '**Tester:** ' + tester + '\n';
+  md += '**Features:** ID1 migrations, ID3 logging, infrastructure hardening\n\n';
+
+  var pass = 0, fail = 0, skip = 0;
+  for (var k in results) {
+    if (results[k] === 'pass') pass++;
+    else if (results[k] === 'fail') fail++;
+    else if (results[k] === 'skip') skip++;
+  }
+  var untested = scenarios.length - Object.keys(results).length;
+  md += '**Summary:** ' + pass + ' passed, ' + fail + ' failed, ' + skip + ' skipped, ' + untested + ' not tested\n\n---\n\n';
+
+  md += '## Scenarios\n\n';
+  md += '| # | Scenario | Result | Notes |\n';
+  md += '|---|---|---|---|\n';
+  scenarios.forEach(function(s) {
+    var r = results[s.id] || 'not tested';
+    var icon = r === 'pass' ? 'PASS' : r === 'fail' ? 'FAIL' : r === 'skip' ? 'SKIP' : '-';
+    var el = document.getElementById('notes-' + s.id);
+    var notes = el ? el.value.replace(/\|/g, '/').replace(/\n/g, ' ').replace(/`/g, "'").replace(/\[/g, '(').replace(/\]/g, ')').replace(/\*/g, '-') : '';
+    md += '| ' + s.id + ' | ' + s.title + ' | ' + icon + ' | ' + notes + ' |\n';
+  });
+
+  var bugEntries = document.querySelectorAll('.bug-entry');
+  if (bugEntries.length > 0) {
+    md += '\n---\n\n## Bugs Found\n\n';
+    var i = 0;
+    bugEntries.forEach(function(el) {
+      i++;
+      var id = el.id.split('-')[1];
+      var sev = document.getElementById('bug-sev-' + id);
+      var feat = document.getElementById('bug-feat-' + id);
+      var desc = document.getElementById('bug-desc-' + id);
+      var steps = document.getElementById('bug-steps-' + id);
+      var exp = document.getElementById('bug-exp-' + id);
+      md += '### Bug ' + i + '\n';
+      md += '- **Severity:** ' + (sev ? sev.value : '') + '\n';
+      md += '- **Feature:** ' + (feat ? feat.value : '') + '\n';
+      md += '- **Description:** ' + (desc ? desc.value : '') + '\n';
+      md += '- **Steps:** ' + (steps ? steps.value.replace(/\n/g, '; ') : '') + '\n';
+      md += '- **Expected vs Actual:** ' + (exp ? exp.value.replace(/\n/g, '; ') : '') + '\n\n';
+    });
+  }
+
+  var overall = document.getElementById('overall-notes').value;
+  if (overall) {
+    md += '\n---\n\n## Overall Notes\n\n' + overall + '\n';
+  }
+
+  navigator.clipboard.writeText(md).then(function() {
+    var msg = document.getElementById('copy-msg');
+    msg.style.display = 'block';
+    setTimeout(function() { msg.style.display = 'none'; }, 3000);
+  });
+}
+
+renderScenarios();
+</script>
+</body>
+</html>
