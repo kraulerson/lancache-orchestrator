@@ -35,6 +35,13 @@ COPY --from=builder /build/src /app/src
 # Migrations ship as package data inside /app/src/orchestrator/db/migrations/ and
 # are loaded at runtime via importlib.resources. No separate COPY required.
 
+# The only persistent mount point. Declared as a VOLUME so operators running
+# with `--read-only` (recommended — PROJECT_BIBLE threat model) get a clean
+# error if they mount the filesystem read-only without also mounting this
+# path. Lets us safely add `--read-only` to the compose bundle later.
+# Addresses UAT-1 adversarial F7.
+VOLUME ["/var/lib/orchestrator"]
+
 WORKDIR /app
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

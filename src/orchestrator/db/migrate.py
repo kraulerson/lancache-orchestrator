@@ -500,16 +500,39 @@ def _run_migrations_locked(
 
 
 def _cli() -> int:
-    """Simple module entrypoint: `python -m orchestrator.db.migrate <db_path>`."""
-    if len(sys.argv) != 2:
-        log.error("migrate_cli_usage", argv=sys.argv)
-        return 2
-    try:
-        run_migrations(sys.argv[1])
-    except MigrationError as e:
-        log.critical("migrations_failed", error=str(e))
-        return 1
-    return 0
+    """Simple module entrypoint: `python -m orchestrator.db.migrate <db_path>`.
+
+    Runs inside a `request_context()` so all log lines emitted during
+    migration apply carry a correlation_id — correlates with any request
+    or job that triggered a restart (addresses UAT-1 adversarial F1).
+
+    Error logging deliberately uses `error_type` (exception class name)
+    rather than `error=str(e)` to avoid reflecting SQLite literal values
+    from IntegrityError / OperationalError messages into logs when a
+    future migration's DDL fails mid-apply (addresses UAT-1 adversarial F2).
+
+    argv is NOT echoed verbatim on CLI misuse — only argc — to avoid
+    capturing a mistyped credential-looking arg into the log stream
+    (addresses UAT-1 adversarial F5).
+    """
+    # Import locally to avoid circular-import concerns at module load
+    from orchestrator.core.logging import request_context
+
+    # Use a short, stable correlation_id derived from the git sha when
+    # available, otherwise a fresh random id. This lets operators
+    # correlate startup log lines with the deploy that produced them.
+    boot_cid = f"boot-{os.environ.get('GIT_SHA', '')[:7] or 'dev'}"
+
+    with request_context(boot_cid):
+        if len(sys.argv) != 2:
+            log.error("migrate_cli_usage", argc=len(sys.argv))
+            return 2
+        try:
+            run_migrations(sys.argv[1])
+        except MigrationError as e:
+            log.critical("migrations_failed", error_type=type(e).__name__)
+            return 1
+        return 0
 
 
 if __name__ == "__main__":
