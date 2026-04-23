@@ -17,7 +17,7 @@
 ### Created
 - `src/orchestrator/core/settings.py` — the module itself (~120 LoC)
 - `tests/core/conftest.py` — shared autouse isolation fixture
-- `tests/core/test_settings.py` — ~47 tests across 8 classes
+- `tests/core/test_settings.py` — ~48 tests across 8 classes
 - `docs/ADR documentation/0010-settings-module-design.md` — decision record
 
 ### Modified
@@ -71,9 +71,11 @@ Create `tests/core/conftest.py`:
 """Shared fixtures for orchestrator.core tests.
 
 Provides environment isolation so tests never inherit host-developer
-ORCH_* env vars or a project-root .env file. Every test starts from a
-clean slate; individual tests opt in to specific values via
-monkeypatch.setenv or explicit Settings(...) kwargs.
+ORCH_* env vars or a project-root .env file. Also resets structlog's
+pipeline around every test to match ID3's (test_logging.py) pattern so
+TestWarnings capture is deterministic. Every test starts from a clean
+slate; individual tests opt in to specific values via monkeypatch.setenv
+or explicit Settings(...) kwargs.
 """
 
 from __future__ import annotations
@@ -82,6 +84,7 @@ import os
 from pathlib import Path
 
 import pytest
+import structlog
 
 from orchestrator.core.settings import get_settings
 
@@ -92,22 +95,25 @@ VALID_TOKEN = "a" * 32  # 32-character minimum for ORCH_TOKEN
 @pytest.fixture(autouse=True)
 def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Scrub ORCH_* env vars, chdir to tmp_path (blocks host .env
-    discovery), and clear the get_settings() cache. Runs before every
-    test in tests/core/.
+    discovery), reset structlog, and clear the get_settings() cache.
+    Runs before every test in tests/core/.
     """
     for key in list(os.environ):
         if key.startswith("ORCH_"):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.chdir(tmp_path)
+    structlog.reset_defaults()
+    structlog.contextvars.clear_contextvars()
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+    structlog.reset_defaults()
+    structlog.contextvars.clear_contextvars()
 
 
 @pytest.fixture
 def secrets_dir(tmp_path: Path) -> Path:
     """Returns a freshly-created directory suitable for use as a
-    Settings(_secrets_dir=...) override or a
     monkeypatch.setitem(Settings.model_config, "secrets_dir", ...) target.
     """
     directory = tmp_path / "run_secrets"
@@ -155,9 +161,20 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from orchestrator.core import logging as log_mod
 from orchestrator.core.settings import Settings, get_settings, reload_settings
 
 from tests.core.conftest import VALID_TOKEN
+
+
+def _json_lines(captured_out: str) -> list[dict]:
+    """Parse structlog JSON output captured via capsys — mirrors
+    tests/core/test_logging.py helpers."""
+    return [
+        json.loads(line)
+        for line in captured_out.strip().split("\n")
+        if line.strip()
+    ]
 
 
 # ----------------------------------------------------------------------
@@ -373,44 +390,45 @@ class TestRedaction:
 # ----------------------------------------------------------------------
 
 class TestWarnings:
-    def test_shadow_warning_fires(self, monkeypatch, secrets_dir, caplog):
+    """Capture warnings via capsys + JSON parse, matching ID3's
+    tests/core/test_logging.py pattern. The structlog pipeline is
+    configured per-test via log_mod.configure_logging().
+    """
+
+    def test_shadow_warning_fires(self, monkeypatch, secrets_dir, capsys):
+        log_mod.configure_logging()
         (secrets_dir / "orchestrator_token").write_text("f" * 32)
         monkeypatch.setitem(Settings.model_config, "secrets_dir", str(secrets_dir))
         monkeypatch.setenv("ORCH_TOKEN", "e" * 32)
-        with caplog.at_level("WARNING"):
-            Settings()
-        assert any(
-            "secret_shadowed_by_env" in record.message or
-            "secret_shadowed_by_env" in getattr(record, "event", "")
-            for record in caplog.records
-        )
+        Settings()
+        events = [r.get("event") for r in _json_lines(capsys.readouterr().out)]
+        assert "config.secret_shadowed_by_env" in events
 
-    def test_non_loopback_host_warning_fires(self, caplog):
-        with caplog.at_level("WARNING"):
-            Settings(orchestrator_token=VALID_TOKEN, api_host="0.0.0.0")
-        assert any(
-            "api_bound_non_loopback" in record.message or
-            "api_bound_non_loopback" in getattr(record, "event", "")
-            for record in caplog.records
-        )
+    def test_non_loopback_host_warning_fires(self, capsys):
+        log_mod.configure_logging()
+        Settings(orchestrator_token=VALID_TOKEN, api_host="0.0.0.0")
+        events = [r.get("event") for r in _json_lines(capsys.readouterr().out)]
+        assert "config.api_bound_non_loopback" in events
 
-    def test_wildcard_cors_warning_fires(self, caplog):
-        with caplog.at_level("WARNING"):
-            Settings(orchestrator_token=VALID_TOKEN, cors_origins=["*"])
-        assert any(
-            "cors_wildcard" in record.message or
-            "cors_wildcard" in getattr(record, "event", "")
-            for record in caplog.records
-        )
+    def test_wildcard_cors_warning_fires(self, capsys):
+        log_mod.configure_logging()
+        Settings(orchestrator_token=VALID_TOKEN, cors_origins=["*"])
+        events = [r.get("event") for r in _json_lines(capsys.readouterr().out)]
+        assert "config.cors_wildcard" in events
 
-    def test_over_spike_f_concurrency_warning_fires(self, caplog):
-        with caplog.at_level("WARNING"):
-            Settings(orchestrator_token=VALID_TOKEN, chunk_concurrency=64)
-        assert any(
-            "chunk_concurrency_unvalidated" in record.message or
-            "chunk_concurrency_unvalidated" in getattr(record, "event", "")
-            for record in caplog.records
-        )
+    def test_over_spike_f_concurrency_warning_fires(self, capsys):
+        log_mod.configure_logging()
+        Settings(orchestrator_token=VALID_TOKEN, chunk_concurrency=64)
+        events = [r.get("event") for r in _json_lines(capsys.readouterr().out)]
+        assert "config.chunk_concurrency_unvalidated" in events
+
+    def test_no_warning_on_default_config(self, capsys):
+        """Negative case: a valid-token-only Settings with defaults
+        emits no config.* warnings."""
+        log_mod.configure_logging()
+        Settings(orchestrator_token=VALID_TOKEN)
+        events = [r.get("event") for r in _json_lines(capsys.readouterr().out)]
+        assert not any(e and e.startswith("config.") for e in events)
 
 
 # ----------------------------------------------------------------------
@@ -474,7 +492,7 @@ Default command for option A:
 ```bash
 git add tests/core/conftest.py tests/core/test_settings.py .claude/process-state.json .claude/tool-usage.json
 git commit -m "$(cat <<'EOF'
-test(core): ID4 settings — failing test suite (47 tests, 8 classes)
+test(core): ID4 settings — failing test suite (48 tests, 8 classes)
 
 Covers required fields, defaults across all 15 optional fields,
 field validators (boundaries + enum + regex rejections), source
@@ -537,6 +555,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
+import structlog
 from pydantic import (
     AliasChoices,
     Field,
@@ -545,8 +564,6 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from orchestrator.core.logging import get_logger
 
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -690,7 +707,7 @@ Append inside the `Settings` class, after `_strip_token`:
         states: secret shadowed by env, non-loopback api_host,
         wildcard CORS, over-Spike-F chunk concurrency.
         """
-        log = get_logger(__name__)
+        log = structlog.get_logger(__name__)
 
         # 1. Shadow warning — env and secret-file both set
         secrets_dir = self.model_config.get("secrets_dir")
@@ -738,7 +755,7 @@ If `test_shadow_warning_fires` fails, double-check the test uses `monkeypatch.se
 - [ ] **Step 1: Run full test suite**
 
 Run: `pytest tests/core/test_settings.py -v 2>&1 | tail -20`
-Expected: ~47 tests collected, all pass.
+Expected: ~48 tests collected, all pass.
 
 - [ ] **Step 2: Run coverage on settings.py**
 
@@ -794,8 +811,8 @@ Four @model_validator(mode="after") diagnostic warnings:
   - config.cors_wildcard ("*" in cors_origins)
   - config.chunk_concurrency_unvalidated (> Spike-F 32)
 
-47 tests passing, 100% branch coverage on settings.py.
-Full suite green (159 tests).
+48 tests passing, 100% branch coverage on settings.py.
+Full suite green (160 tests).
 
 Spec: docs/superpowers/specs/2026-04-23-id4-settings-module-design.md
 
@@ -980,7 +997,7 @@ Add under `[Unreleased]`:
 - `tests/core/conftest.py` shared autouse fixture (`_isolated_env`)
   scrubs `ORCH_*` env vars and chdirs to `tmp_path` to prevent
   host-developer environment leakage into tests.
-- `tests/core/test_settings.py` — 47 tests across 8 classes,
+- `tests/core/test_settings.py` — 48 tests across 8 classes,
   100% branch coverage on settings.py.
 
 ### Documentation
@@ -1216,7 +1233,7 @@ Per CLAUDE.md "Qdrant Persistent Memory" — save a single project memory. Use `
 Write a new file `~/.claude/projects/-Users-karl-Documents-Claude-Projects-lancache-orchestrator/memory/project_bl3_settings_complete.md` with frontmatter and body mirroring the qdrant-store content. Add a one-line entry to the local MEMORY.md index:
 
 ```
-- [BL3 settings complete](project_bl3_settings_complete.md) — ID4 shipped with 16 fields, 4 warnings, 47 tests at 100% coverage
+- [BL3 settings complete](project_bl3_settings_complete.md) — ID4 shipped with 16 fields, 4 warnings, 48 tests at 100% coverage
 ```
 
 - [ ] **Step 7: Commit any remaining framework state**
@@ -1259,7 +1276,7 @@ gh pr create --title "ID4 settings module — typed config + singleton + 4 warni
   --body "$(cat <<'EOF'
 ## Summary
 - Implements ID4 (BL3 of Milestone B): `src/orchestrator/core/settings.py` — the typed configuration module every later feature reads through.
-- 16 fields (1 SecretStr + 15 plain), `@lru_cache get_settings()`, four diagnostic warnings, 47 tests at 100% branch coverage.
+- 16 fields (1 SecretStr + 15 plain), `@lru_cache get_settings()`, four diagnostic warnings, 48 tests at 100% branch coverage.
 - Delivers ADR-0010, CHANGELOG entry, FEATURES.md Feature 3.
 - Files three follow-up issues (SEV-4 ID1 rewire, SEV-4 redaction test promotion, SEV-3 README section).
 
