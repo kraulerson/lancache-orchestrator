@@ -177,7 +177,14 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:ci
           build-args: GIT_SHA=${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Only WRITE to the GHA cache from first-party branches. A malicious
+          # fork PR that wrote to its own branch-scoped cache could poison
+          # subsequent builds of that fork branch with a tampered image layer,
+          # which a reviewing maintainer pulling locally would then execute.
+          # GHA scopes caches per ref by default, but gating cache-to on the
+          # head repo being this repo closes the remaining fork-PR vector.
+          # Addresses UAT-1 adversarial F4.
+          cache-to: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'type=gha,mode=max' || '' }}
 
       - name: Verify image size (amd64)
         run: |
@@ -193,6 +200,14 @@ jobs:
       # arm64-specific regressions (wheel availability, architecture-
       # specific code paths) before release-tag time. DXP4800 NAS is the
       # primary production target, so arm64 must stay green on every PR.
+      #
+      # Caveat (UAT-1 adversarial F6): QEMU user-mode emulation does NOT
+      # cover all ISA-specific behavior. Memory ordering, mmap alignment
+      # (relevant to SQLite `mmap_size`), and some syscall semantics differ
+      # between emulated and native arm64. A periodic native-arm64 smoke
+      # job (self-hosted runner or a tag-time GitHub-hosted arm64 runner
+      # when available) should land before any production deployment.
+      # Tracked in ADR-0009 / ADR-0008 trade-offs sections.
       - name: Build image (linux/arm64, verify-only)
         uses: docker/build-push-action@v6
         with:
@@ -202,7 +217,8 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:ci-arm64
           build-args: GIT_SHA=${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Fork-PR cache-poisoning gate (see amd64 note above for rationale).
+          cache-to: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'type=gha,mode=max' || '' }}
 
   # ── Governance (framework — do not remove) ───────────────────
   governance:

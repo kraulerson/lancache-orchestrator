@@ -1,0 +1,58 @@
+# Dependabot config — automated version updates for ecosystems we pin.
+#
+# Scope (UAT-1 adversarial F3):
+# - docker: the runtime base image is digest-pinned to
+#   python:3.12-slim@sha256:520153e2…  Without this config, we never pick
+#   up OS-layer CVEs in the base (glibc/openssl/zlib/etc.) because
+#   pip-audit only sees Python-level deps. Weekly refresh lands as a PR
+#   for review; the tester still owns the merge decision.
+# - github-actions: action versions drift rapidly; pin + auto-update.
+# - pip: the lockfile is already hash-pinned via pip-compile; a weekly
+#   Dependabot refresh surfaces upstream security patches.
+
+version: 2
+
+updates:
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "area:infra"
+    commit-message:
+      prefix: "chore(docker)"
+      include: "scope"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "area:ci"
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "04:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
