@@ -13,6 +13,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,6 +73,16 @@ _CREATE_TABLE_RE = re.compile(
     r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)",
     re.IGNORECASE,
 )
+
+# Process-local lock to serialize concurrent `run_migrations` callers within
+# the same Python process. SQLite's busy_timeout alone was observed to be
+# flaky under threaded concurrent apply on macOS APFS (UAT-1, 2026-04-23):
+# `PRAGMA journal_mode = WAL` can race even with timeout set, yielding
+# OperationalError('database is locked'). The current threat model
+# (ADR-0001: single-container, single-process) makes a process-local lock
+# sufficient. Multi-process safety would require `fcntl.flock` on the
+# database path — future work when multi-container deployment is in scope.
+_RUNNER_LOCK = threading.Lock()
 
 
 class MigrationError(Exception):
@@ -382,6 +393,20 @@ def run_migrations(
             checksum drift (applied or unapplied), missing manifest entry,
             migration gap, post-apply sanity failure, SQL error during apply.
     """
+    # Serialize same-process callers via the module-level lock. Without this,
+    # concurrent threads racing through the pre-BEGIN PRAGMAs (especially
+    # journal_mode = WAL conversion) can hit SQLITE_BUSY/LOCKED that
+    # busy_timeout does not uniformly retry. Per ADR-0001 the runtime is
+    # single-process; inter-process multi-container safety is future work
+    # tracked separately.
+    with _RUNNER_LOCK:
+        _run_migrations_locked(db_path, migrations_dir)
+
+
+def _run_migrations_locked(
+    db_path: str | os.PathLike[str],
+    migrations_dir: Path | None,
+) -> None:
     db_path = Path(db_path)
     _assert_local_filesystem(db_path)
 
@@ -397,14 +422,22 @@ def run_migrations(
     # starts a real transaction and the DDL inside it doesn't auto-commit.
     conn = sqlite3.connect(db_path, isolation_level=None)
     try:
-        # PRAGMAs that must run outside any transaction.
+        # busy_timeout MUST be the first PRAGMA: it applies to every
+        # subsequent statement on this connection, including the
+        # journal_mode = WAL conversion below. Without it set first, a
+        # second concurrent runner racing through `PRAGMA journal_mode`
+        # hits the WAL-conversion lock and raises OperationalError
+        # ("database is locked") with no retry — regression discovered
+        # in UAT-1 (2026-04-23).
+        conn.execute("PRAGMA busy_timeout = 5000")
+
+        # Remaining PRAGMAs that must run outside any transaction.
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA temp_store = MEMORY")
         conn.execute("PRAGMA mmap_size = 268435456")
         conn.execute("PRAGMA cache_size = -32000")
-        conn.execute("PRAGMA busy_timeout = 5000")  # concurrent runner wait
 
         conn.execute(_META_DDL)
 
