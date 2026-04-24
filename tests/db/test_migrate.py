@@ -488,6 +488,29 @@ def test_unknown_fstype_strict_mode_raises(
         migrate.run_migrations(db_path, migrations_dir=migs_dir)
 
 
+def test_strict_mode_read_via_settings_not_direct_env(
+    one_valid_migration: Path,
+    migs_dir: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #23 regression: migrate.py reads require_local_fs from
+    get_settings() — not directly from os.environ. This test proves it
+    by setting an invalid Literal value for require_local_fs via env;
+    the typed Settings field rejects it at construction. If migrate.py
+    were still reading os.environ.get(...).strip().lower(), an invalid
+    value would silently fall through to the 'not strict' branch and
+    the test would pass for the wrong reason.
+    """
+    monkeypatch.setattr(migrate, "_detect_filesystem_type", lambda _p: "unknown")
+    monkeypatch.setenv("ORCH_REQUIRE_LOCAL_FS", "MAYBE-STRICT-TOTALLY-INVALID")
+
+    # Settings construction inside _assert_local_filesystem must raise
+    # because MAYBE-STRICT-TOTALLY-INVALID isn't in Literal["strict","warn","off"].
+    with pytest.raises(ValueError):
+        migrate.run_migrations(db_path, migrations_dir=migs_dir)
+
+
 def test_post_apply_sanity_failure_rolls_back(
     one_valid_migration: Path,
     migs_dir: Path,
