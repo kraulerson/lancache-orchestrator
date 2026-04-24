@@ -79,6 +79,38 @@ for handoff clarity. Categories are ordered by impact severity.
   the logging audit trail.
 - ADR-0009 documents the scoped-context / reserved-key / redaction /
   log-level-validation decisions.
+- `src/orchestrator/core/settings.py` (ID4) — typed application configuration
+  via pydantic-settings `BaseSettings`. 16 fields covering API (`api_host`,
+  `api_port`, `cors_origins`, `log_level`, `orchestrator_token`), database
+  (`database_path`, `require_local_fs`), platform sessions
+  (`steam_session_path`, `epic_session_path`), Lancache cache topology
+  (`lancache_nginx_cache_path`, `cache_slice_size_bytes`, `cache_levels`,
+  `chunk_concurrency`), and miscellaneous (`manifest_size_cap_bytes`,
+  `epic_refresh_buffer_sec`, `steam_upstream_silent_days`). Defaults
+  sourced from Bible §7.2/§7.3/§9, Spike F, and the Lancache deployment
+  params memory.
+- `orchestrator.core.settings.get_settings()` — `@lru_cache` singleton
+  accessor. `reload_settings()` provided as a test / SIGHUP escape hatch.
+- Four diagnostic `@model_validator(mode="after")` warnings:
+  `config.secret_shadowed_by_env` (env and `/run/secrets` both set),
+  `config.api_bound_non_loopback` (`api_host` isn't loopback),
+  `config.cors_wildcard` (`"*"` in `cors_origins`),
+  `config.chunk_concurrency_unvalidated` (`chunk_concurrency > 32`, the
+  Spike F gate ceiling).
+- `tests/core/conftest.py` — shared autouse `_isolated_env` fixture that
+  scrubs `ORCH_*` env vars, chdirs to `tmp_path` (blocks host `.env`
+  discovery), resets structlog defaults + contextvars (matching the ID3
+  test pattern), and clears the `get_settings()` cache before and after
+  every test in `tests/core/`.
+- `tests/core/test_settings.py` (67 tests) — full coverage of required
+  fields, the 15 optional defaults, field validators, source precedence,
+  secret-loading paths, 5-shape × 3-serialization redaction parametrize,
+  4 warnings + 1 negative case, singleton behavior, and 2 SEV-2
+  regression tests (pickle-block, ValidationError scrubbing).
+- `docs/security-audits/id4-settings-security-audit.md` records the
+  audit trail.
+- ADR-0010 documents the flat-layout / source-order / singleton /
+  redaction-layer / validation-scope decisions.
 
 ### Changed
 - `run_migrations()` rewritten: explicit `BEGIN IMMEDIATE` wraps the whole
@@ -111,6 +143,16 @@ for handoff clarity. Categories are ordered by impact severity.
   `otp_code` / `creds_list` etc. shapes because Python `\b` uses `\w`
   boundaries and `_` is `\w`. Replaced with letter-class boundaries.
   **Caught and fixed before ship** by the BL2 re-audit pass. (Re-audit N3)
+- Settings module redaction primitives: `SecretStr` is supplemented by
+  a `__reduce__` override that blocks pickling (pydantic's default
+  pickler serialises `_secret_value` cleartext, which any future DX
+  sugar like multiprocessing task args or Celery would write to an
+  attacker-readable queue). `Settings.__init__` intercepts pydantic's
+  `ValidationError` for token-field failures and re-raises as
+  `ValueError` with a scrubbed message — pydantic core otherwise
+  echoes the raw rejected token in `input_value`, which a rotation-
+  failure startup would land in the systemd journal. **Caught and
+  fixed before ship** by the BL3 re-audit pass. (Audit A1 + A2)
 
 ### Removed
 - `migrations/0001_initial_down.sql` and all doc references to
@@ -136,8 +178,13 @@ for handoff clarity. Categories are ordered by impact severity.
 - New ADR: [`ADR-0008 — Migration Runner Architecture`](docs/ADR%20documentation/0008-migration-runner-architecture.md).
 - New ADR: [`ADR-0009 — Logging Framework Architecture`](docs/ADR%20documentation/0009-logging-framework-architecture.md).
 - New audit artifacts:
-  `docs/security-audits/id1-sqlite-migrations-security-audit.md` and
-  `docs/security-audits/id3-structured-logging-security-audit.md`.
-- FEATURES.md now documents Feature 1 (ID1 migrations) and Feature 2
-  (ID3 structured logging) with links, known limitations, and test-coverage
-  summaries.
+  `docs/security-audits/id1-sqlite-migrations-security-audit.md`,
+  `docs/security-audits/id3-structured-logging-security-audit.md`, and
+  `docs/security-audits/id4-settings-security-audit.md`.
+- FEATURES.md now documents Feature 1 (ID1 migrations), Feature 2
+  (ID3 structured logging), and Feature 3 (ID4 settings module) with
+  links, known limitations, and test-coverage summaries.
+- New ADR: [`ADR-0010 — Settings Module Design`](docs/ADR%20documentation/0010-settings-module-design.md).
+- Design spec at `docs/superpowers/specs/2026-04-23-id4-settings-module-design.md`
+  and implementation plan at `docs/superpowers/plans/2026-04-23-id4-settings-module.md`
+  record the 14-decision brainstorm and 11-task execution trail for BL3.

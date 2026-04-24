@@ -65,4 +65,59 @@ will follow once the API layer boots the logger at startup.
 
 ---
 
+## Feature 3: ID4 — Settings Module
+
+**Phase Built:** 2 (Milestone B, Build Loop 3)
+**Status:** Complete (2026-04-23)
+**Summary:** Typed application configuration via pydantic-settings `BaseSettings`.
+16 flat fields spanning API, database, platform sessions, Lancache cache
+topology, and miscellaneous tunables. The single `SecretStr` field
+(`orchestrator_token`) loads from env (`ORCH_TOKEN`) or Docker secret
+(`/run/secrets/orchestrator_token`) via `AliasChoices`, whitespace-stripped
+with a min-length-32 invariant. `@lru_cache` singleton accessor
+(`get_settings()`) avoids import-time side effects; `reload_settings()` is the
+test / SIGHUP escape hatch. A post-init `@model_validator` emits four
+diagnostic WARNINGs (secret shadowed by env, non-loopback bind, wildcard
+CORS, over-Spike-F chunk concurrency). Three defense-in-depth layers around
+the token: `SecretStr` default censoring, `__reduce__` override blocking
+pickle leaks, and `__init__` wrapper scrubbing `ValidationError.input_value`
+on token-field failures.
+**Key Interfaces:**
+  - `src/orchestrator/core/settings.py` — `Settings`, `get_settings()`, `reload_settings()`
+  - Env vars (`ORCH_` prefix, 16 total): `ORCH_TOKEN`, `ORCH_API_HOST`,
+    `ORCH_API_PORT`, `ORCH_CORS_ORIGINS`, `ORCH_LOG_LEVEL`,
+    `ORCH_DATABASE_PATH`, `ORCH_REQUIRE_LOCAL_FS`, `ORCH_STEAM_SESSION_PATH`,
+    `ORCH_EPIC_SESSION_PATH`, `ORCH_LANCACHE_NGINX_CACHE_PATH`,
+    `ORCH_CACHE_SLICE_SIZE_BYTES`, `ORCH_CACHE_LEVELS`,
+    `ORCH_CHUNK_CONCURRENCY`, `ORCH_MANIFEST_SIZE_CAP_BYTES`,
+    `ORCH_EPIC_REFRESH_BUFFER_SEC`, `ORCH_STEAM_UPSTREAM_SILENT_DAYS`
+  - Docker secret file (alias for `ORCH_TOKEN`): `/run/secrets/orchestrator_token`
+**Related ADRs:**
+  - [`ADR-0010 — Settings Module Design`](ADR%20documentation/0010-settings-module-design.md)
+**Test Coverage:** Unit — 67 tests in `tests/core/test_settings.py` with
+100% branch coverage on `settings.py` (79 statements, 18 branches). Covers
+required fields, 15 optional defaults, field validators (boundaries + enum
++ regex rejections), source precedence (init > env > .env > secrets >
+default), secret-loading, 5-shape × 3-serialization redaction parametrize
+(15 assertions), all 4 warnings + 1 negative case, singleton behavior, and
+2 SEV-2 regression tests (pickle-block, ValidationError scrubbing).
+Integration coverage will follow once BL4 DB pool and BL5 FastAPI layer
+consume `get_settings()` at startup.
+**Known Limitations:**
+  - ID1's migration runner still reads `ORCH_REQUIRE_LOCAL_FS` directly
+    via `os.environ.get()` rather than `get_settings().require_local_fs`.
+    Tracked as SEV-4 follow-up ([BL3-ID1-rewire]).
+  - Only `orchestrator_token` is `SecretStr`. When F1/F2 platform auth
+    adds a second `SecretStr` field, the 3 redaction tests will be
+    promoted to parameterize over every declared `SecretStr` field.
+    Tracked as SEV-4 follow-up ([BL3-redaction-introspection]).
+  - No CLI `config show` command yet (Bible §9 says the CLI will have one).
+    Deferred to BL-later once the CLI is wired.
+  - pydantic-settings emits `UserWarning: directory "/run/secrets" does
+    not exist` ~60×/suite-run when tests construct `Settings` without
+    overriding `secrets_dir`. Candidate for a `filterwarnings` entry in
+    pyproject.toml ([BL3-warnings-filter]).
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->
