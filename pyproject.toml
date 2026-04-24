@@ -77,6 +77,14 @@ ignore_errors = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# pydantic-settings emits this warning on every Settings() construction when
+# the configured secrets_dir ('/run/secrets') isn't present on the host.
+# That's correct behavior in Docker but pure noise in the test environment,
+# where tests never rely on production secret mounts. Silenced per-message
+# to avoid masking unrelated UserWarnings.
+filterwarnings = [
+    'ignore:directory "/run/secrets" does not exist:UserWarning',
+]
 
 # --- coverage ---
 [tool.coverage.run]

@@ -60,7 +60,7 @@ All findings verified empirically by the Orchestrator before triage.
 ## Tooling hygiene follow-ups (SEV-4, not audit findings)
 
 - **Bandit not installed in venv.** Phase 2.4 checklist expects bandit availability; recommend adding to dev dependencies.
-- **Bible §10.3 drift.** Text says "7 custom rules under `.semgrep/`"; repo actually ships a single `orchestrator-rules.yaml` file containing 7 rules. Worth a one-line Bible edit on the next doc pass.
+- ~~**Bible §10.3 drift.**~~ **Retracted 2026-04-24 (#26 triage).** Re-reading Bible §10.3, it lists 7 rules in a table but does not claim "7 rules under `.semgrep/`" meaning "7 files." The claim was an SAST sub-agent misreading; no Bible edit is needed. The `.semgrep/orchestrator-rules.yaml` file with 7 rules matches the Bible's table row count exactly.
 - **`pydantic-settings` UserWarning spam.** Every test that constructs `Settings()` without overriding `secrets_dir` emits `UserWarning: directory "/run/secrets" does not exist` (60+ per suite run). Candidate for `filterwarnings` in pyproject.toml.
 
 ## Decision
@@ -70,7 +70,7 @@ All findings verified empirically by the Orchestrator before triage.
 ## Follow-up tracking
 
 - SEV-4 — bandit install in dev venv (tooling hygiene)
-- SEV-4 — Bible §10.3 Semgrep count wording drift
+- ~~SEV-4 — Bible §10.3 Semgrep count wording drift~~ (retracted — SAST agent misread; see Non-findings section)
 - SEV-4 — pydantic-settings UserWarning filter in pyproject.toml
 - SEV-4 — Rewire ID1 migration runner to read `require_local_fs` from `get_settings()` (tracked as BL3 doc follow-up, separate from this audit)
 
