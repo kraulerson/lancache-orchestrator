@@ -37,7 +37,10 @@ def _json_lines(captured_out: str) -> list[dict]:
 
 class TestRequiredFields:
     def test_missing_token_raises(self):
-        with pytest.raises(ValidationError) as exc_info:
+        # Token-related validation errors are re-raised as ValueError
+        # (not pydantic's ValidationError) to scrub input echo. See
+        # Settings.__init__ in settings.py.
+        with pytest.raises(ValueError) as exc_info:
             Settings()
         msg = str(exc_info.value).lower()
         assert "orchestrator_token" in msg or "token" in msg
@@ -88,7 +91,7 @@ class TestDefaults:
 
 class TestFieldValidators:
     def test_token_too_short_rejects(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValueError):
             Settings(orchestrator_token="a" * 31)
 
     def test_token_exactly_32_accepts(self):
@@ -100,7 +103,7 @@ class TestFieldValidators:
         assert s.orchestrator_token.get_secret_value() == "x" * 32
 
     def test_token_with_whitespace_below_32_after_strip_rejects(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValueError):
             Settings(orchestrator_token="  " + "x" * 30 + "  ")
 
     def test_token_passed_as_secretstr_is_stripped(self):
@@ -109,6 +112,32 @@ class TestFieldValidators:
         raw = "  " + "y" * 32 + "\n"
         s = Settings(orchestrator_token=SecretStr(raw))
         assert s.orchestrator_token.get_secret_value() == "y" * 32
+
+    def test_short_token_validation_error_does_not_echo_raw(self):
+        """SEV-2 regression: pydantic's ValidationError.input_value
+        echoes the raw rejected value unconditionally. On a startup
+        failure during token rotation, that candidate token would
+        land in logs. Settings.__init__ intercepts token-related
+        ValidationErrors and re-raises as ValueError with a scrubbed
+        message, closing the leak at the entry boundary."""
+        raw = "NEVER_APPEAR_IN_LOGS_25CHAR"  # 27 chars — below 32 min
+        with pytest.raises(ValueError) as exc_info:
+            Settings(orchestrator_token=raw)
+        err_str = str(exc_info.value)
+        assert raw not in err_str, f"raw token leaked to ValueError: {err_str}"
+
+    def test_settings_not_pickleable(self):
+        """SEV-2 regression: pydantic.SecretStr's _secret_value attribute
+        pickles the raw token. A future code path that pickles Settings
+        (multiprocessing, Celery task args, on-disk cache) would write
+        the cleartext to an attacker-readable location. We block this
+        primitive by raising TypeError on pickling.
+        """
+        import pickle
+
+        s = Settings(orchestrator_token=VALID_TOKEN)
+        with pytest.raises(TypeError, match="not pickle-safe"):
+            pickle.dumps(s)
 
     def test_api_port_zero_rejects(self):
         with pytest.raises(ValidationError):
@@ -209,7 +238,8 @@ class TestSecretLoading:
         assert s.orchestrator_token.get_secret_value() == "f" * 32
 
     def test_both_missing_raises(self):
-        with pytest.raises(ValidationError):
+        # Token-field errors re-raise as ValueError; see Settings.__init__.
+        with pytest.raises(ValueError):
             Settings()
 
 

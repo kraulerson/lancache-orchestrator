@@ -24,6 +24,7 @@ from pydantic import (
     AliasChoices,
     Field,
     SecretStr,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -44,10 +45,14 @@ class Settings(BaseSettings):
     )
 
     # --- Core / API --------------------------------------------------
+    # NOTE: length constraint is enforced via _check_token_length (mode="after"),
+    # not Field(min_length=32). Rationale: pydantic's core min_length echoes the
+    # rejected raw string in ValidationError.input, which would leak a
+    # candidate token to logs on a rotation-failure startup (SEV-2).
+    # Running the check on the SecretStr object keeps the error payload redacted.
     orchestrator_token: SecretStr = Field(
         ...,
         validation_alias=AliasChoices("ORCH_TOKEN", "orchestrator_token"),
-        min_length=32,
     )
     api_host: str = Field(default="127.0.0.1", min_length=1)
     api_port: int = Field(default=8765, ge=1, le=65535)
@@ -84,12 +89,58 @@ class Settings(BaseSettings):
     @field_validator("orchestrator_token", mode="before")
     @classmethod
     def _strip_token(cls, v: Any) -> Any:
-        """Strip whitespace before min_length runs. Bible §7.3."""
+        """Strip whitespace before the length check. Bible §7.3."""
         if isinstance(v, SecretStr):
             return SecretStr(v.get_secret_value().strip())
         if isinstance(v, str):
             return v.strip()
         return v  # pragma: no cover — defensive fallthrough for unexpected input types
+
+    @field_validator("orchestrator_token", mode="after")
+    @classmethod
+    def _check_token_length(cls, v: SecretStr) -> SecretStr:
+        """Enforce minimum length on the SecretStr object (not the raw
+        string). pydantic's error payload carries the SecretStr's
+        redacted form, not the raw rejected value. Bible §7.3.
+        """
+        if len(v.get_secret_value()) < 32:
+            raise ValueError(
+                "orchestrator_token must be at least 32 characters after whitespace stripping"
+            )
+        return v
+
+    def __init__(__pydantic_self__, **kwargs: Any) -> None:  # noqa: N805 — matches BaseSettings convention to avoid field-name collisions
+        """Wrap pydantic's ValidationError so that errors involving
+        the orchestrator_token field don't echo the raw rejected value
+        in the exception's input_value field (SEV-2). pydantic's core
+        unconditionally tracks the input into ValidationError; we
+        intercept at construction and re-raise token-related failures
+        as ValueError with a scrubbed message. Non-token field errors
+        propagate as the original ValidationError unchanged.
+        """
+        try:
+            super().__init__(**kwargs)
+        except ValidationError as e:
+            token_errors = [
+                err
+                for err in e.errors()
+                if any("token" in str(loc).lower() for loc in err.get("loc", ()))
+            ]
+            if token_errors:
+                msgs = "; ".join(err.get("msg", "unknown error") for err in token_errors)
+                raise ValueError(f"orchestrator_token validation failed: {msgs}") from None
+            raise
+
+    def __reduce__(self) -> Any:
+        """Block pickling. SecretStr's default __reduce__ serialises
+        the raw secret in _secret_value, so pickling a Settings
+        instance writes the cleartext token into the pickle stream —
+        which any future code path that pickles Settings (multiprocessing
+        task args, on-disk cache, Celery) would persist to an
+        attacker-readable location. Explicit TypeError forces callers
+        to re-read config from source via get_settings().
+        """
+        raise TypeError("Settings is not pickle-safe — re-read via get_settings()")
 
     @model_validator(mode="after")
     def _emit_config_warnings(self) -> Settings:
