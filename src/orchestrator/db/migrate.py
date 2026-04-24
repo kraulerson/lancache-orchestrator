@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from orchestrator.core.settings import get_settings
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from importlib.resources.abc import Traversable
@@ -151,9 +153,10 @@ def _assert_local_filesystem(db_path: Path) -> None:
     in a stripped container, or `stat` missing on the host):
     - By default: emit a structured warning and proceed. The operator may be on
       a perfectly local filesystem that just isn't probed by either path.
-    - If env var `ORCH_REQUIRE_LOCAL_FS=strict`: refuse to boot. Use this in
-      deployments where silent WAL corruption is strictly worse than a startup
-      failure (e.g., DXP4800 NAS with network-attached storage in the topology).
+    - If `Settings.require_local_fs == "strict"` (env `ORCH_REQUIRE_LOCAL_FS=strict`):
+      refuse to boot. Use this in deployments where silent WAL corruption is
+      strictly worse than a startup failure (e.g., DXP4800 NAS with network-
+      attached storage in the topology).
     """
     fstype = _detect_filesystem_type(db_path)
     if fstype in _NETWORK_FSTYPES:
@@ -163,8 +166,10 @@ def _assert_local_filesystem(db_path: Path) -> None:
             f"Move the DB to a local disk or mount.",
         )
     if fstype == "unknown":
-        mode = os.environ.get("ORCH_REQUIRE_LOCAL_FS", "").strip().lower()
-        if mode == "strict":
+        # Read via the typed Settings singleton (BL3 rewire, issue #23).
+        # Field constraint Literal["strict","warn","off"] is enforced at
+        # construction, so no manual normalization is needed here.
+        if get_settings().require_local_fs == "strict":
             raise MigrationError(
                 f"filesystem type for {db_path} could not be determined and "
                 f"ORCH_REQUIRE_LOCAL_FS=strict is set. Refusing to boot to "
