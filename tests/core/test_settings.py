@@ -103,6 +103,13 @@ class TestFieldValidators:
         with pytest.raises(ValidationError):
             Settings(orchestrator_token="  " + "x" * 30 + "  ")
 
+    def test_token_passed_as_secretstr_is_stripped(self):
+        from pydantic import SecretStr
+
+        raw = "  " + "y" * 32 + "\n"
+        s = Settings(orchestrator_token=SecretStr(raw))
+        assert s.orchestrator_token.get_secret_value() == "y" * 32
+
     def test_api_port_zero_rejects(self):
         with pytest.raises(ValidationError):
             Settings(orchestrator_token=VALID_TOKEN, api_port=0)
@@ -216,7 +223,7 @@ REDACTION_TOKEN_SHAPES = [
     pytest.param("0123456789abcdef" * 4, id="hex"),
     pytest.param("Zm9vYmFyYmF6" + "=" * 20, id="base64-padding"),
     pytest.param("x" * 16 + "\n" + "y" * 16, id="embedded-newline"),
-    pytest.param("🔒secret-ünïcödé-token-padded-00", id="unicode"),
+    pytest.param("🔒secret-ünïcödé-token-padded-000", id="unicode"),
 ]
 
 
@@ -290,6 +297,17 @@ class TestWarnings:
         Settings(orchestrator_token=VALID_TOKEN)
         events = [r.get("event") for r in _json_lines(capsys.readouterr().out)]
         assert not any(e and e.startswith("config.") for e in events)
+
+    def test_shadow_check_skipped_when_secrets_dir_is_none(self, monkeypatch, capsys):
+        """Covers the defensive branch in _emit_config_warnings where
+        model_config has no secrets_dir set. Must not raise or emit
+        config.secret_shadowed_by_env even with ORCH_TOKEN in env."""
+        log_mod.configure_logging()
+        monkeypatch.setitem(Settings.model_config, "secrets_dir", None)
+        monkeypatch.setenv("ORCH_TOKEN", "e" * 32)
+        Settings()
+        events = [r.get("event") for r in _json_lines(capsys.readouterr().out)]
+        assert "config.secret_shadowed_by_env" not in events
 
 
 # ----------------------------------------------------------------------
