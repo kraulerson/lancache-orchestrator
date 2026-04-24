@@ -28,10 +28,12 @@ rules:
     paths:
       exclude:
         - "**/db/migrate.py"
+        - "tests/db/test_migrate.py"
     message: >
       Do not use synchronous `sqlite3` (ADR-0001, DQ3).
       Use `aiosqlite` for all database access.
-      Exception: db/migrate.py runs synchronously at container startup.
+      Exception: db/migrate.py runs synchronously at container startup;
+      tests for it necessarily import sqlite3 to assert on DB state.
     languages: [python]
     severity: ERROR
 
@@ -85,6 +87,13 @@ rules:
           - pattern: $LOG.error(..., orchestrator_token=..., ...)
           - pattern: $LOG.debug(..., orchestrator_token=..., ...)
           - pattern: $LOG.critical(..., orchestrator_token=..., ...)
+    paths:
+      exclude:
+        # Redaction tests verify the processor by logging literal credential-
+        # named kwargs and asserting the value is replaced with <redacted>.
+        # The rule's intent is to catch credential leaks in production code,
+        # not to block the redactor's own regression tests.
+        - "tests/core/test_logging.py"
     message: >
       Do not log credentials (TM-012). Use redacted summaries
       (e.g., `token_sha256_prefix`) instead of raw values.

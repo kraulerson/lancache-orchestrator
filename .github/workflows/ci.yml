@@ -151,7 +151,7 @@ jobs:
           --allow-only="MIT;MIT License;MIT OR Apache-2.0;BSD License;BSD-2-Clause;BSD-3-Clause;Apache Software License;Apache Software License; MIT License;Apache-2.0;Apache-2.0 OR BSD-2-Clause;PSF License;PSF-2.0;ISC License (ISCL);Mozilla Public License 2.0 (MPL 2.0);Python Software Foundation License;The Unlicense (Unlicense)"
           --fail-on="GNU General Public License (GPL);GNU Affero General Public License v3 (AGPLv3)"
 
-  # ── Build: Docker image ──────────────────────────────────────
+  # ── Build: Docker image (amd64 native + arm64 emulated) ──────
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -159,21 +159,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up QEMU (arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image
+      - name: Build image (linux/amd64, loaded for size check)
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
           load: true
+          platforms: linux/amd64
           tags: ${{ env.IMAGE_NAME }}:ci
           build-args: GIT_SHA=${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Only WRITE to the GHA cache from first-party branches. A malicious
+          # fork PR that wrote to its own branch-scoped cache could poison
+          # subsequent builds of that fork branch with a tampered image layer,
+          # which a reviewing maintainer pulling locally would then execute.
+          # GHA scopes caches per ref by default, but gating cache-to on the
+          # head repo being this repo closes the remaining fork-PR vector.
+          # Addresses UAT-1 adversarial F4.
+          cache-to: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'type=gha,mode=max' || '' }}
 
-      - name: Verify image size
+      - name: Verify image size (amd64)
         run: |
           SIZE=$(docker image inspect ${{ env.IMAGE_NAME }}:ci --format '{{.Size}}')
           SIZE_MB=$((SIZE / 1048576))
@@ -182,6 +195,30 @@ jobs:
             echo "::error::Image size ${SIZE_MB} MB exceeds 250 MB limit"
             exit 1
           fi
+
+      # Arm64 build runs under QEMU emulation (~3-5x slower). Catches
+      # arm64-specific regressions (wheel availability, architecture-
+      # specific code paths) before release-tag time. DXP4800 NAS is the
+      # primary production target, so arm64 must stay green on every PR.
+      #
+      # Caveat (UAT-1 adversarial F6): QEMU user-mode emulation does NOT
+      # cover all ISA-specific behavior. Memory ordering, mmap alignment
+      # (relevant to SQLite `mmap_size`), and some syscall semantics differ
+      # between emulated and native arm64. A periodic native-arm64 smoke
+      # job (self-hosted runner or a tag-time GitHub-hosted arm64 runner
+      # when available) should land before any production deployment.
+      # Tracked in ADR-0009 / ADR-0008 trade-offs sections.
+      - name: Build image (linux/arm64, verify-only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          platforms: linux/arm64
+          tags: ${{ env.IMAGE_NAME }}:ci-arm64
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          # Fork-PR cache-poisoning gate (see amd64 note above for rationale).
+          cache-to: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'type=gha,mode=max' || '' }}
 
   # ── Governance (framework — do not remove) ───────────────────
   governance:

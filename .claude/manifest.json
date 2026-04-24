@@ -1,9 +1,9 @@
 {
-  "frameworkVersion": "4.2.0",
-  "frameworkCommit": "b32fce5",
+  "frameworkVersion": "4.2.1",
+  "frameworkCommit": "6e6d0c9",
   "frameworkRepo": "kraulerson/claude-dev-framework",
   "localClonePath": "~/.claude-dev-framework",
-  "lastSyncDate": "2026-04-20T08:03:17Z",
+  "lastSyncDate": "2026-04-22T05:20:30Z",
   "profile": "web-api",
   "profileInherits": [
     "_base"

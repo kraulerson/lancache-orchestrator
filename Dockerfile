@@ -1,5 +1,5 @@
 # ── Stage 1: builder ─────────────────────────────────────────────
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim@sha256:520153e2deb359602c9cffd84e491e3431d76e7bf95a3255c9ce9433b76ab99a AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -18,7 +18,7 @@ COPY src/ src/
 RUN /build/.venv/bin/pip install --no-cache-dir --no-deps .
 
 # ── Stage 2: runtime ────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:520153e2deb359602c9cffd84e491e3431d76e7bf95a3255c9ce9433b76ab99a AS runtime
 
 ARG GIT_SHA=unknown
 ENV GIT_SHA=${GIT_SHA}
@@ -32,7 +32,15 @@ RUN groupadd -r -g 1000 orchestrator \
 
 COPY --from=builder /build/.venv /app/.venv
 COPY --from=builder /build/src /app/src
-COPY migrations/ /app/migrations/
+# Migrations ship as package data inside /app/src/orchestrator/db/migrations/ and
+# are loaded at runtime via importlib.resources. No separate COPY required.
+
+# The only persistent mount point. Declared as a VOLUME so operators running
+# with `--read-only` (recommended — PROJECT_BIBLE threat model) get a clean
+# error if they mount the filesystem read-only without also mounting this
+# path. Lets us safely add `--read-only` to the compose bundle later.
+# Addresses UAT-1 adversarial F7.
+VOLUME ["/var/lib/orchestrator"]
 
 WORKDIR /app
 

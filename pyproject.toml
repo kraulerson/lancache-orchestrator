@@ -15,6 +15,9 @@ orchestrator-cli = "orchestrator.cli.main:cli"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"orchestrator.db.migrations" = ["*.sql", "CHECKSUMS"]
+
 # --- Ruff (linter + formatter) ---
 [tool.ruff]
 line-length = 100
@@ -50,6 +53,9 @@ section-order = ["future", "standard-library", "third-party", "first-party", "lo
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]  # allow assert in tests
+# test_logging.py asserts redaction by necessarily including fake credential
+# literals in test inputs; S105/S106 would flood the signal there.
+"tests/core/test_logging.py" = ["S101", "S105", "S106"]
 
 # --- mypy (strict) ---
 [tool.mypy]
@@ -71,3 +77,21 @@ ignore_errors = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+# --- coverage ---
+[tool.coverage.run]
+source = ["src/orchestrator"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+# Exclude lines that are defensive guards or platform-specific branches hard
+# to exercise in CI. Explicit rather than generic to keep the signal.
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "return NotImplemented",
+    "if sys.platform == \"darwin\":",
+    "if sys.platform.startswith\\(\"linux\"\\):",
+]

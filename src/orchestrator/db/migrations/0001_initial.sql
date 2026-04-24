@@ -1,21 +1,12 @@
--- migrations/0001_initial.sql
+-- 0001_initial.sql
 -- lancache_orchestrator initial schema
 -- Phase 1 Step 1.4 — finalized 2026-04-20
 -- References: Brief §5, Data Contract §6, DQ2/DQ3/DQ6/DQ8
 --
--- Applied atomically. On success, the runner records
---   INSERT INTO schema_migrations (id, name, checksum) VALUES (1, '0001_initial', '<sha256>');
--- On failure, the whole transaction rolls back and the container refuses to start.
-
--- ----------------------------------------------------------------------------
--- Pragmas — set at migration time, persist for this DB file.
--- ----------------------------------------------------------------------------
-PRAGMA journal_mode = WAL;            -- writers don't block readers
-PRAGMA synchronous = NORMAL;          -- safe under WAL, substantially faster
-PRAGMA foreign_keys = ON;             -- enforce FK constraints
-PRAGMA temp_store = MEMORY;           -- temp tables / indexes in RAM
-PRAGMA mmap_size = 268435456;         -- 256 MB mmap for hot pages
-PRAGMA cache_size = -32000;           -- ~32 MB page cache
+-- Applied inside BEGIN IMMEDIATE / COMMIT by the migrate runner; on failure
+-- the transaction rolls back and schema_migrations stays empty. PRAGMAs that
+-- cannot run inside a transaction (journal_mode=WAL, temp_store) are set by
+-- the runner before opening the transaction.
 
 -- ----------------------------------------------------------------------------
 -- platforms  —  effectively an enum; 2 rows ever: 'steam', 'epic'.

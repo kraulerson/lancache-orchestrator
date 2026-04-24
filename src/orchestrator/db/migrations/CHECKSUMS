@@ -1,0 +1,12 @@
+# SHA-256 checksums for packaged migrations.
+#
+# Format: <id>  <sha256>  <filename>
+# - <id>       4-digit zero-padded integer matching the filename prefix
+# - <sha256>   64-char lowercase hex
+# - <filename> basename of the migration file
+#
+# Regenerate via: python -m orchestrator.db.migrate_tools regenerate-checksums
+# Pinning the checksum manifest defends against supply-chain tamper of migration
+# files — an attacker cannot alter a migration and its manifest row in the same
+# commit without detection in code review.
+0001  f09db05873bd2068d697a940261dcba99a1d600e10eb2fbfdb7dc4f71295606a  0001_initial.sql
