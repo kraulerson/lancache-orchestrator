@@ -16,11 +16,15 @@
     {
       "tool": "mcp__context7__query-docs",
       "timestamp": "2026-04-23T20:39:23Z"
+    },
+    {
+      "tool": "mcp__qdrant__qdrant-store",
+      "timestamp": "2026-04-24T00:33:59Z"
     }
   ],
   "commits_since_last_context7": 3,
   "qdrant_find_called": true,
-  "qdrant_store_called": false,
+  "qdrant_store_called": true,
   "context7_called": true,
   "mcp_gate_satisfied": false,
   "mcp_requirements": {
