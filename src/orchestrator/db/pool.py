@@ -996,12 +996,14 @@ class Pool:
     @asynccontextmanager
     async def write_transaction(self) -> AsyncIterator[WriteTx]:
         async with self._checkout_writer() as conn:
+            # nosem: semgrep.no-f-string-sql  hardcoded SQL control, no user input
             await conn.execute("BEGIN IMMEDIATE")
             tx = WriteTx(conn)
             try:
                 yield tx
             except BaseException:
                 with contextlib.suppress(Exception):
+                    # nosem: semgrep.no-f-string-sql  hardcoded SQL control, no user input
                     await conn.execute("ROLLBACK")
                 _log.warning(
                     "pool.transaction_rolled_back",
@@ -1009,6 +1011,7 @@ class Pool:
                 )
                 raise
             else:
+                # nosem: semgrep.no-f-string-sql  hardcoded SQL control, no user input
                 await conn.execute("COMMIT")
 
     # --- Raw acquire --------------------------------------------------
@@ -1030,6 +1033,7 @@ class Pool:
             conn: aiosqlite.Connection, role: str, idx: int | None
         ) -> tuple[bool, str | None]:
             try:
+                # nosem: semgrep.no-f-string-sql  hardcoded health probe, no user input
                 await asyncio.wait_for(conn.execute("SELECT 1"), timeout=1.0)
                 return (True, None)
             except (TimeoutError, aiosqlite.Error) as e:
