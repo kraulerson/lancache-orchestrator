@@ -120,4 +120,56 @@ consume `get_settings()` at startup.
 
 ---
 
+## Feature 4: BL4 — Async DB Pool
+
+**Phase Built:** 2 (Milestone B, Build Loop 4)
+**Status:** Complete (2026-04-25)
+**Summary:** Async DB pool on top of `aiosqlite` with hybrid topology
+(1 dedicated writer connection + N reader connections, default 8).
+Defense-in-depth write serialization (`asyncio.Lock` +
+`BEGIN IMMEDIATE` + `busy_timeout=5000`). Comprehensive API surface:
+single-statement helpers (`read_one`, `read_all`, `read_one_as`,
+`read_all_as`, `read_stream`, `execute_write`, `execute_many_write`),
+multi-statement transaction contexts (`read_transaction`,
+`write_transaction`) returning typed `ReadTx`/`WriteTx` handles, raw
+connection escape hatches (`acquire_reader`, `acquire_writer`). 11-class
+exception hierarchy with `sqlite_errorcode`-based integrity
+classification (unique / fk / notnull / check / primarykey). 13 stable
+structured-event names (`pool.initialized`, `pool.connection_lost`,
+`pool.connection_replaced`, `pool.replacement_storm`, etc.). Connection
+replacement state machine on disk-I/O errors, with per-role storm guard
+at >3 replacements in 60 s. Module-level singleton (`init_pool`,
+`get_pool`, `reload_pool`, `close_pool` with 30 s hard timeout).
+`pool.schema_status()` introspection surface for `/api/v1/health`.
+**Key Interfaces:**
+  - `src/orchestrator/db/pool.py` — `Pool`, `ReadTx`, `WriteTx`,
+    11 exception classes, module singleton
+  - `src/orchestrator/db/migrate.py` — `verify_schema_current()` helper
+    called by `Pool.create()` for schema-drift detection
+  - Env vars (5 new, `ORCH_` prefix): `ORCH_POOL_READERS`,
+    `ORCH_POOL_BUSY_TIMEOUT_MS`, `ORCH_DB_CACHE_SIZE_KIB`,
+    `ORCH_DB_MMAP_SIZE_BYTES`, `ORCH_DB_JOURNAL_SIZE_LIMIT_BYTES`
+**Memory baseline:** `(pool_readers + 1) × db_cache_size_kib +
+db_mmap_size_bytes`. Default config (8 readers, 16 MiB cache, 256 MiB
+mmap) ≈ 400 MiB resident. Operators on memory-constrained hardware
+should tune `pool_readers` and `db_cache_size_kib` together.
+**Related ADRs:**
+  - [`ADR-0011 — DB Pool Architecture`](ADR%20documentation/0011-db-pool-architecture.md)
+  - [`ADR-0010 — Settings Module Design`](ADR%20documentation/0010-settings-module-design.md)
+    (BL4 addendum — 5 new fields)
+**Test Coverage:** Unit + property + chaos — 117 tests across 5 files
+in `tests/db/` plus 3 `@pytest.mark.slow` integration tests deferred from
+default runs. 81% branch coverage on `pool.py` (594 stmts, 114 branches);
+remaining gaps are error-path catch-alls + unused
+`ReaderUnreachableError`/`WriterUnreachableError` exception classes,
+filed as a follow-up.
+**Known Limitations:**
+  - 81 % branch coverage (plan target was 100 %); follow-up issue.
+  - `@pytest.mark.slow` tests not run in default CI; deferred to nightly.
+  - `ReaderUnreachableError`/`WriterUnreachableError` exception classes
+    are defined but unused — anticipated for a future
+    `health_check_failed` policy that escalates beyond `pool.health_check_partial`.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->
