@@ -78,6 +78,11 @@ class TestDefaults:
             ("manifest_size_cap_bytes", 134_217_728),
             ("epic_refresh_buffer_sec", 600),
             ("steam_upstream_silent_days", 15),
+            ("pool_readers", 8),
+            ("pool_busy_timeout_ms", 5000),
+            ("db_cache_size_kib", 16384),
+            ("db_mmap_size_bytes", 268_435_456),
+            ("db_journal_size_limit_bytes", 67_108_864),
         ],
     )
     def test_default_value(self, settings, field, expected):
@@ -185,6 +190,29 @@ class TestFieldValidators:
     def test_cors_origins_empty_string_rejects(self):
         with pytest.raises(ValidationError):
             Settings(orchestrator_token=VALID_TOKEN, cors_origins=[""])
+
+    def test_pool_readers_zero_rejects(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, pool_readers=0)
+
+    def test_pool_readers_33_rejects(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, pool_readers=33)
+
+    def test_pool_busy_timeout_negative_rejects(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, pool_busy_timeout_ms=-1)
+
+    def test_db_cache_size_below_min_rejects(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, db_cache_size_kib=1023)
+
+    def test_db_journal_size_limit_below_min_rejects(self):
+        with pytest.raises(ValidationError):
+            Settings(
+                orchestrator_token=VALID_TOKEN,
+                db_journal_size_limit_bytes=1_048_575,
+            )
 
 
 # ----------------------------------------------------------------------
@@ -327,6 +355,13 @@ class TestWarnings:
         Settings(orchestrator_token=VALID_TOKEN)
         events = [r.get("event") for r in _json_lines(capsys.readouterr().out)]
         assert not any(e and e.startswith("config.") for e in events)
+
+    def test_pool_readers_over_provisioned_warning_fires(self, capsys):
+        """BL4: pool_readers > chunk_concurrency emits the warning."""
+        log_mod.configure_logging()
+        Settings(orchestrator_token=VALID_TOKEN, pool_readers=16, chunk_concurrency=8)
+        events = [r.get("event") for r in _json_lines(capsys.readouterr().out)]
+        assert "config.pool_readers_over_provisioned" in events
 
     def test_shadow_check_skipped_when_secrets_dir_is_none(self, monkeypatch, capsys):
         """Covers the defensive branch in _emit_config_warnings where

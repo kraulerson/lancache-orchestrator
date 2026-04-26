@@ -663,3 +663,93 @@ def test_migration_error_class_exists() -> None:
     """The module exposes a MigrationError exception type for typed handling."""
     assert hasattr(migrate, "MigrationError")
     assert issubclass(migrate.MigrationError, Exception)
+
+
+# ---------------------------------------------------------------------------
+# verify_schema_current (BL4 helper)
+# ---------------------------------------------------------------------------
+
+
+async def test_verify_schema_current_passes_on_fresh_apply(
+    one_valid_migration: Path,
+    migs_dir: Path,
+    db_path: Path,
+) -> None:
+    """Right after run_migrations() applies the full set, verify_schema_current
+    must succeed silently (uses migs_dir fixture so available == applied)."""
+    import aiosqlite
+
+    migrate.run_migrations(db_path, migrations_dir=migs_dir)
+
+    # For this test we need available_ids to equal applied_ids. The runner
+    # uses migs_dir; our verify helper reads the packaged manifest. Patch the
+    # available helper to return what migs_dir actually applied.
+    import pytest as _pytest
+
+    monkeypatch = _pytest.MonkeyPatch()
+    monkeypatch.setattr(migrate, "_load_available_ids", lambda: {1})
+    try:
+        async with aiosqlite.connect(str(db_path)) as conn:
+            await migrate.verify_schema_current(conn)  # must not raise
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.skip(reason="depends on pool.py — re-enable at Task 11")
+async def test_verify_schema_current_raises_when_table_missing(
+    db_path: Path,
+) -> None:
+    """A DB that's never had migrations run lacks the schema_migrations table.
+    verify_schema_current must report missing IDs (the full available set)."""
+    import aiosqlite
+
+    from orchestrator.db.pool import SchemaNotMigratedError
+
+    async with aiosqlite.connect(str(db_path)) as conn:
+        with pytest.raises(SchemaNotMigratedError) as exc_info:
+            await migrate.verify_schema_current(conn)
+        assert exc_info.value.missing  # at least one missing migration
+
+
+@pytest.mark.skip(reason="depends on pool.py — re-enable at Task 11")
+async def test_verify_schema_current_detects_pending(
+    one_valid_migration: Path,
+    migs_dir: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apply migration 1, then patch available-IDs to {1, 2} (simulating
+    migration 2 exists on disk but hasn't been applied)."""
+    import aiosqlite
+
+    from orchestrator.db.pool import SchemaNotMigratedError
+
+    migrate.run_migrations(db_path, migrations_dir=migs_dir)
+    monkeypatch.setattr(migrate, "_load_available_ids", lambda: {1, 2})
+
+    async with aiosqlite.connect(str(db_path)) as conn:
+        with pytest.raises(SchemaNotMigratedError) as exc_info:
+            await migrate.verify_schema_current(conn)
+        assert exc_info.value.missing == [2]
+
+
+@pytest.mark.skip(reason="depends on pool.py — re-enable at Task 11")
+async def test_verify_schema_current_detects_unknown(
+    one_valid_migration: Path,
+    migs_dir: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apply migration 1, then patch available-IDs to {} (the package no longer
+    ships migration 1, e.g., post-downgrade-rollback)."""
+    import aiosqlite
+
+    from orchestrator.db.pool import SchemaUnknownMigrationError
+
+    migrate.run_migrations(db_path, migrations_dir=migs_dir)
+    monkeypatch.setattr(migrate, "_load_available_ids", lambda: set())
+
+    async with aiosqlite.connect(str(db_path)) as conn:
+        with pytest.raises(SchemaUnknownMigrationError) as exc_info:
+            await migrate.verify_schema_current(conn)
+        assert exc_info.value.unknown == [1]
