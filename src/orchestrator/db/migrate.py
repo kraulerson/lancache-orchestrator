@@ -555,10 +555,7 @@ async def verify_schema_current(conn: aiosqlite.Connection) -> None:
     if missing:
         # Deferred import avoids circular dependency at module load
         # (pool.py imports verify_schema_current from this module).
-        # The first ignore suppresses mypy's import-untyped warning since
-        # pool.py is being built; once it ships with type hints, the
-        # ignores can be removed.
-        from orchestrator.db.pool import SchemaNotMigratedError  # type: ignore[import-untyped]
+        from orchestrator.db.pool import SchemaNotMigratedError
 
         raise SchemaNotMigratedError(missing=sorted(missing))
     if unknown:

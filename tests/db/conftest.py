@@ -110,14 +110,15 @@ async def populated_pool(pool):
         ):
             await tx.execute(
                 "INSERT INTO games (platform, app_id, title, owned, status) "
-                "VALUES (?, ?, ?, 1, 'never_prefilled')",
+                "VALUES (?, ?, ?, 1, 'not_downloaded')",
                 (platform, app_id, title),
             )
         # 3 manifests for the first 3 games
         for game_id in (1, 2, 3):
             await tx.execute(
-                "INSERT INTO manifests (game_id, raw, fetched_at) "
-                "VALUES (?, ?, '2026-04-25T00:00:00Z')",
+                "INSERT INTO manifests "
+                "(game_id, version, raw, fetched_at, chunk_count, total_bytes) "
+                "VALUES (?, '1.0', ?, '2026-04-25T00:00:00Z', 1, 100)",
                 (game_id, b"manifest-stub-bytes"),
             )
         # 2 jobs

@@ -21,32 +21,34 @@ VALID_TOKEN = "a" * 32
 
 
 class TestReaderReplacement:
-    async def test_disk_io_error_triggers_replacement(self, pool: Pool, monkeypatch):
+    async def test_disk_io_error_triggers_replacement(self, db_path, monkeypatch):
         """When a reader connection raises 'disk i/o error', the pool replaces
-        it transparently and subsequent reads succeed."""
-        # Find one reader from the pool's queue
-        async with pool.acquire_reader() as conn:
-            target_id = id(conn)
+        it transparently and subsequent reads succeed.
 
-        original_execute = aiosqlite.Connection.execute
-        call_count = {"n": 0}
+        Uses readers_count=1 so the patch reliably fires on the first read —
+        with 4 readers, the just-released target reader sits at the back of
+        the FIFO queue and the next read draws a different connection.
+        """
+        async with Pool.create(database_path=db_path, readers_count=1) as pool:
+            original_execute = aiosqlite.Connection.execute
+            call_count = {"n": 0}
 
-        async def patched_execute(self, sql, parameters=()):
-            if id(self) == target_id and call_count["n"] == 0:
-                call_count["n"] += 1
-                raise aiosqlite.OperationalError("disk I/O error")
-            return await original_execute(self, sql, parameters)
+            async def patched_execute(self, sql, parameters=()):
+                if call_count["n"] == 0:
+                    call_count["n"] += 1
+                    raise aiosqlite.OperationalError("disk I/O error")
+                return await original_execute(self, sql, parameters)
 
-        monkeypatch.setattr(aiosqlite.Connection, "execute", patched_execute)
+            monkeypatch.setattr(aiosqlite.Connection, "execute", patched_execute)
 
-        with pytest.raises(ConnectionLostError):
-            await pool.read_one("SELECT 1")
+            with pytest.raises(ConnectionLostError):
+                await pool.read_one("SELECT 1")
 
-        # Subsequent read should succeed (replacement happened)
-        # Wait briefly for background replacement to finish
-        await asyncio.sleep(0.5)
-        row = await pool.read_one("SELECT 1 AS x")
-        assert row["x"] == 1
+            # Subsequent read should succeed (replacement happened)
+            # Wait briefly for background replacement to finish
+            await asyncio.sleep(0.5)
+            row = await pool.read_one("SELECT 1 AS x")
+            assert row["x"] == 1
 
     async def test_replacement_emits_structured_event(self, pool: Pool, monkeypatch, capsys):
         from orchestrator.core import logging as log_mod
@@ -90,14 +92,14 @@ class TestWriterReplacement:
         with pytest.raises(ConnectionLostError):
             await pool.execute_write(
                 "INSERT INTO games (platform, app_id, title, owned, status) "
-                "VALUES ('steam', 'replace-1', 'X', 1, 'never_prefilled')"
+                "VALUES ('steam', 'replace-1', 'X', 1, 'not_downloaded')"
             )
         await asyncio.sleep(0.5)
 
         # Subsequent write should succeed
         await pool.execute_write(
             "INSERT INTO games (platform, app_id, title, owned, status) "
-            "VALUES ('steam', 'replace-2', 'Y', 1, 'never_prefilled')"
+            "VALUES ('steam', 'replace-2', 'Y', 1, 'not_downloaded')"
         )
 
 

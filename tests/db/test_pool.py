@@ -190,7 +190,7 @@ class TestSingleStatementHelpers:
     async def test_execute_write_inserts(self, populated_pool: Pool):
         rowcount = await populated_pool.execute_write(
             "INSERT INTO games (platform, app_id, title, owned, status) "
-            "VALUES (?, ?, ?, 1, 'never_prefilled')",
+            "VALUES (?, ?, ?, 1, 'not_downloaded')",
             ("steam", "999", "Test Game"),
         )
         assert rowcount == 1
@@ -203,7 +203,7 @@ class TestSingleStatementHelpers:
 
     async def test_execute_many_write_bulk_insert(self, pool: Pool):
         rows_data = [
-            ("steam", str(1000 + i), f"Bulk Game {i}", 1, "never_prefilled") for i in range(10)
+            ("steam", str(1000 + i), f"Bulk Game {i}", 1, "not_downloaded") for i in range(10)
         ]
         rowcount = await pool.execute_many_write(
             "INSERT INTO games (platform, app_id, title, owned, status) VALUES (?, ?, ?, ?, ?)",
@@ -220,11 +220,11 @@ class TestSingleStatementHelpers:
         # platform+app_id with the existing row 1)
         await pool.execute_write(
             "INSERT INTO games (platform, app_id, title, owned, status) "
-            "VALUES ('steam', 'unique-1', 'First', 1, 'never_prefilled')"
+            "VALUES ('steam', 'unique-1', 'First', 1, 'not_downloaded')"
         )
         rows_data = [
-            ("steam", "unique-2", "OK", 1, "never_prefilled"),
-            ("steam", "unique-1", "DUPE", 1, "never_prefilled"),  # will fail
+            ("steam", "unique-2", "OK", 1, "not_downloaded"),
+            ("steam", "unique-1", "DUPE", 1, "not_downloaded"),  # will fail
         ]
         with pytest.raises(IntegrityViolationError):
             await pool.execute_many_write(
@@ -331,7 +331,7 @@ class TestWriteTransaction:
         async with pool.write_transaction() as tx:
             await tx.execute(
                 "INSERT INTO games (platform, app_id, title, owned, status) "
-                "VALUES ('steam', 'tx-1', 'TX Game', 1, 'never_prefilled')"
+                "VALUES ('steam', 'tx-1', 'TX Game', 1, 'not_downloaded')"
             )
         rows = await pool.read_all("SELECT title FROM games WHERE app_id = 'tx-1'")
         assert rows[0]["title"] == "TX Game"
@@ -341,7 +341,7 @@ class TestWriteTransaction:
             async with pool.write_transaction() as tx:
                 await tx.execute(
                     "INSERT INTO games (platform, app_id, title, owned, status) "
-                    "VALUES ('steam', 'rb-1', 'Will Rollback', 1, 'never_prefilled')"
+                    "VALUES ('steam', 'rb-1', 'Will Rollback', 1, 'not_downloaded')"
                 )
                 raise RuntimeError("rollback me")
         # Verify the insert was rolled back
@@ -354,11 +354,11 @@ class TestWriteTransaction:
             async with populated_pool.write_transaction() as tx:
                 await tx.execute(
                     "INSERT INTO games (platform, app_id, title, owned, status) "
-                    "VALUES ('steam', '440-other', 'Other', 1, 'never_prefilled')"
+                    "VALUES ('steam', '440-other', 'Other', 1, 'not_downloaded')"
                 )  # this would succeed if alone
                 await tx.execute(
                     "INSERT INTO games (platform, app_id, title, owned, status) "
-                    "VALUES ('steam', '10', 'Dupe', 1, 'never_prefilled')"
+                    "VALUES ('steam', '10', 'Dupe', 1, 'not_downloaded')"
                 )  # this fails on UNIQUE
         # Both inserts rolled back
         rows = await populated_pool.read_all(
@@ -373,7 +373,7 @@ class TestWriteTransaction:
             count_before = (await tx.read_one("SELECT COUNT(*) AS c FROM games"))["c"]
             await tx.execute(
                 "INSERT INTO games (platform, app_id, title, owned, status) "
-                "VALUES ('steam', 'mid-tx-1', 'Mid TX', 1, 'never_prefilled')"
+                "VALUES ('steam', 'mid-tx-1', 'Mid TX', 1, 'not_downloaded')"
             )
             count_after = (await tx.read_one("SELECT COUNT(*) AS c FROM games"))["c"]
             assert count_after == count_before + 1
@@ -388,7 +388,7 @@ class TestWriteTransaction:
                 await asyncio.sleep(0.05)
                 await tx.execute(
                     "INSERT INTO games (platform, app_id, title, owned, status) "
-                    "VALUES (?, ?, ?, 1, 'never_prefilled')",
+                    "VALUES (?, ?, ?, 1, 'not_downloaded')",
                     ("steam", f"ser-{worker_id}", f"W{worker_id}"),
                 )
                 order.append(worker_id)
@@ -420,7 +420,7 @@ class TestRawAcquire:
             with pytest.raises(_aiosqlite.OperationalError, match="readonly"):
                 await conn.execute(
                     "INSERT INTO games (platform, app_id, title, owned, status) "
-                    "VALUES ('steam', 'qo-1', 'Should Fail', 1, 'never_prefilled')"
+                    "VALUES ('steam', 'qo-1', 'Should Fail', 1, 'not_downloaded')"
                 )
 
     async def test_acquire_writer_yields_aiosqlite_connection(self, pool: Pool):
@@ -430,7 +430,7 @@ class TestRawAcquire:
             assert isinstance(conn, _aiosqlite.Connection)
             await conn.execute(
                 "INSERT INTO games (platform, app_id, title, owned, status) "
-                "VALUES ('steam', 'aw-1', 'Raw Writer', 1, 'never_prefilled')"
+                "VALUES ('steam', 'aw-1', 'Raw Writer', 1, 'not_downloaded')"
             )
             await conn.commit()
         rows = await pool.read_all("SELECT title FROM games WHERE app_id = 'aw-1'")
@@ -475,7 +475,7 @@ class TestErrorWrapping:
         with pytest.raises(IntegrityViolationError) as exc_info:
             await populated_pool.execute_write(
                 "INSERT INTO games (platform, app_id, title, owned, status) "
-                "VALUES ('steam', '10', 'Dupe', 1, 'never_prefilled')"
+                "VALUES ('steam', '10', 'Dupe', 1, 'not_downloaded')"
             )
         assert exc_info.value.constraint_kind == "unique"
         assert exc_info.value.table == "games"
@@ -484,23 +484,29 @@ class TestErrorWrapping:
         with pytest.raises(IntegrityViolationError) as exc_info:
             await pool.execute_write(
                 "INSERT INTO games (platform, app_id, title, owned, status) "
-                "VALUES ('steam', 'nn-1', NULL, 1, 'never_prefilled')"
+                "VALUES ('steam', 'nn-1', NULL, 1, 'not_downloaded')"
             )
         assert exc_info.value.constraint_kind == "notnull"
 
     async def test_foreign_key_constraint_raises_integrity_violation(self, pool: Pool):
+        # game_id=9999 doesn't exist in games. Provide all NOT NULL fields and
+        # a BLOB literal (X'...') for raw — STRICT mode rejects TEXT in BLOB
+        # so a TEXT 'bytes' value would trip a type-check before FK.
         with pytest.raises(IntegrityViolationError) as exc_info:
             await pool.execute_write(
-                "INSERT INTO manifests (game_id, raw, fetched_at) "
-                "VALUES (9999, 'bytes', '2026-04-25T00:00:00Z')"
+                "INSERT INTO manifests "
+                "(game_id, version, raw, fetched_at, chunk_count, total_bytes) "
+                "VALUES (9999, '1.0', X'01', '2026-04-25T00:00:00Z', 1, 100)"
             )
         assert exc_info.value.constraint_kind == "fk"
 
     async def test_check_constraint_raises_integrity_violation(self, pool: Pool):
+        # owned=2 violates CHECK(owned IN (0,1)). Use a valid platform so FK
+        # doesn't trigger first.
         with pytest.raises(IntegrityViolationError) as exc_info:
             await pool.execute_write(
                 "INSERT INTO games (platform, app_id, title, owned, status) "
-                "VALUES ('badplatform', 'x', 'X', 1, 'never_prefilled')"
+                "VALUES ('steam', 'check-1', 'X', 2, 'not_downloaded')"
             )
         assert exc_info.value.constraint_kind == "check"
 
@@ -521,7 +527,7 @@ class TestErrorWrapping:
         with contextlib.suppress(IntegrityViolationError):
             await populated_pool.execute_write(
                 "INSERT INTO games (platform, app_id, title, owned, status) "
-                "VALUES (?, ?, ?, 1, 'never_prefilled')",
+                "VALUES (?, ?, ?, 1, 'not_downloaded')",
                 ("steam", "10", secret_value),  # platform/app_id collide → IntegrityError
             )
 

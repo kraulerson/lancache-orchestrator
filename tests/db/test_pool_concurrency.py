@@ -39,7 +39,7 @@ class TestConcurrentReads:
             async with populated_pool.write_transaction() as tx:
                 await tx.execute(
                     "INSERT INTO games (platform, app_id, title, owned, status) "
-                    "VALUES ('steam', 'concurrent-1', 'Concurrent', 1, 'never_prefilled')"
+                    "VALUES ('steam', 'concurrent-1', 'Concurrent', 1, 'not_downloaded')"
                 )
                 write_started.set()
                 await write_release.wait()
@@ -97,7 +97,7 @@ class TestWriterSerialization:
         async def writer(idx: int):
             await pool.execute_write(
                 "INSERT INTO games (platform, app_id, title, owned, status) "
-                "VALUES (?, ?, ?, 1, 'never_prefilled')",
+                "VALUES (?, ?, ?, 1, 'not_downloaded')",
                 ("steam", f"ser-{idx}", f"W{idx}"),
             )
 
@@ -134,7 +134,7 @@ class TestCancellation:
             async with pool.write_transaction() as tx:
                 await tx.execute(
                     "INSERT INTO games (platform, app_id, title, owned, status) "
-                    "VALUES ('steam', 'cancel-1', 'Will Cancel', 1, 'never_prefilled')"
+                    "VALUES ('steam', 'cancel-1', 'Will Cancel', 1, 'not_downloaded')"
                 )
                 await asyncio.sleep(10)  # never reaches
 
@@ -151,7 +151,7 @@ class TestCancellation:
         # Verify the writer lock is free — subsequent write succeeds
         await pool.execute_write(
             "INSERT INTO games (platform, app_id, title, owned, status) "
-            "VALUES ('steam', 'after-cancel', 'After', 1, 'never_prefilled')"
+            "VALUES ('steam', 'after-cancel', 'After', 1, 'not_downloaded')"
         )
 
     async def test_cancellation_during_streaming_releases_reader(self, populated_pool: Pool):

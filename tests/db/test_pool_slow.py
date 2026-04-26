@@ -45,7 +45,7 @@ async def test_sustained_concurrent_workload(populated_pool: Pool):
                     suffix = f"w{worker_id}-s{seq}"
                     await tx.execute(
                         "INSERT INTO games (platform, app_id, title, owned, status) "
-                        "VALUES ('steam', ?, ?, 1, 'never_prefilled')",
+                        "VALUES ('steam', ?, ?, 1, 'not_downloaded')",
                         (suffix, suffix),
                     )
                     game_id_row = await tx.read_one(
@@ -137,7 +137,7 @@ async def test_long_running_streaming_read_under_concurrent_writes(populated_poo
             with contextlib.suppress(Exception):
                 await populated_pool.execute_write(
                     "INSERT INTO games (platform, app_id, title, owned, status) "
-                    "VALUES (?, ?, ?, 1, 'never_prefilled')",
+                    "VALUES (?, ?, ?, 1, 'not_downloaded')",
                     ("steam", f"stream-{write_count}", f"S{write_count}"),
                 )
                 write_count += 1
