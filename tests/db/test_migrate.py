@@ -695,7 +695,6 @@ async def test_verify_schema_current_passes_on_fresh_apply(
         monkeypatch.undo()
 
 
-@pytest.mark.skip(reason="depends on pool.py — re-enable at Task 11")
 async def test_verify_schema_current_raises_when_table_missing(
     db_path: Path,
 ) -> None:
@@ -711,7 +710,6 @@ async def test_verify_schema_current_raises_when_table_missing(
         assert exc_info.value.missing  # at least one missing migration
 
 
-@pytest.mark.skip(reason="depends on pool.py — re-enable at Task 11")
 async def test_verify_schema_current_detects_pending(
     one_valid_migration: Path,
     migs_dir: Path,
@@ -733,7 +731,6 @@ async def test_verify_schema_current_detects_pending(
         assert exc_info.value.missing == [2]
 
 
-@pytest.mark.skip(reason="depends on pool.py — re-enable at Task 11")
 async def test_verify_schema_current_detects_unknown(
     one_valid_migration: Path,
     migs_dir: Path,
