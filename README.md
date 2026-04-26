@@ -51,6 +51,13 @@ The bearer token (`orchestrator_token`) is the only required field. Every other 
 | `ORCH_MANIFEST_SIZE_CAP_BYTES` | int (>0) | `134217728` (128 MiB) | |
 | `ORCH_EPIC_REFRESH_BUFFER_SEC` | int (≥0) | `600` | Pre-expiry refresh window |
 | `ORCH_STEAM_UPSTREAM_SILENT_DAYS` | int (≥1) | `15` | OQ4 fork-trigger threshold |
+| `ORCH_POOL_READERS` | int (1..32) | `8` | DB pool reader count (BL4) |
+| `ORCH_POOL_BUSY_TIMEOUT_MS` | int (0..60000) | `5000` | SQLite `busy_timeout` (BL4) |
+| `ORCH_DB_CACHE_SIZE_KIB` | int (1024..1048576) | `16384` | Per-connection page cache, KiB (BL4) |
+| `ORCH_DB_MMAP_SIZE_BYTES` | int (0..16 GiB) | `268435456` (256 MiB) | mmap window, bytes (BL4) |
+| `ORCH_DB_JOURNAL_SIZE_LIMIT_BYTES` | int (1 MiB..1 GiB) | `67108864` (64 MiB) | WAL truncate threshold (BL4) |
+
+**DB pool memory baseline:** `(pool_readers + 1) × db_cache_size_kib + db_mmap_size_bytes`. Default config = `9 × 16 MiB + 256 MiB ≈ 400 MiB` resident. On memory-constrained hardware (e.g. DXP4800 NAS at 4 GB total), halve `ORCH_POOL_READERS` and `ORCH_DB_CACHE_SIZE_KIB` together — yields a `5 × 8 MiB + 256 MiB ≈ 296 MiB` profile. See [`FEATURES.md` — Feature 4](FEATURES.md) and [ADR-0011](docs/ADR%20documentation/0011-db-pool-architecture.md).
 
 Full descriptions, validators, and design rationale: [`FEATURES.md` — Feature 3](FEATURES.md). Sensitive values (the bearer token specifically) are redacted across all serialization paths (`repr`, `model_dump`, `model_dump(mode="json")`, JSON schema) and pickling is explicitly blocked — see ADR-0010 §D4 for the three-layer redaction defense.
 

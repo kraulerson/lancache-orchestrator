@@ -85,6 +85,10 @@ asyncio_mode = "auto"
 filterwarnings = [
     'ignore:directory "/run/secrets" does not exist:UserWarning',
 ]
+markers = [
+    "slow: marks tests that simulate sustained workload (deselect with -m 'not slow' or run via -m slow)",
+]
+addopts = ["-m", "not slow"]
 
 # --- coverage ---
 [tool.coverage.run]

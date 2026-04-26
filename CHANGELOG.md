@@ -19,7 +19,58 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added
+- **Async DB pool** (`src/orchestrator/db/pool.py`, BL4 / Feature 4) —
+  hybrid 1-writer-N-reader topology on top of `aiosqlite`. Defense-in-depth
+  write serialization (`asyncio.Lock` + `BEGIN IMMEDIATE` + `busy_timeout`).
+  Comprehensive API: `read_one`/`read_all`/`read_one_as`/`read_all_as`/
+  `read_stream`/`execute_write`/`execute_many_write` single-statement
+  helpers, `read_transaction`/`write_transaction` multi-statement contexts,
+  `acquire_reader`/`acquire_writer` raw-connection escape hatches. Module-
+  level singleton (`init_pool`/`get_pool`/`reload_pool`/`close_pool`).
+  See [ADR-0011](docs/ADR%20documentation/0011-db-pool-architecture.md).
+- **`migrate.verify_schema_current()`** — async helper that asserts the
+  applied migration set matches the packaged manifest. Called by
+  `Pool.create()` unless `skip_schema_verify=True` (which logs
+  `pool.schema_verification_skipped` at WARNING).
+- **`pool.schema_status()`** — read-only introspection surface for
+  `/api/v1/health` consumers; returns `{applied, available, pending,
+  unknown, current}`.
+- **`pool.health_check()`** — concurrent per-connection probe with 1 s
+  per-probe timeout. Reports writer + reader health, replacement counts,
+  uptime.
+- **5 new typed Settings fields** (`pool_readers`, `pool_busy_timeout_ms`,
+  `db_cache_size_kib`, `db_mmap_size_bytes`, `db_journal_size_limit_bytes`)
+  driving pool sizing and SQLite PRAGMA tunables. See ADR-0010 addendum.
+- **`config.pool_readers_over_provisioned` diagnostic warning** — fires
+  when `pool_readers > chunk_concurrency` (readers will idle).
+
 ### Security
+- **No raw SQL or parameter values reach log output** (TM-012). Every
+  `pool.*` log emission uses `_template_only(sql)` (literals replaced
+  with `?`) and `_shape(params)` (parameter type names only, never values).
+  Hypothesis property tests in `tests/db/test_pool_property.py` exercise
+  the scrubbers across arbitrary value shapes; capsys-based regression
+  tests verify end-to-end log scrubbing through the structlog JSONRenderer.
+- **Reader connections are read-only at the SQLite layer.** `PRAGMA
+  query_only=ON` applied after open; writes through a reader handle fail
+  with `OperationalError("readonly database")`. Defense-in-depth alongside
+  the application-level reader/writer split.
+- **PRAGMA verification at boot.** Each of 9 PRAGMAs (busy_timeout,
+  foreign_keys, synchronous, temp_store, cache_size, mmap_size,
+  journal_size_limit, plus reader-only query_only) is set then read back;
+  mismatch raises `PoolInitError(role=...)` and aborts pool startup.
+  Defends against silent SQLite ABI changes that could drop a PRAGMA.
+- **Connection-replacement storm guard.** Per-role 60-second sliding
+  window; >3 replacements trips the guard and refuses further auto-recovery
+  (pool transitions to degraded; operator must `reload_pool()`).
+  Prevents disk-failure storms from amplifying into infinite-reconnect
+  CPU/IO loops.
+- **Background-task error logging** (SEV-3 finding from Phase 2.4 audit,
+  fixed inline). Replacement and safe-close tasks now register a done
+  callback that logs `pool.background_task_failed` at ERROR with task
+  name, error message, and error type. Without this, replacement
+  failures would have been silently swallowed by asyncio defaults.
 - Correlation-ID leak fix: `request_context()` now uses structlog's
   token-based reset, so nested context managers restore the outer block's
   CID rather than wiping all contextvars. Eliminates cross-request bleed

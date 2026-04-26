@@ -17,6 +17,7 @@ ALLOWED_LICENSES = {
     "PSF-2.0",
     "ISC License (ISCL)",
     "Mozilla Public License 2.0 (MPL 2.0)",
+    "MPL-2.0",
     "Python Software Foundation License",
     "The Unlicense (Unlicense)",
 }

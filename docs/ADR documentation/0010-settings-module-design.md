@@ -173,3 +173,35 @@ before and after each test, matching the pattern in `tests/core/test_logging.py`
 - Bible §2 (tech stack), §7.3 (API auth), §8 (observability), §10.3 (SAST rules)
 - pydantic-settings v2 docs (`secrets_dir` behavior, `AliasChoices`,
   `settings_customise_sources` — verified via Context7)
+
+---
+
+## Addendum (2026-04-25, BL4): Settings expansion for DB pool
+
+BL4 (DB pool) added 5 new typed fields to `Settings` for pool sizing and
+SQLite PRAGMA tunables. Same `ORCH_*` prefix convention; same `Field()`
+constraint pattern; one new `@model_validator(mode="after")` warning.
+
+| Field | Type | Default | Bounds | Env var | Purpose |
+|---|---|---|---|---|---|
+| `pool_readers` | `int` | `8` | 1..32 | `ORCH_POOL_READERS` | Reader-pool size |
+| `pool_busy_timeout_ms` | `int` | `5000` | 0..60_000 | `ORCH_POOL_BUSY_TIMEOUT_MS` | SQLite `busy_timeout` PRAGMA |
+| `db_cache_size_kib` | `int` | `16384` | 1024..1_048_576 | `ORCH_DB_CACHE_SIZE_KIB` | Per-connection page cache (KiB) |
+| `db_mmap_size_bytes` | `int` | `268_435_456` | 0..17_179_869_184 | `ORCH_DB_MMAP_SIZE_BYTES` | mmap window (bytes) |
+| `db_journal_size_limit_bytes` | `int` | `67_108_864` | 1_048_576..1_073_741_824 | `ORCH_DB_JOURNAL_SIZE_LIMIT_BYTES` | WAL truncate threshold |
+
+**New diagnostic warning:** `config.pool_readers_over_provisioned` fires
+when `pool_readers > chunk_concurrency` — readers will idle since the
+chunk-fanout consumer can't saturate them. Same fire-and-forget
+construction-time pattern as the existing 4 warnings (D2 above).
+
+**Memory baseline** (documented in FEATURES.md Feature 4 + README):
+`(pool_readers + 1) × db_cache_size_kib + db_mmap_size_bytes`. Default
+config = `9 × 16 MiB + 256 MiB ≈ 400 MiB` resident. Operators on
+constrained hardware (DXP4800 NAS has 4 GB RAM total) should tune
+`pool_readers` and `db_cache_size_kib` together — halving readers and
+cache yields a `5 × 8 MiB + 256 MiB ≈ 296 MiB` profile.
+
+**Cross-references:** ADR-0011 (DB pool architecture), spec §5.1
+(field table with audit context), plan task 2 (Settings expansion
+implementation).

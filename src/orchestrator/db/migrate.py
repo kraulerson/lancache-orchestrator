@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import aiosqlite
 import structlog
 
 from orchestrator.core.settings import get_settings
@@ -228,6 +229,16 @@ def _load_migrations(source: Path | Traversable) -> list[_Migration]:
             raise MigrationError(f"duplicate migration id {mig.mid} in {source}")
         seen.add(mig.mid)
     return result
+
+
+def _load_available_ids() -> set[int]:
+    """Return the set of migration IDs available in the packaged manifest.
+
+    Used by verify_schema_current() and pool.schema_status() — they both need
+    'what migrations exist on disk' without re-running the full apply pipeline.
+    """
+    source = _package_migrations_root()
+    return {m.mid for m in _load_migrations(source)}
 
 
 def _load_checksum_manifest(source: Path | Traversable) -> dict[int, tuple[str, str]]:
@@ -502,6 +513,55 @@ def _run_migrations_locked(
     finally:
         conn.close()
     log.info("migrations_complete", applied_count=len(migrations))
+
+
+# ---------------------------------------------------------------------------
+# Schema verification (BL4) — used by orchestrator.db.pool.init_pool()
+# ---------------------------------------------------------------------------
+
+
+async def _load_applied_ids_async(conn: aiosqlite.Connection) -> set[int]:
+    """Return the set of migration IDs present in the schema_migrations table.
+
+    Async-flavored variant for the pool's read connection. Returns an empty
+    set if the table doesn't exist (i.e., migrations have never run).
+    """
+    try:
+        async with conn.execute("SELECT id FROM schema_migrations") as cur:
+            rows = await cur.fetchall()
+        return {row[0] for row in rows}
+    except aiosqlite.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return set()
+        raise
+
+
+async def verify_schema_current(conn: aiosqlite.Connection) -> None:
+    """Assert the database schema matches the packaged migration manifest.
+
+    Compares applied migration IDs (from schema_migrations table) against
+    available IDs (from package data manifest). Raises:
+      - SchemaNotMigratedError(missing=[...]) if applied is a strict subset
+      - SchemaUnknownMigrationError(unknown=[...]) if applied has IDs not in
+        the available manifest (downgrade scenario)
+
+    Imports SchemaNotMigratedError / SchemaUnknownMigrationError from
+    orchestrator.db.pool (BL4) at call time to avoid a circular import.
+    """
+    applied = await _load_applied_ids_async(conn)
+    available = _load_available_ids()
+    missing = available - applied
+    unknown = applied - available
+    if missing:
+        # Deferred import avoids circular dependency at module load
+        # (pool.py imports verify_schema_current from this module).
+        from orchestrator.db.pool import SchemaNotMigratedError
+
+        raise SchemaNotMigratedError(missing=sorted(missing))
+    if unknown:
+        from orchestrator.db.pool import SchemaUnknownMigrationError
+
+        raise SchemaUnknownMigrationError(unknown=sorted(unknown))
 
 
 def _cli() -> int:

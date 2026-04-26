@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     epic_refresh_buffer_sec: int = Field(default=600, ge=0)
     steam_upstream_silent_days: int = Field(default=15, ge=1)
 
+    # --- DB pool & SQLite tuning (BL4) ---
+    pool_readers: int = Field(default=8, ge=1, le=32)
+    pool_busy_timeout_ms: int = Field(default=5000, ge=0, le=60000)
+    db_cache_size_kib: int = Field(default=16384, ge=1024, le=1048576)
+    db_mmap_size_bytes: int = Field(default=268_435_456, ge=0, le=17_179_869_184)
+    db_journal_size_limit_bytes: int = Field(default=67_108_864, ge=1_048_576, le=1_073_741_824)
+
     @field_validator("cors_origins")
     @classmethod
     def _reject_empty_cors_origin(cls, v: list[str]) -> list[str]:
@@ -179,6 +186,16 @@ class Settings(BaseSettings):
                 "config.chunk_concurrency_unvalidated",
                 chunk_concurrency=self.chunk_concurrency,
                 spike_f_validated_at=_SPIKE_F_CHUNK_CONCURRENCY,
+            )
+
+        # 5. Over-provisioned reader pool (BL4)
+        if self.pool_readers > self.chunk_concurrency:
+            log.warning(
+                "config.pool_readers_over_provisioned",
+                pool_readers=self.pool_readers,
+                chunk_concurrency=self.chunk_concurrency,
+                hint="pool_readers > chunk_concurrency means readers will idle; "
+                "consider reducing pool_readers",
             )
 
         return self

@@ -117,13 +117,20 @@ Accepted in `docs/ADR documentation/0001-orchestrator-architecture.md` on 2026-0
 
 **Spike F is the gate** between Option A and Option B. Passes: p99 `/api/v1/health` < 100 ms under 32 concurrent chunk downloads sustaining ≥ 300 Mbps aggregate for 10 minutes on real DXP4800 hardware.
 
-### 3.2 Planned sub-ADRs (Phase 2)
+### 3.2 Sub-ADRs (Phase 2)
 
-Not yet issued; scheduled for Phase 2 construction:
+Issued during Phase 2 construction:
+
+- **ADR-0008** — Migration runner architecture (BL1, ID1).
+- **ADR-0009** — Logging framework architecture (BL2, ID3).
+- **ADR-0010** — Settings module design (BL3, ID4) + BL4 addendum (DB pool fields).
+- **ADR-0011** — DB pool architecture (BL4) — hybrid 1-writer-N-reader topology, defense-in-depth write serialization, comprehensive API surface.
+
+Pending / scheduled:
 
 - **ADR-0002** — steam-next SHA pin + 15-day fork-trigger policy (OQ4).
 - **ADR-0003** — `MemoryJobStore` over `SQLAlchemyJobStore`.
-- **ADR-0004** — Raw SQL + numbered migrations, no ORM (DQ2–DQ8 consolidated).
+- **ADR-0004** — Raw SQL + numbered migrations, no ORM (DQ2–DQ8 consolidated). *(Partially captured in ADR-0008.)*
 - **ADR-0005** — Spike F result → A vs B final commitment.
 - **ADR-0006** — Vendored `legendary` subset vs PyPI.
 - **ADR-0007** — Lancache reached via compose service name (`http://lancache:80`).
@@ -212,7 +219,7 @@ Full matrix in `docs/phase-1/threat-model.md` §5 cross-references every TM to i
 
 ## 5. Data Model
 
-<!-- Last Updated: 2026-04-23 -->
+<!-- Last Updated: 2026-04-26 -->
 
 Full artifact: `docs/phase-1/data-model.md`. Canonical SQL lives at `src/orchestrator/db/migrations/0001_initial.sql` (packaged as Python package-data per ADR-0008, loaded via `importlib.resources`).
 
@@ -262,7 +269,7 @@ Numbered `.sql` files in `src/orchestrator/db/migrations/` (ships as Python pack
 
 ### 5.6 Concurrency model
 
-Single-process, single-writer-lock application-side. `aiosqlite` connection pool size 10. WAL handles reader concurrency; application `asyncio.Lock` serializes all writes to eliminate SQLITE_BUSY under F12×F13 overlap (threat-model §4.3.2 mitigation).
+Single-process, single-writer-lock application-side. Implemented in BL4 as a hybrid `aiosqlite` pool: 1 dedicated writer connection + N reader connections (default 8, configurable via `ORCH_POOL_READERS` 1..32). WAL handles reader concurrency; application `asyncio.Lock` serializes all writes; `BEGIN IMMEDIATE` provides engine-level serialization; `busy_timeout=5000ms` absorbs transient contention. Defense-in-depth eliminates SQLITE_BUSY under F12×F13 overlap (threat-model §4.3.2 mitigation). Reader connections enforce read-only at the SQLite layer via `PRAGMA query_only=ON`. Connection-replacement state machine on disk-I/O errors with per-role storm guard (>3 in 60s → degraded). See ADR-0011 for full architecture.
 
 ---
 
