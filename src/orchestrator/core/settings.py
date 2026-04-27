@@ -109,11 +109,28 @@ class Settings(BaseSettings):
         """Enforce minimum length on the SecretStr object (not the raw
         string). pydantic's error payload carries the SecretStr's
         redacted form, not the raw rejected value. Bible §7.3.
+
+        V-5 hardening: also reject embedded control characters (after
+        whitespace stripping). NUL, CR, LF, TAB, VT, FF in the token
+        body could enable downstream issues — log-line truncation,
+        HTTP-header injection if echoed, parser confusion. Trailing
+        whitespace is still stripped by `_strip_token` (Bible §7.3
+        contract); only embedded control chars in the surviving body
+        are rejected.
         """
-        if len(v.get_secret_value()) < 32:
+        raw = v.get_secret_value()
+        if len(raw) < 32:
             raise ValueError(
                 "orchestrator_token must be at least 32 characters after whitespace stripping"
             )
+        # ASCII control range 0x00-0x1F + 0x7F (DEL). After stripping,
+        # NO control chars should appear in the body.
+        for ch in raw:
+            if ord(ch) < 0x20 or ord(ch) == 0x7F:
+                raise ValueError(
+                    "orchestrator_token must not contain control characters "
+                    "(NUL/CR/LF/TAB/etc.) after whitespace stripping"
+                )
         return v
 
     def __init__(__pydantic_self__, **kwargs: Any) -> None:  # noqa: N805 — matches BaseSettings convention to avoid field-name collisions

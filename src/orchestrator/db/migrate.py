@@ -109,7 +109,12 @@ class _Migration:
 
 def _detect_filesystem_type(path: Path) -> str:
     """Return the filesystem type for `path`. Best-effort, returns 'unknown' on
-    failure. Tests monkeypatch this to simulate NFS/CIFS."""
+    failure. Tests monkeypatch this to simulate NFS/CIFS.
+
+    Caller (`_assert_local_filesystem`) is responsible for symlink resolution
+    BEFORE invoking this — so the FS-type lookup applies to the symlink's
+    target, not the symlink's own location (V-2).
+    """
     target = str(path if path.exists() else path.parent)
     try:
         if sys.platform.startswith("linux"):
@@ -150,6 +155,10 @@ def _assert_local_filesystem(db_path: Path) -> None:
     """Raise MigrationError if `db_path` is on a known network filesystem.
     SQLite WAL mode is incompatible with networked mmap, which silently corrupts.
 
+    V-3 hardening: also rejects character/block special files (e.g. `/dev/null`).
+    sqlite would silently accept these — every write vanishes, every read
+    returns nothing — turning the orchestrator into a no-op.
+
     Behavior when detection returns 'unknown' (e.g., unreadable `/proc/self/mountinfo`
     in a stripped container, or `stat` missing on the host):
     - By default: emit a structured warning and proceed. The operator may be on
@@ -159,7 +168,30 @@ def _assert_local_filesystem(db_path: Path) -> None:
       strictly worse than a startup failure (e.g., DXP4800 NAS with network-
       attached storage in the topology).
     """
-    fstype = _detect_filesystem_type(db_path)
+    # V-2: resolve symlinks before any FS-type or device check, so a
+    # symlink on a local FS pointing at an NFS-mounted target sees the
+    # target's properties. strict=False follows symlinks even when the
+    # final target doesn't yet exist (new-DB path on a network mount).
+    resolved_path = db_path.resolve(strict=False)
+
+    # V-3: reject character/block devices outright. /dev/null, /dev/zero,
+    # /dev/sdX, etc. — sqlite would open these silently and corrupt or no-op.
+    if resolved_path.exists():
+        try:
+            stat_result = resolved_path.stat()
+            mode = stat_result.st_mode
+            import stat as _stat
+
+            if _stat.S_ISCHR(mode) or _stat.S_ISBLK(mode):
+                kind = "character" if _stat.S_ISCHR(mode) else "block"
+                raise MigrationError(
+                    f"database path {db_path} is a {kind} special device. "
+                    "SQLite would silently accept this and writes would vanish "
+                    "(or read undefined data). Use a regular-file path."
+                )
+        except OSError as e:
+            log.warning("stat_failed_on_db_path", db_path=str(db_path), reason=str(e))
+    fstype = _detect_filesystem_type(resolved_path)
     if fstype in _NETWORK_FSTYPES:
         raise MigrationError(
             f"database path {db_path} is on '{fstype}' — WAL journal mode "

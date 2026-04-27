@@ -18,7 +18,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Generator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import fields
+from dataclasses import fields, is_dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import aiosqlite
@@ -139,11 +139,13 @@ class ReaderUnreachableError(HealthCheckError):
 
 _LITERAL_RE = re.compile(
     r"""
-    '(?:''|[^'])*'           # 'string literals' with '' escape
-    | "(?:""|[^"])*"         # "identifiers"
-    | \bX'[0-9a-fA-F]+'      # X'hex' BLOB literals
-    | \bNULL\b               # NULL keyword in literal context
-    | (?<![A-Za-z_])-?\d+(?:\.\d+)?(?![A-Za-z_])   # numeric literals
+    '(?:''|[^'])*'                                   # 'string literals' with '' escape
+    | "(?:""|[^"])*"                                 # "identifiers"
+    | \bX'[0-9a-fA-F]+'                              # X'hex' BLOB literals
+    | \bNULL\b                                       # NULL keyword in literal context
+    | (?<![A-Za-z_])0[xX][0-9a-fA-F]+(?![A-Za-z_])   # 0xHEX literals (V-6)
+    | (?<![A-Za-z_])-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)? # numeric literals incl. sci-notation (V-6)
+        (?![A-Za-z_0-9.])
     """,
     re.VERBOSE | re.IGNORECASE,
 )
@@ -258,6 +260,20 @@ def _row_to_dict(row: aiosqlite.Row | None) -> dict[str, Any] | None:
         return None
     keys = list(row.keys())
     return {k: row[k] for k in keys}
+
+
+def _check_is_dataclass(cls: type) -> None:
+    """V-4: read_one_as / read_all_as require a dataclass cls. Surface the
+    contract violation as a clear TypeError before any DB work happens."""
+    if not isinstance(cls, type):
+        raise TypeError(
+            f"read_one_as/read_all_as require a dataclass type, not an instance; got {cls!r}."
+        )
+    if not is_dataclass(cls):
+        raise TypeError(
+            f"read_one_as/read_all_as require a dataclass type as the first "
+            f"argument; {cls.__name__} is not a dataclass."
+        )
 
 
 def _row_to_dataclass[T](cls: type[T], row: aiosqlite.Row | None) -> T | None:
@@ -378,6 +394,7 @@ class ReadTx:
     async def read_one_as(
         self, cls: type[T], sql: str, params: Sequence[Any] | Mapping[str, Any] = ()
     ) -> T | None:
+        _check_is_dataclass(cls)
         try:
             async with self._conn.execute(sql, params) as cur:
                 row = await cur.fetchone()
@@ -388,6 +405,7 @@ class ReadTx:
     async def read_all_as(
         self, cls: type[T], sql: str, params: Sequence[Any] | Mapping[str, Any] = ()
     ) -> list[T]:
+        _check_is_dataclass(cls)
         try:
             async with self._conn.execute(sql, params) as cur:
                 rows = await cur.fetchall()
@@ -464,6 +482,7 @@ class WriteTx:
     async def read_one_as(
         self, cls: type[T], sql: str, params: Sequence[Any] | Mapping[str, Any] = ()
     ) -> T | None:
+        _check_is_dataclass(cls)
         try:
             async with self._conn.execute(sql, params) as cur:
                 row = await cur.fetchone()
@@ -474,6 +493,7 @@ class WriteTx:
     async def read_all_as(
         self, cls: type[T], sql: str, params: Sequence[Any] | Mapping[str, Any] = ()
     ) -> list[T]:
+        _check_is_dataclass(cls)
         try:
             async with self._conn.execute(sql, params) as cur:
                 rows = await cur.fetchall()
@@ -530,6 +550,18 @@ class Pool:
         mmap_size_bytes: int,
         journal_size_limit_bytes: int,
     ) -> None:
+        # V-1: enforce readers_count floor at the Pool layer too. Settings
+        # already constrains 1..32 for the singleton path, but Pool.create()
+        # is also reachable from tests with explicit values; readers_count=0
+        # would deadlock on first read (asyncio.Queue(maxsize=0) is unbounded
+        # and no readers are opened).
+        if readers_count < 1:
+            raise PoolInitError(
+                reason=(
+                    f"readers_count must be >= 1; got {readers_count}. "
+                    "A pool with zero readers would deadlock on the first read."
+                ),
+            )
         self._database_path = database_path
         self._readers_count = readers_count
         self._busy_timeout_ms = busy_timeout_ms
@@ -907,6 +939,7 @@ class Pool:
     async def read_one_as(
         self, cls: type[T], sql: str, params: Sequence[Any] | Mapping[str, Any] = ()
     ) -> T | None:
+        _check_is_dataclass(cls)
         async with self._checkout_reader() as conn:
             try:
                 cur = await conn.execute(sql, params)
@@ -922,6 +955,7 @@ class Pool:
     async def read_all_as(
         self, cls: type[T], sql: str, params: Sequence[Any] | Mapping[str, Any] = ()
     ) -> list[T]:
+        _check_is_dataclass(cls)
         async with self._checkout_reader() as conn:
             try:
                 cur = await conn.execute(sql, params)
