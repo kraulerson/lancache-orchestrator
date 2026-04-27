@@ -65,3 +65,12 @@ terraform.tfvars.json
 
 # Solo Orchestrator logs
 .solo-orchestrator/
+
+# Claude Code per-session / per-user transient state
+# (Tracked .claude/* state — manifest, build-progress, phase-state,
+# process-state, settings.json, tool-preferences, orchestrator-source —
+# stays committed because CI gates depend on it.)
+.claude/tool-usage.json
+.claude/process-audit.log
+.claude/settings.local.json
+.claude/settings.json.pre-wire-backup
