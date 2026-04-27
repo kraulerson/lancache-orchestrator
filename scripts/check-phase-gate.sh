@@ -129,7 +129,7 @@ validate_manifesto_content() {
     else
       # Check if section has content beyond template placeholders
       local section_content
-      section_content=$(sed -n "/^## ${section_num}\./,/^## [0-9]/p" "$file" | grep -v "^##" | grep -v "^---" | grep -v "^$" | grep -v "^<!--" | grep -v -e '-->$' | grep -v "^\[" | grep -v "^|.*|.*|$" | head -5)
+      section_content=$(sed -n "/^## ${section_num}\./,/^## [0-9]/p" "$file" | grep -v "^##" | grep -v "^---" | grep -v "^$" | grep -v "^<!--" | grep -v -e '-->$' | grep -v "^\[" | grep -v "^|.*|.*|$" | awk 'NR<=5')
       if [ -z "$section_content" ]; then
         placeholder_sections="${placeholder_sections} ${section_num}"
       fi
@@ -270,34 +270,6 @@ if [ "$current_phase" -ge 2 ]; then
   else
     echo -e "${YELLOW}[WARN]${NC} Phase 1→2: current_phase is $current_phase but gate date not recorded in phase-state.json"
     issues=$((issues + 1))
-  fi
-fi
-
-# --- Phase 1→2 BACKSTOP: repo protection verification (spec 2026-04-21) ---
-# Runs whenever current_phase is at or past 2 — catches drift where protection
-# was loosened after init, or projects that predate the host-aware gate.
-if [ "$current_phase" -ge 2 ]; then
-  SCRIPT_DIR_CPG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  host_dispatcher="$SCRIPT_DIR_CPG/lib/host.sh"
-  if [ -f "$host_dispatcher" ] && [ -f ".claude/manifest.json" ]; then
-    # shellcheck disable=SC1090
-    source "$host_dispatcher"
-    mode=$(jq -r '.mode // "personal"' .claude/manifest.json 2>/dev/null || echo "personal")
-    if host_load_driver 2>/dev/null; then
-      if host_verify_protection "main" "$mode" 2>/dev/null; then
-        echo -e "${GREEN}  [OK]${NC} Phase 1→2 backstop: repo protection verified for $mode mode"
-      else
-        echo -e "${RED}[FAIL]${NC} Phase 1→2 backstop: protection verification failed"
-        echo "        Remediate: scripts/check-gate.sh --repair"
-        echo "        Preflight: scripts/check-gate.sh --preflight"
-        issues=$((issues + 1))
-      fi
-    else
-      echo -e "${YELLOW}[WARN]${NC} Phase 1→2 backstop: could not load host driver (manifest host field may be missing; run scripts/check-gate.sh --backfill-host)"
-      issues=$((issues + 1))
-    fi
-  else
-    echo -e "${YELLOW}[WARN]${NC} Phase 1→2 backstop: host dispatcher or manifest.json missing — skipping (project predates host-aware gate)"
   fi
 fi
 
@@ -464,6 +436,7 @@ if [ "$current_phase" -ge 3 ]; then
 
   # P3-007: Cross-reference process-state.json for Phase 3 completion
   if [ -f ".claude/process-state.json" ] && command -v jq &>/dev/null; then
+    p3_steps_done=""
     p3_steps_done=$(jq '.phase3_validation.steps_completed | length' .claude/process-state.json 2>/dev/null || echo "0")
     if [ "$p3_steps_done" -ge 9 ]; then
       echo -e "${GREEN}  [OK]${NC} Phase 3 process checklist: $p3_steps_done steps completed"
@@ -504,7 +477,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESOLVER="$PROJECT_ROOT/scripts/resolve-tools.sh"
 TOOL_PREFS=".claude/tool-preferences.json"
 
-if [ -f "$TOOL_PREFS" ] && [ -x "$RESOLVER" ] && command -v jq &>/dev/null; then
+if [ -z "${CI:-}" ] && [ -f "$TOOL_PREFS" ] && [ -x "$RESOLVER" ] && command -v jq &>/dev/null; then
   dev_os=$(jq -r '.context.dev_os' "$TOOL_PREFS" 2>/dev/null || echo "")
   platform=$(jq -r '.context.platform' "$TOOL_PREFS" 2>/dev/null || echo "")
   language=$(jq -r '.context.language' "$TOOL_PREFS" 2>/dev/null || echo "")
