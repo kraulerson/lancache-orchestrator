@@ -65,6 +65,18 @@ Full descriptions, validators, and design rationale: [`FEATURES.md` — Feature 
 
 The bearer token should be deployed as a **Docker secret** mounted at `/run/secrets/orchestrator_token`, not as an env var. The settings module also supports `ORCH_TOKEN` as an env var for development; if both are set in production, a `config.secret_shadowed_by_env` warning is logged so you can diagnose.
 
+## Running the API (BL5+)
+
+The FastAPI app is invoked via uvicorn with the factory flag:
+
+```bash
+uvicorn orchestrator.api.main:create_app --factory --host 127.0.0.1 --port 8765
+```
+
+The `--factory` flag tells uvicorn that `create_app` is a callable returning the app, not the app itself. The lifespan runs migrations + initializes the BL4 DB pool on startup; closes the pool with a 30 s hard timeout on shutdown.
+
+**BL5 health-check note:** `GET /api/v1/health` returns **HTTP 503** until BL6+ ships the scheduler, Lancache self-test, and validator subsystems. The body still contains the 7-field response so operators can see exactly which subsystems are unhealthy. Container `HEALTHCHECK` and k8s liveness probes should expect 503 during this transition window. See [ADR-0012](docs/ADR%20documentation/0012-fastapi-skeleton-architecture.md) for the design rationale.
+
 ## Repository layout
 
 | Path | Contents |
