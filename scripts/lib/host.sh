@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# scripts/lib/host.sh — host dispatcher. Reads .claude/manifest.json for the
+# `host` field and sources the matching driver in scripts/host-drivers/<host>.sh.
+# Callers use the unified interface exposed by the sourced driver:
+#   host_name, host_require_cli, host_create_repo, host_register_remote,
+#   host_push_initial, host_configure_protection, host_verify_protection
+#
+# For host = "other", this file provides inline implementations (URL paste +
+# manual attestation) instead of sourcing a driver file.
+
+_host_repo_root() {
+  git rev-parse --show-toplevel 2>/dev/null || pwd
+}
+
+host_read_from_manifest() {
+  local manifest
+  manifest="$(_host_repo_root)/.claude/manifest.json"
+  if [ ! -f "$manifest" ]; then
+    echo "host.sh: .claude/manifest.json not found at $manifest" >&2
+    return 1
+  fi
+  local host
+  host=$(jq -r '.host // empty' "$manifest" 2>/dev/null || true)
+  if [ -z "$host" ]; then
+    echo "host.sh: manifest.json missing 'host' field. Run: scripts/check-gate.sh --backfill-host" >&2
+    return 2
+  fi
+  echo "$host"
+}
+
+host_load_driver() {
+  local host
+  host=$(host_read_from_manifest) || return $?
+  local root
+  root=$(_host_repo_root)
+  case "$host" in
+    github|gitlab|bitbucket)
+      local driver="$root/scripts/host-drivers/$host.sh"
+      if [ ! -f "$driver" ]; then
+        echo "host.sh: driver for '$host' not found at $driver" >&2
+        return 3
+      fi
+      # shellcheck disable=SC1090
+      source "$driver"
+      ;;
+    other)
+      _host_define_other_fallbacks
+      ;;
+    *)
+      echo "host.sh: unknown host '$host'. Valid: github, gitlab, bitbucket, other" >&2
+      return 4
+      ;;
+  esac
+}
+
+_host_define_other_fallbacks() {
+  host_name()                { echo "other"; }
+  host_require_cli()         { return 0; }  # No CLI for 'other'; user provides URL
+  host_create_repo()         { echo "host.sh: 'other' host requires user-supplied URL — call from init.sh interactively" >&2; return 10; }
+  host_register_remote() {
+    local url="${1:?url required}"
+    if git remote get-url origin >/dev/null 2>&1; then
+      git remote set-url origin "$url"
+    else
+      git remote add origin "$url"
+    fi
+  }
+  host_push_initial()        { git push -u origin "${1:-main}"; }
+  host_configure_protection(){ echo "host.sh: 'other' host — branch protection via manual attestation only" >&2; return 0; }
+  host_verify_protection() {
+    # Read attestation from process-state.json
+    local ps
+    ps="$(_host_repo_root)/.claude/process-state.json"
+    [ ! -f "$ps" ] && return 1
+    local attested
+    attested=$(jq -r '.phase2_init.attestations.branch_protection.at // empty' "$ps" 2>/dev/null || true)
+    [ -z "$attested" ] && return 1
+    # Check attestation age (90 days)
+    local now then days
+    now=$(date +%s)
+    # Try GNU date first, then BSD (macOS) date
+    then=$(date -d "$attested" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$attested" +%s 2>/dev/null || echo "$now")
+    days=$(( (now - then) / 86400 ))
+    [ "$days" -gt 90 ] && return 1
+    return 0
+  }
+}

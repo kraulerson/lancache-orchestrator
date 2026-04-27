@@ -77,9 +77,12 @@ print_section "Git & Hooks"
 [ -x "scripts/check-phase-gate.sh" ] && print_ok "Phase gate check script" || warn "scripts/check-phase-gate.sh missing"
 [ -d ".claude/framework" ]        && print_ok "Development Guardrails for Claude Code" || warn "Development Guardrails for Claude Code not installed"
 
-if [ -f ".claude/framework-version.txt" ]; then
-  local_sha=$(cat .claude/framework-version.txt)
-  print_info "Framework pinned at: ${local_sha:0:12}"
+if [ -f ".claude/manifest.json" ] && command -v jq &>/dev/null; then
+  cdf_commit=$(jq -r '.frameworkCommit // empty' .claude/manifest.json 2>/dev/null)
+  cdf_version=$(jq -r '.frameworkVersion // empty' .claude/manifest.json 2>/dev/null)
+  if [ -n "$cdf_commit" ] || [ -n "$cdf_version" ]; then
+    print_info "Development Guardrails pinned at: ${cdf_version:-unknown}${cdf_commit:+ (${cdf_commit:0:12})}"
+  fi
 fi
 
 # ================================================================

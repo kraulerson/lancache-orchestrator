@@ -90,8 +90,11 @@ run_with_timeout() {
 
 is_context7_mcp_registered() {
   command -v jq &>/dev/null || return 1
+  # Direct MCP registration in either user config file
   ([ -f "$HOME/.claude/settings.json" ] && jq -e '.mcpServers.context7 // .mcpServers["context7-mcp"] // empty' "$HOME/.claude/settings.json" >/dev/null 2>&1) || \
-  ([ -f "$HOME/.claude.json" ] && jq -e '.mcpServers.context7 // .mcpServers["context7-mcp"] // empty' "$HOME/.claude.json" >/dev/null 2>&1)
+  ([ -f "$HOME/.claude.json" ] && jq -e '.mcpServers.context7 // .mcpServers["context7-mcp"] // empty' "$HOME/.claude.json" >/dev/null 2>&1) || \
+  # Plugin-installed Context7 (surfaces as mcp__plugin_context7_context7__*; registered under .enabledPlugins, not .mcpServers)
+  ([ -f "$HOME/.claude/settings.json" ] && jq -e '.enabledPlugins | to_entries[] | select(.key | test("^context7"; "i")) | select(.value == true)' "$HOME/.claude/settings.json" >/dev/null 2>&1)
 }
 
 is_qdrant_mcp_registered() {
@@ -147,8 +150,56 @@ prompt_input() {
   fi
 }
 
+# Refuse to operate as a project if cwd is the Solo Orchestrator framework
+# repo itself. Every project-targeted script (init.sh, verify-install.sh,
+# process-checklist.sh, upgrade-project.sh, intake-wizard.sh,
+# pending-approval.sh) must call this BEFORE any file writes.
+#
+# UAT 2026-04-25 fix (U-N + U-O): a UAT agent's cwd was the framework dir
+# (instead of their tempdir), so verify-install.sh + indirectly CDF init
+# scattered .claude/, .claude-backup/, gates/, hooks/, rules/, and
+# APPROVAL_LOG.md into the framework root. None tracked, but contaminates
+# the workspace and can sneak into commits.
+#
+# Detection signature: the framework has a top-level init.sh whose header
+# contains "Solo Orchestrator — Project Initialization Script" — a string
+# that's specific to this framework and won't appear in arbitrary projects'
+# init.sh files. Also check for templates/generated/ to triple-confirm.
+guard_not_in_framework() {
+  local cwd
+  cwd="$(pwd)"
+  if [ -f "$cwd/init.sh" ] \
+     && grep -q "Solo Orchestrator — Project Initialization Script" "$cwd/init.sh" 2>/dev/null \
+     && [ -d "$cwd/templates/generated" ]; then
+    print_fail "Refusing to operate inside the Solo Orchestrator framework repo."
+    echo "  Detected framework signature at: $cwd" >&2
+    echo "" >&2
+    echo "  This script targets a project, not the framework itself." >&2
+    echo "  Move to your project directory and re-run:" >&2
+    echo "    cd /path/to/your-project" >&2
+    echo "" >&2
+    echo "  If this directory IS your project (i.e., you cloned solo-orchestrator" >&2
+    echo "  AS a project), the framework is mis-installed — clone solo-orchestrator" >&2
+    echo "  separately and run init.sh from inside an empty project directory." >&2
+    return 1
+  fi
+  return 0
+}
+
 # Prompt for a numbered choice from a list of options.
 # Usage: result=$(prompt_choice "Pick one:" "option1" "option2" "option3")
+#
+# UAT 2026-04-25 fix (agent 12): EOF guard. The original loop had no exit
+# condition for stdin EOF — `read` returns non-zero on EOF, but the loop
+# kept retrying and re-printing "Invalid choice", spinning the CPU and
+# producing megabytes of output until killed. Affected ANY scripted
+# invocation of init.sh (or any caller of prompt_choice) when canned
+# answers were under-fed.
+#
+# Fix: detect read's non-zero return (EOF). On EOF, print a clear failure
+# to stderr and return 1 (caller can decide whether to abort or default).
+# Bonus: cap retries at 100 so even a malformed-but-non-EOF input stream
+# doesn't burn forever.
 prompt_choice() {
   local prompt="$1"
   shift
@@ -158,14 +209,24 @@ prompt_choice() {
     echo "  $((i+1)). ${options[$i]}" >&2
   done
   local choice
-  while true; do
-    read -rp "$(echo -e "${BOLD}Select [1-${#options[@]}]${NC}: ")" choice
+  local retries=0
+  local max_retries=100
+  while [ "$retries" -lt "$max_retries" ]; do
+    if ! read -rp "$(echo -e "${BOLD}Select [1-${#options[@]}]${NC}: ")" choice; then
+      echo "" >&2
+      echo "  prompt_choice: stdin closed (EOF) before a valid choice was supplied." >&2
+      echo "  This usually means a scripted/heredoc invocation under-fed the prompt." >&2
+      return 1
+    fi
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#options[@]}" ]; then
       echo "${options[$((choice-1))]}"
-      return
+      return 0
     fi
     echo "  Invalid choice. Enter a number between 1 and ${#options[@]}." >&2
+    retries=$((retries + 1))
   done
+  echo "  prompt_choice: $max_retries invalid attempts; aborting to prevent loop." >&2
+  return 1
 }
 
 # Prompt user to install a missing tool. Returns 0 if installed, 1 if skipped.

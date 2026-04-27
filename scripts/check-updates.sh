@@ -51,10 +51,13 @@ echo -e "${BOLD}║      Solo Orchestrator — Update Check                   �
 echo -e "${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# Show pinned version if available
-if [ -f ".claude/framework-version.txt" ]; then
-  pinned_sha=$(cat .claude/framework-version.txt)
-  print_info "Project pinned at framework version: ${pinned_sha:0:12}"
+# Show pinned Development Guardrails version if available (from CDF's manifest.json)
+if [ -f ".claude/manifest.json" ] && command -v jq &>/dev/null; then
+  cdf_commit=$(jq -r '.frameworkCommit // empty' .claude/manifest.json 2>/dev/null)
+  cdf_version=$(jq -r '.frameworkVersion // empty' .claude/manifest.json 2>/dev/null)
+  if [ -n "$cdf_commit" ] || [ -n "$cdf_version" ]; then
+    print_info "Development Guardrails pinned at: ${cdf_version:-unknown}${cdf_commit:+ (${cdf_commit:0:12})}"
+  fi
 fi
 
 changes=0

@@ -35,6 +35,7 @@ PHASE2_INIT_STEPS=(remote_repo_created branch_protection_configured project_scaf
 # --- Argument parsing ---
 ACTION=""
 ARG_VALUE=""
+COMMIT_MSG=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -47,6 +48,7 @@ while [ $# -gt 0 ]; do
     --verify-init)      ACTION="verify-init";       shift ;;
     --status)           ACTION="status";            shift ;;
     --check-commit-ready) ACTION="check-commit-ready"; shift ;;
+    --check-commit-message) ACTION="check-commit-message"; COMMIT_MSG="$2"; shift 2 ;;
     --reset)            ACTION="reset";             ARG_VALUE="$2"; shift 2 ;;
     --reset-all)        ACTION="reset-all";         shift ;;
     --help|-h)
@@ -61,6 +63,7 @@ while [ $# -gt 0 ]; do
       echo "  --verify-init               Auto-verify Phase 2 initialization steps"
       echo "  --status                    Print human-readable status of all processes"
       echo "  --check-commit-ready        Check if commit is allowed (used by PreToolUse hook)"
+      echo "  --check-commit-message MSG  Check commit-message prefix (feat:) against Build Loop state (BL-006)"
       echo "  --reset PROCESS             Reset a single process to initial state"
       echo "  --reset-all                 Reset all processes to initial state"
       echo "  --help                      Show this help"
@@ -120,6 +123,49 @@ step_is_completed() {
   local process="$1"
   local step="$2"
   jq -e --arg step "$step" ".${process}.steps_completed | index(\$step) != null" "$PROCESS_STATE" >/dev/null 2>&1
+}
+
+# --- Helper: require Build Loop state sufficient for a commit ---
+# Used by both the file-heuristic path (--check-commit-ready) and the
+# commit-message-triggered path (--check-commit-message). Prints the spec's
+# Case A / Case B remediation to stderr on failure. Returns 0 if state OK,
+# 1 otherwise. Reads $PROCESS_STATE and the BUILD_LOOP_STEPS array.
+require_build_loop_state_for_commit() {
+  local feature
+  feature=$(jq -r '.build_loop.feature // "null"' "$PROCESS_STATE")
+  if [ "$feature" = "null" ]; then
+    print_fail "pre-commit gate: 'feat(...)' commit blocked — no Build Loop active."
+    echo "MVP Cutline work and all features require a Build Loop per" >&2
+    echo "docs/builders-guide.md \"MVP Cutline Work Requires the Build Loop\"." >&2
+    echo "" >&2
+    echo "To proceed:" >&2
+    echo "  1. scripts/process-checklist.sh --start-feature \"NAME\"" >&2
+    echo "  2. Write failing tests, implement, verify, update docs" >&2
+    echo "  3. Complete each step: scripts/process-checklist.sh --complete-step build_loop:STEP" >&2
+    echo "  4. Re-run your commit" >&2
+    echo "" >&2
+    echo "If this commit is NOT a feature (tooling, CI, scaffolding, docs)," >&2
+    echo "change the conventional-commit type: feat: -> chore:/build:/ci:/docs:." >&2
+    return 1
+  fi
+
+  # Check first 5 build_loop steps: tests_written, tests_verified_failing,
+  # implemented, security_audit, documentation_updated (feature_recorded is
+  # step 6 and not required at commit time).
+  local required_build_steps=("${BUILD_LOOP_STEPS[@]:0:5}")
+  for step in "${required_build_steps[@]}"; do
+    if ! step_is_completed "build_loop" "$step"; then
+      print_fail "pre-commit gate: 'feat($feature)' commit blocked — Build Loop incomplete."
+      echo "Missing step: $step" >&2
+      echo "" >&2
+      echo "Run: scripts/process-checklist.sh --complete-step build_loop:$step" >&2
+      echo "Then: scripts/process-checklist.sh --status  (to verify)" >&2
+      echo "Then re-run your commit." >&2
+      return 1
+    fi
+  done
+
+  return 0
 }
 
 # --- Actions ---
@@ -409,6 +455,16 @@ complete_step() {
     print_ok "Phase 2 initialization auto-verified (all ${#steps[@]} steps complete)"
   fi
 
+  # Auto-reset build_loop when feature_recorded lands — the previous feature's
+  # loop is consumed. Without this, .build_loop.feature stays non-null and all
+  # 5 prior steps stay marked complete, so the BL-006 commit-message gate
+  # treats subsequent `feat(...)` commits as if a fresh loop is satisfied.
+  # UAT 2026-04-25 bug C2 (agents 12, 43, 46): "between-features grace window."
+  if [ "$process" = "build_loop" ] && [ "$step_id" = "feature_recorded" ]; then
+    jq '.build_loop = {"feature": null, "step": 0, "steps_completed": [], "started_at": null}' "$PROCESS_STATE" > "$PROCESS_STATE.tmp" && mv "$PROCESS_STATE.tmp" "$PROCESS_STATE"
+    print_ok "Build loop reset — start the next feature with: scripts/process-checklist.sh --start-feature \"NAME\""
+  fi
+
   # Show next step if any
   local next_index=$((target_index + 1))
   if [ "$next_index" -lt "${#steps[@]}" ]; then
@@ -521,22 +577,41 @@ verify_init() {
     print_fail "remote_repo_created — no git remote origin found"
   fi
 
-  # branch_protection_configured + ci_pipeline_configured: .github/workflows/ci.yml exists
-  if [ -f ".github/workflows/ci.yml" ]; then
-    if ! step_is_completed "phase2_init" "branch_protection_configured"; then
-      jq '.phase2_init.steps_completed += ["branch_protection_configured"]' "$PROCESS_STATE" > "$PROCESS_STATE.tmp" && mv "$PROCESS_STATE.tmp" "$PROCESS_STATE"
-      auto_marked=$((auto_marked + 1))
+  # branch_protection_configured: REAL API verification via host dispatcher
+  # (spec 2026-04-21 — replaces the previous "CI yaml exists" proxy check).
+  local host_dispatcher="$SCRIPT_DIR/lib/host.sh"
+  if [ -f "$host_dispatcher" ] && [ -f ".claude/manifest.json" ]; then
+    # shellcheck disable=SC1090
+    source "$host_dispatcher"
+    local mode
+    mode=$(jq -r '.mode // "personal"' .claude/manifest.json 2>/dev/null || echo "personal")
+    if host_load_driver 2>/dev/null && host_verify_protection "main" "$mode" 2>/dev/null; then
+      if ! step_is_completed "phase2_init" "branch_protection_configured"; then
+        jq '.phase2_init.steps_completed += ["branch_protection_configured"]' "$PROCESS_STATE" > "$PROCESS_STATE.tmp" && mv "$PROCESS_STATE.tmp" "$PROCESS_STATE"
+        auto_marked=$((auto_marked + 1))
+      fi
+      print_ok "branch_protection_configured — host protection verified via API"
+    else
+      print_fail "branch_protection_configured — protection verification failed (run scripts/check-gate.sh --preflight)"
     fi
-    print_ok "branch_protection_configured — CI workflow exists"
+  else
+    print_fail "branch_protection_configured — host dispatcher or manifest missing"
+  fi
 
+  # ci_pipeline_configured: host-aware CI file location
+  local ci_file=""
+  if [ -f ".github/workflows/ci.yml" ];      then ci_file=".github/workflows/ci.yml"
+  elif [ -f ".gitlab-ci.yml" ];              then ci_file=".gitlab-ci.yml"
+  elif [ -f "bitbucket-pipelines.yml" ];     then ci_file="bitbucket-pipelines.yml"
+  fi
+  if [ -n "$ci_file" ]; then
     if ! step_is_completed "phase2_init" "ci_pipeline_configured"; then
       jq '.phase2_init.steps_completed += ["ci_pipeline_configured"]' "$PROCESS_STATE" > "$PROCESS_STATE.tmp" && mv "$PROCESS_STATE.tmp" "$PROCESS_STATE"
       auto_marked=$((auto_marked + 1))
     fi
-    print_ok "ci_pipeline_configured — CI workflow exists"
+    print_ok "ci_pipeline_configured — CI config exists at $ci_file"
   else
-    print_fail "branch_protection_configured — .github/workflows/ci.yml not found"
-    print_fail "ci_pipeline_configured — .github/workflows/ci.yml not found"
+    print_fail "ci_pipeline_configured — no CI config found (.github/workflows/ci.yml | .gitlab-ci.yml | bitbucket-pipelines.yml)"
   fi
 
   # project_scaffolded: any common lockfile exists
@@ -788,24 +863,7 @@ check_commit_ready() {
 
   # Phase 2 source commit checks
   if [ "$current_phase" -eq 2 ]; then
-    # Must have a feature started
-    local feature
-    feature=$(jq -r '.build_loop.feature // "null"' "$PROCESS_STATE")
-    if [ "$feature" = "null" ]; then
-      print_fail "No feature started."
-      echo "Run: scripts/process-checklist.sh --start-feature 'name'" >&2
-      exit 1
-    fi
-
-    # Check build_loop steps through documentation_updated (first 5)
-    local required_build_steps=("${BUILD_LOOP_STEPS[@]:0:5}")
-    for step in "${required_build_steps[@]}"; do
-      if ! step_is_completed "build_loop" "$step"; then
-        print_fail "Build loop step '$step' not completed for feature '$feature'."
-        echo "Run: scripts/process-checklist.sh --complete-step build_loop:$step" >&2
-        exit 1
-      fi
-    done
+    require_build_loop_state_for_commit || exit 1
 
     # If UAT session is in progress, all 9 steps must be complete
     local uat_started
@@ -963,6 +1021,48 @@ EOF
   print_ok "All processes reset to initial state"
 }
 
+# --- BL-006: commit-message-triggered Build Loop enforcement ---
+# Inspects the subject line of a commit message. If it starts with a
+# Conventional Commits feature prefix (feat, feat(x), feat!, feat(x)!),
+# require the Build Loop state to be sufficient for a commit. Otherwise,
+# exit 0 silently. Phase gate: Phase < 2 skips enforcement.
+check_commit_message() {
+  local msg="$1"
+
+  ensure_state_file
+
+  # Empty message: nothing to check.
+  if [ -z "$msg" ]; then
+    exit 0
+  fi
+
+  # Take only the first line (subject).
+  local subject
+  subject=$(printf '%s\n' "$msg" | head -n 1)
+
+  # Read current phase.
+  local current_phase=0
+  if [ -f "$PHASE_STATE" ]; then
+    current_phase=$(jq -r '.current_phase // 0' "$PHASE_STATE" 2>/dev/null || echo "0")
+  fi
+
+  # Phase gate: enforcement starts at Phase 2.
+  if [ "$current_phase" -lt 2 ]; then
+    exit 0
+  fi
+
+  # Feat-prefix regex, anchored, case-sensitive per Conventional Commits.
+  # Matches: feat:, feat(x):, feat!:, feat(x)!: — each followed by whitespace.
+  if ! [[ "$subject" =~ ^feat(\([^\)]*\))?!?:[[:space:]] ]]; then
+    exit 0
+  fi
+
+  # Feat-prefixed: require Build Loop state sufficient for a commit.
+  require_build_loop_state_for_commit || exit 1
+
+  exit 0
+}
+
 # --- Dispatch ---
 case "$ACTION" in
   start-feature)      start_feature "$ARG_VALUE" ;;
@@ -974,6 +1074,7 @@ case "$ACTION" in
   verify-init)        verify_init ;;
   status)             show_status ;;
   check-commit-ready) check_commit_ready ;;
+  check-commit-message) check_commit_message "$COMMIT_MSG" ;;
   reset)              reset_process "$ARG_VALUE" ;;
   reset-all)          reset_all ;;
 esac
