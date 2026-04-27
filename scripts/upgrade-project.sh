@@ -8,6 +8,20 @@ set -euo pipefail
 # Handles all upgrade paths: track upgrades, deployment upgrades,
 # POC-to-production, and personal-to-sponsored-POC transitions.
 #
+# Changelog:
+# - BL-006 (2026-04-24): pre-commit gate now blocks feat: commits without
+#   an active Build Loop. No migration code needed — the updated
+#   scripts/process-checklist.sh and scripts/pre-commit-gate.sh are copied
+#   by this script's existing behavior, so running an upgrade picks it up.
+# - BL-015 (2026-04-25): pre-commit gate now blocks commits and PR creation
+#   when .claude/pending-approval.json exists. New helper script
+#   scripts/pending-approval.sh. CLAUDE.md template gets new bullet under
+#   Construction Rules. Upgrade picks up the new scripts and template.
+# - BL-016 (2026-04-25): init.sh now supports --non-interactive mode for
+#   scriptable project setup (CI, UAT, AI agents). No upgrade-project.sh
+#   change needed — scripts/init.sh is copied into projects but agents
+#   typically invoke the framework's init.sh directly.
+#
 # Usage:
 #   scripts/upgrade-project.sh --track standard          # Track upgrade only
 #   scripts/upgrade-project.sh --deployment organizational  # Deployment upgrade only
@@ -142,6 +156,37 @@ if ! command -v python3 &>/dev/null; then
   exit 1
 fi
 
+# UAT 2026-04-25 fix (U-N): refuse to operate inside the framework repo.
+guard_not_in_framework || exit 1
+
+# --- BL-015 pending-approval sentinel respect (UAT 2026-04-25 fix C5) ---
+# If the agent has offered structured options to the user via
+# scripts/pending-approval.sh, refuse to advance an irreversible upgrade.
+# Surfaced by 5/5 upgrade UAT agents (49, 62, 79, 82, 84): upgrade-project.sh
+# was happily writing files and committing while a sentinel existed.
+PENDING_APPROVAL_FILE="$PROJECT_ROOT/.claude/pending-approval.json"
+if [ -f "$PENDING_APPROVAL_FILE" ]; then
+  print_fail "upgrade blocked — pending user decision."
+  if jq -e . "$PENDING_APPROVAL_FILE" >/dev/null 2>&1; then
+    pa_question=$(jq -r '.question // "(missing)"' "$PENDING_APPROVAL_FILE")
+    pa_offered=$(jq -r '.offered_at // "(unknown)"' "$PENDING_APPROVAL_FILE")
+    echo "" >&2
+    echo "  Pending question: \"$pa_question\" (offered $pa_offered)" >&2
+    echo "  Options:" >&2
+    jq -r '.options[]? // empty | "    " + .' "$PENDING_APPROVAL_FILE" >&2
+  else
+    echo "" >&2
+    echo "  Sentinel file $PENDING_APPROVAL_FILE exists but is malformed." >&2
+    echo "  Treated as in-flight per CDF 4.2.3 contract." >&2
+  fi
+  echo "" >&2
+  echo "  Wait for the user to pick, then:" >&2
+  echo "    scripts/pending-approval.sh --resolve" >&2
+  echo "  Or, if the question is being aborted:" >&2
+  echo "    scripts/pending-approval.sh --clear" >&2
+  exit 1
+fi
+
 # --- File paths ---
 PHASE_STATE="$PROJECT_ROOT/.claude/phase-state.json"
 TOOL_PREFS="$PROJECT_ROOT/.claude/tool-preferences.json"
@@ -191,6 +236,25 @@ if [ -f "$INTAKE_PROGRESS" ]; then
   fi
   if [ -z "$CURRENT_LANGUAGE" ]; then
     CURRENT_LANGUAGE=$(jq -r '.language // ""' "$INTAKE_PROGRESS")
+  fi
+fi
+
+# Final fallback: read from phase-state.json — the canonical source init.sh writes.
+# UAT 2026-04-25 fix C4: agents 49,77,78,80,81,82 all hit "Project is not in
+# POC mode" when intake-progress.json was missing because init.sh never creates
+# it. phase-state.json carries .track/.deployment/.poc_mode from init.sh:1527.
+if [ -f "$PHASE_STATE" ]; then
+  if [ -z "$CURRENT_TRACK" ]; then
+    CURRENT_TRACK=$(jq -r '.track // ""' "$PHASE_STATE")
+  fi
+  if [ -z "$CURRENT_DEPLOYMENT" ]; then
+    CURRENT_DEPLOYMENT=$(jq -r '.deployment // ""' "$PHASE_STATE")
+  fi
+  if [ -z "$CURRENT_POC_MODE" ]; then
+    CURRENT_POC_MODE=$(jq -r '.poc_mode // ""' "$PHASE_STATE")
+    if [ "$CURRENT_POC_MODE" = "null" ]; then
+      CURRENT_POC_MODE=""
+    fi
   fi
 fi
 
@@ -1310,6 +1374,109 @@ if [ -x "scripts/verify-install.sh" ]; then
   echo ""
   print_step "Running post-upgrade verification..."
   bash scripts/verify-install.sh || true
+fi
+
+# --- Host-aware migration (spec 2026-04-21) ---
+# Projects created before the host-aware gate need the flat CI template layout
+# migrated into per-host subfolders and the manifest backfilled with a host field.
+# This runs idempotently — safe on already-migrated projects.
+
+if [ -d templates/pipelines/ci ] && [ ! -d templates/pipelines/ci/github ] && ls templates/pipelines/ci/*.yml >/dev/null 2>&1; then
+  print_step "Migrating flat CI template layout → per-host subfolders"
+  mkdir -p templates/pipelines/ci/github templates/pipelines/release/github
+  for f in templates/pipelines/ci/*.yml; do
+    [ -f "$f" ] && (git mv "$f" "templates/pipelines/ci/github/$(basename "$f")" 2>/dev/null || mv "$f" "templates/pipelines/ci/github/$(basename "$f")")
+  done
+  for f in templates/pipelines/release/*.yml; do
+    [ -f "$f" ] && (git mv "$f" "templates/pipelines/release/github/$(basename "$f")" 2>/dev/null || mv "$f" "templates/pipelines/release/github/$(basename "$f")")
+  done
+  print_ok "CI/release templates moved to github/ subfolders"
+fi
+
+if [ -f .claude/manifest.json ] && ! jq -e '.host' .claude/manifest.json >/dev/null 2>&1; then
+  print_step "Backfilling manifest.json 'host' field"
+  print_info "Manifest predates the host-aware gate — inferring host from git remote"
+  host_url=$(git remote get-url origin 2>/dev/null || echo "")
+  case "$host_url" in
+    *github.com*)    inferred_host="github" ;;
+    *gitlab*)        inferred_host="gitlab" ;;
+    *bitbucket.org*) inferred_host="bitbucket" ;;
+    *)               inferred_host="other" ;;
+  esac
+  jq --arg h "$inferred_host" '.host = $h' .claude/manifest.json > .claude/manifest.json.tmp \
+    && mv .claude/manifest.json.tmp .claude/manifest.json
+  print_ok "host set to '$inferred_host' (verify via scripts/check-gate.sh --backfill-host if wrong)"
+
+  echo ""
+  print_info "Before your next Phase 1→2 transition, run:"
+  print_info "  bash scripts/check-gate.sh --preflight"
+  print_info "If preflight fails, run:"
+  print_info "  bash scripts/check-gate.sh --repair"
+  echo ""
+fi
+
+# --- UAT template migration (spec 2026-04-23-uat-template-quality-design.md) ---
+# Re-copy updated UAT source templates and per-platform reference pair.
+# Idempotent — safe to re-run.
+if [ -d tests/uat/templates ] || [ -d tests/uat ]; then
+  print_step "Migrating UAT templates and references"
+  mkdir -p tests/uat/templates tests/uat/examples
+
+  # Source templates
+  if [ -f "$SCRIPT_DIR/../templates/uat/test-session-template.html" ]; then
+    cp "$SCRIPT_DIR/../templates/uat/test-session-template.html" \
+       tests/uat/templates/test-session-template.html
+    cp "$SCRIPT_DIR/../templates/uat/test-session-template.md" \
+       tests/uat/templates/test-session-template.md
+    print_ok "UAT source templates refreshed"
+  fi
+
+  # Per-platform reference pair (read PLATFORM from intake-progress.json)
+  uat_platform=""
+  if [ -f .claude/intake-progress.json ]; then
+    uat_platform=$(jq -r '.answers.platform // empty' .claude/intake-progress.json 2>/dev/null || true)
+  fi
+
+  if [ -n "$uat_platform" ] && [ "$uat_platform" != "other" ] && \
+     [ -f "$SCRIPT_DIR/../templates/uat/references/${uat_platform}-pre-flight.html" ]; then
+    cp "$SCRIPT_DIR/../templates/uat/references/${uat_platform}-pre-flight.html" \
+       tests/uat/examples/pre-flight-reference.html
+    cp "$SCRIPT_DIR/../templates/uat/references/${uat_platform}-scenario.json" \
+       tests/uat/examples/scenario-reference.json
+    print_ok "UAT reference pair copied for platform '$uat_platform'"
+  elif [ "$uat_platform" = "other" ]; then
+    print_info "Platform is 'other' — UAT reference is co-build protocol."
+    print_info "See docs/uat-authoring-guide.md § 5 next time you start a UAT session."
+  else
+    print_warn "UAT platform unknown (intake-progress.json missing or lacks 'platform' field). Skipping reference copy; see docs/uat-authoring-guide.md."
+  fi
+
+  echo ""
+  print_info "UAT quality guardrails now active. Next UAT session should:"
+  print_info "  1. Read templates/uat/test-session-template.html's embedded checklist"
+  print_info "  2. Use tests/uat/examples/ as shape references (first-class platforms)"
+  print_info "  3. Run scripts/lint-uat-scenarios.sh <populated-file> before saving"
+  print_info "See docs/uat-authoring-guide.md for details."
+  echo ""
+fi
+
+# --- Framework-helper script refresh (UAT 2026-04-25 fix C1) ---
+# init.sh's file-copy block enumerates each helper script explicitly. When new
+# helpers ship in the framework (BL-009: lint-uat-scenarios.sh; BL-015:
+# pending-approval.sh), existing projects can't pick them up by re-running
+# init. This block syncs the post-BL-009/BL-015 helper set into the project's
+# scripts/ directory. Idempotent: cp overwrites existing files identically.
+print_step "Refreshing framework helper scripts (BL-009, BL-015)"
+if [ -d scripts ]; then
+  for helper in pending-approval.sh lint-uat-scenarios.sh; do
+    if [ -f "$SCRIPT_DIR/$helper" ]; then
+      cp "$SCRIPT_DIR/$helper" "scripts/$helper"
+      chmod +x "scripts/$helper"
+      print_ok "scripts/$helper refreshed from framework"
+    fi
+  done
+else
+  print_warn "scripts/ directory not found in project root — skipping helper refresh"
 fi
 
 # Run full project validation to surface new track requirements

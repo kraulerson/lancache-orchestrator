@@ -14,6 +14,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/helpers.sh"
 
+# UAT 2026-04-25 fix (U-N): refuse to operate inside the framework repo.
+# verify-install.sh's auto-create-stub-artifacts behavior was the root cause
+# of the framework-self-contamination incident.
+guard_not_in_framework || exit 1
+
 # --- Parse arguments ---
 MODE="interactive"  # interactive | check-only | auto-fix
 while [ $# -gt 0 ]; do
@@ -446,9 +451,8 @@ check_plugins_mcp() {
     register_fixable "Superpowers plugin not installed" "fix_superpowers"
   fi
 
-  # Context7 MCP — check both config locations
-  if ([ -f "$HOME/.claude/settings.json" ] && jq -e '.mcpServers.context7 // .mcpServers["context7-mcp"] // empty' "$HOME/.claude/settings.json" >/dev/null 2>&1) || \
-     ([ -f "$HOME/.claude.json" ] && jq -e '.mcpServers.context7 // .mcpServers["context7-mcp"] // empty' "$HOME/.claude.json" >/dev/null 2>&1); then
+  # Context7 MCP — direct MCP registration or plugin-installed (see lib/helpers.sh)
+  if is_context7_mcp_registered; then
     register_pass "Context7 MCP configured"
   elif command -v node &>/dev/null; then
     register_fixable "Context7 MCP not configured" "fix_context7"
@@ -680,7 +684,7 @@ fix_precommit_hook() {
 set -euo pipefail
 FAILED=0
 if command -v gitleaks &>/dev/null; then
-  if ! gitleaks protect --staged --verbose --no-banner 2>/dev/null; then
+  if ! gitleaks git --staged 2>/dev/null; then
     echo "[BLOCKED] gitleaks detected secrets in staged files."
     FAILED=1
   fi

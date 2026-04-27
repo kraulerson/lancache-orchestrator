@@ -20,33 +20,41 @@ BUILD_PROGRESS=".claude/build-progress.json"
 ACTION=""
 FEATURE_NAME=""
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --check-batch)        ACTION="check-batch";        shift ;;
-    --check-phase-gate)   ACTION="check-phase-gate";   shift ;;
-    --reset-counter)      ACTION="reset-counter";       shift ;;
-    --reset-health-check) ACTION="reset-health-check"; shift ;;
-    --record-feature)     ACTION="record-feature"; FEATURE_NAME="$2"; shift 2 ;;
-    --help|-h)
-      echo "Usage: scripts/test-gate.sh [--check-batch] [--check-phase-gate] [--reset-counter] [--record-feature NAME]"
-      echo ""
-      echo "Commands:"
-      echo "  --check-batch       Check if testing session is due (exit 0=continue, 1=testing required)"
-      echo "  --check-phase-gate  Check if Phase 2→3 transition is clear (exit 0=clear, 1=blocked, 2=warnings)"
-      echo "  --reset-counter     Reset feature counter after testing session completes"
-      echo "  --record-feature N  Record a completed feature and increment counter"
-      exit 0
-      ;;
-    *)
-      echo "Unknown argument: $1" >&2
-      exit 1
-      ;;
-  esac
-done
+# Source-guard: the argument parser, "no action" check, and dispatch run only
+# when this script is executed directly. When sourced by tests (to call
+# _unrecord_feature_apply or other internal functions in isolation), these
+# blocks are skipped so the test process isn't killed by "No action specified".
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --check-batch)        ACTION="check-batch";        shift ;;
+      --check-phase-gate)   ACTION="check-phase-gate";   shift ;;
+      --reset-counter)      ACTION="reset-counter";       shift ;;
+      --reset-health-check) ACTION="reset-health-check"; shift ;;
+      --record-feature)     ACTION="record-feature"; FEATURE_NAME="$2"; shift 2 ;;
+      --unrecord-feature)   ACTION="unrecord-feature"; FEATURE_NAME="$2"; shift 2 ;;
+      --help|-h)
+        echo "Usage: scripts/test-gate.sh [--check-batch] [--check-phase-gate] [--reset-counter] [--record-feature NAME] [--unrecord-feature NAME]"
+        echo ""
+        echo "Commands:"
+        echo "  --check-batch         Check if testing session is due (exit 0=continue, 1=testing required)"
+        echo "  --check-phase-gate    Check if Phase 2→3 transition is clear (exit 0=clear, 1=blocked, 2=warnings)"
+        echo "  --reset-counter       Reset feature counter after testing session completes"
+        echo "  --record-feature N    Record a completed feature and increment counter"
+        echo "  --unrecord-feature N  Un-record a feature recorded in error (interactive; inverse of --record-feature)"
+        exit 0
+        ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
 
-if [ -z "$ACTION" ]; then
-  echo "No action specified. Use --help for usage." >&2
-  exit 1
+  if [ -z "$ACTION" ]; then
+    echo "No action specified. Use --help for usage." >&2
+    exit 1
+  fi
 fi
 
 # --- Ensure build-progress.json exists ---
@@ -114,6 +122,135 @@ record_feature() {
   if [ "$since_last" -ge "$interval" ]; then
     print_warn "Testing session now required before starting next feature"
   fi
+}
+
+# _unrecord_feature_apply <name>
+# Pure state transform; no tty check, no prompt, no audit log.
+# Inverse of record_feature: removes first occurrence of $name from
+# features_completed, decrements both counters floored at 0, re-evaluates
+# testing_required. Errors if name is not present or build-progress.json
+# is missing. Unit-testable via source.
+_unrecord_feature_apply() {
+  local name="${1:?_unrecord_feature_apply: name required}"
+
+  if [ ! -f "$BUILD_PROGRESS" ]; then
+    echo "_unrecord_feature_apply: $BUILD_PROGRESS does not exist" >&2
+    return 1
+  fi
+
+  # Presence check — errors if name not in features_completed
+  if ! jq --arg name "$name" -e '.features_completed | index($name) != null' "$BUILD_PROGRESS" >/dev/null; then
+    echo "_unrecord_feature_apply: feature '$name' not found in features_completed" >&2
+    return 1
+  fi
+
+  local tmp
+  tmp=$(mktemp)
+  jq --arg name "$name" '
+    (.features_completed
+      | (. | index($name)) as $i
+      | .[0:$i] + .[$i+1:]) as $new_arr |
+    .features_completed = $new_arr |
+    .features_since_last_test = ([.features_since_last_test - 1, 0] | max) |
+    .features_since_last_health_check = ([(.features_since_last_health_check // 0) - 1, 0] | max) |
+    .testing_required = (.features_since_last_test >= .test_interval)
+  ' "$BUILD_PROGRESS" > "$tmp" && mv "$tmp" "$BUILD_PROGRESS"
+}
+
+# unrecord_feature <name>
+# Interactive wrapper around _unrecord_feature_apply: tty guard,
+# state-change preview, Y/N confirmation, audit-log append.
+# Blocks agent callers (requires an interactive terminal).
+unrecord_feature() {
+  local name="${1:-}"
+
+  if [ -z "$name" ]; then
+    print_fail "Usage: --unrecord-feature NAME (feature name required)"
+    exit 1
+  fi
+
+  if [ ! -t 0 ]; then
+    print_fail "Unrecord requires interactive authorization."
+    echo "The Orchestrator must run this command directly in a terminal:" >&2
+    echo "  scripts/test-gate.sh --unrecord-feature \"$name\"" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$BUILD_PROGRESS" ]; then
+    print_fail "Nothing to unrecord: $BUILD_PROGRESS does not exist."
+    echo "No features have been recorded in this project yet." >&2
+    exit 1
+  fi
+
+  # Presence check + diagnostic output (repeats _apply's check to provide
+  # the current-features list before prompting)
+  if ! jq --arg name "$name" -e '.features_completed | index($name) != null' "$BUILD_PROGRESS" >/dev/null; then
+    print_fail "Feature '$name' not found in features_completed."
+    echo "Currently recorded features:" >&2
+    local features
+    features=$(jq -r '.features_completed[]' "$BUILD_PROGRESS" 2>/dev/null || true)
+    if [ -z "$features" ]; then
+      echo "  (none)" >&2
+    else
+      echo "$features" | sed 's/^/  - /' >&2
+    fi
+    exit 1
+  fi
+
+  # Compute preview values
+  local cur_array cur_fslt cur_fslhc cur_testing interval new_fslt new_fslhc new_testing new_array
+  cur_array=$(jq -c '.features_completed' "$BUILD_PROGRESS")
+  cur_fslt=$(jq -r '.features_since_last_test' "$BUILD_PROGRESS")
+  cur_fslhc=$(jq -r '.features_since_last_health_check // 0' "$BUILD_PROGRESS")
+  cur_testing=$(jq -r '.testing_required' "$BUILD_PROGRESS")
+  interval=$(jq -r '.test_interval' "$BUILD_PROGRESS")
+
+  new_fslt=$(( cur_fslt - 1 < 0 ? 0 : cur_fslt - 1 ))
+  new_fslhc=$(( cur_fslhc - 1 < 0 ? 0 : cur_fslhc - 1 ))
+  if [ "$new_fslt" -ge "$interval" ]; then
+    new_testing="true"
+  else
+    new_testing="false"
+  fi
+  new_array=$(jq --arg name "$name" -c '
+    (.features_completed | (. | index($name)) as $i
+     | .[0:$i] + .[$i+1:])' "$BUILD_PROGRESS")
+
+  # Show preview
+  echo "Unrecord feature '$name'?"
+  echo ""
+  echo "Current state:"
+  echo "  features_completed: $cur_array"
+  echo "  features_since_last_test: $cur_fslt / $interval (testing_required: $cur_testing)"
+  echo "  features_since_last_health_check: $cur_fslhc"
+  echo ""
+  echo "After unrecord:"
+  echo "  features_completed: $new_array"
+  echo "  features_since_last_test: $new_fslt / $interval (testing_required: $new_testing)"
+  echo "  features_since_last_health_check: $new_fslhc"
+  echo ""
+
+  local confirm
+  read -rp "Proceed? [y/N]: " confirm
+  if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    print_info "Unrecord cancelled."
+    exit 0
+  fi
+
+  # Apply
+  if ! _unrecord_feature_apply "$name"; then
+    print_fail "Unrecord failed — state unchanged"
+    exit 1
+  fi
+
+  # Audit log
+  local now
+  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  local audit_entry="[UNRECORD] feature '$name' unrecorded at $now by $(whoami)"
+  mkdir -p .claude
+  echo "$audit_entry" >> ".claude/process-audit.log"
+
+  print_ok "Feature '$name' unrecorded"
 }
 
 reset_counter() {
@@ -293,16 +430,19 @@ check_phase_gate() {
   fi
 }
 
-# --- Dispatch ---
-case "$ACTION" in
-  check-batch)        check_batch ;;
-  check-phase-gate)   check_phase_gate ;;
-  reset-counter)      reset_counter ;;
-  record-feature)     record_feature "$FEATURE_NAME" ;;
-  reset-health-check)
-    ensure_progress_file
-    jq '.features_since_last_health_check = 0' "$BUILD_PROGRESS" > "$BUILD_PROGRESS.tmp" && mv "$BUILD_PROGRESS.tmp" "$BUILD_PROGRESS"
-    echo "Context health check counter reset."
-    exit 0
-    ;;
-esac
+# --- Dispatch (source-guarded to match the argument parser above) ---
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "$ACTION" in
+    check-batch)        check_batch ;;
+    check-phase-gate)   check_phase_gate ;;
+    reset-counter)      reset_counter ;;
+    record-feature)     record_feature "$FEATURE_NAME" ;;
+    unrecord-feature)   unrecord_feature "$FEATURE_NAME" ;;
+    reset-health-check)
+      ensure_progress_file
+      jq '.features_since_last_health_check = 0' "$BUILD_PROGRESS" > "$BUILD_PROGRESS.tmp" && mv "$BUILD_PROGRESS.tmp" "$BUILD_PROGRESS"
+      echo "Context health check counter reset."
+      exit 0
+      ;;
+  esac
+fi

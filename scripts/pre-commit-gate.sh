@@ -15,9 +15,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Read the tool input from stdin
 INPUT=$(cat)
 
-# Extract the bash command from the JSON input
-# Claude Code passes: {"command": "git commit -m '...'", ...}
-COMMAND=$(echo "$INPUT" | jq -r '.command // empty' 2>/dev/null)
+# Extract the bash command from the JSON input.
+# Claude Code passes (verified against /anthropics/claude-code docs 2026-04-25):
+#   {"session_id": "...", "tool_name": "Bash", "tool_input": {"command": "..."}, ...}
+# Fall back to the legacy ".command" path so older test fixtures and any
+# manual JSON invocations continue to work.
+COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // .command // empty' 2>/dev/null)
 
 if [ -z "$COMMAND" ]; then
   exit 0
@@ -47,6 +50,22 @@ HOOKEOF
   exit 0
 fi
 
+# --- Early guard (spec 2026-04-21 host-aware repo gate) ---
+# Block git commit if no remote is configured. Solo Orchestrator requires a
+# created-and-protected remote from init onward; commits without a remote
+# indicate either a pre-fix project or drift that needs remediation.
+if echo "$COMMAND" | grep -qE '\bgit\b.*\bcommit\b' && ! echo "$COMMAND" | grep -qE 'git.*remote'; then
+  # Only check if we're in a git repo with no remote
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    if ! git remote get-url origin >/dev/null 2>&1; then
+      cat << HOOKEOF
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "pre-commit gate: no git remote configured. Solo Orchestrator requires a created-and-protected remote from project init onward. Run: scripts/check-gate.sh --backfill-host (if manifest missing host), then scripts/check-gate.sh --repair (to recreate remote and protection). See docs/builders-guide.md § Repository Setup."}}
+HOOKEOF
+      exit 0
+    fi
+  fi
+fi
+
 # Block --no-verify flag on git commit (bypasses security hooks)
 if echo "$COMMAND" | grep -qE '\bgit\b.*\bcommit\b.*--no-verify'; then
   cat << HOOKEOF
@@ -54,6 +73,78 @@ if echo "$COMMAND" | grep -qE '\bgit\b.*\bcommit\b.*--no-verify'; then
 HOOKEOF
   exit 0
 fi
+
+# --- BL-015: pending-approval sentinel reader ---
+# Blocks git commit and gh pr create when .claude/pending-approval.json exists.
+# Runs after security gates (SOIF_*, no-remote, --no-verify) but before
+# workflow gates (--amend, bl006_check, --check-commit-ready) so pending
+# approval preempts workflow concerns without hiding security violations.
+# See docs/builders-guide.md "Structured Decision Points" for the contract.
+
+build_pa_rich_reason() {
+  local sentinel="$1" action_label="$2"
+  local question options recommendation offered_at
+  question=$(jq -er '.question' "$sentinel") || return 1
+  options=$(jq -er '.options | map("  " + .) | join("\n")' "$sentinel") || return 1
+  recommendation=$(jq -er '.recommendation' "$sentinel") || return 1
+  offered_at=$(jq -er '.offered_at' "$sentinel") || return 1
+  cat <<EOF
+pre-commit gate: $action_label blocked — pending user decision.
+
+Pending question: "$question"
+Options:
+$options
+Recommendation: $recommendation
+Offered at: $offered_at
+
+Wait for the user to pick one, then:
+  scripts/pending-approval.sh --resolve
+EOF
+}
+
+build_pa_malformed_reason() {
+  local sentinel="$1" action_label="$2"
+  cat <<EOF
+pre-commit gate: $action_label blocked — pending user decision.
+
+The sentinel file $sentinel exists but is malformed.
+Treated as "in flight" per the CDF 4.2.3 contract.
+
+If this is a stale file from a crashed session, remove it manually:
+  rm $sentinel
+EOF
+}
+
+pa_check() {
+  # Only applies to git commit or gh pr create. Other commands fall through.
+  local is_commit=false is_pr=false
+  echo "$COMMAND" | grep -qE '\bgit\b.*\bcommit\b' && is_commit=true
+  echo "$COMMAND" | grep -qE '\bgh\b.*\bpr\b.*\bcreate\b' && is_pr=true
+  [ "$is_commit" = false ] && [ "$is_pr" = false ] && return 0
+
+  local sentinel=".claude/pending-approval.json"
+  [ -f "$sentinel" ] || return 0
+
+  local action_label="commit"
+  [ "$is_pr" = true ] && action_label="PR creation"
+
+  local reason
+  if reason=$(build_pa_rich_reason "$sentinel" "$action_label" 2>/dev/null); then
+    :
+  else
+    reason=$(build_pa_malformed_reason "$sentinel" "$action_label")
+  fi
+
+  local escaped
+  escaped=$(echo "$reason" | tr '\n' ' ' | sed 's/"/\\"/g')
+  cat << HOOKEOF
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "$escaped"}}
+HOOKEOF
+  exit 0
+}
+
+pa_check
+# --- end BL-015 block ---
 
 # Warn on git commit --amend (rewrites commit history, bypasses build loop for amended content)
 if echo "$COMMAND" | grep -qE '\bgit\b.*\bcommit\b.*--amend'; then
@@ -63,10 +154,95 @@ HOOKEOF
   exit 0
 fi
 
+# --- BL-006: commit-message-triggered Build Loop enforcement ---
+# Scope: only fires on `git commit` authoring events (not merges, reverts,
+# cherry-picks, squash-merges, or editor-case commits). Extracts the message
+# from -m "..." / heredoc / -F file and delegates the policy decision to
+# process-checklist.sh --check-commit-message.
+
+bl006_check() {
+  # Only apply to `git commit` subcommands.
+  echo "$COMMAND" | grep -qE '\bgit\b.*\bcommit\b' || return 0
+
+  # Derivative-commit filters: pass through.
+  # --amend is already handled above (warns, exits). Belt-and-braces.
+  echo "$COMMAND" | grep -qE '\-\-amend\b' && return 0
+  # Merge in progress.
+  [ -f .git/MERGE_HEAD ] && return 0
+  # Other derivative commands that might embed feat: in their message.
+  echo "$COMMAND" | grep -qE '\bgit\b.*\b(merge|revert|cherry-pick)\b' && return 0
+  echo "$COMMAND" | grep -qE '\bgh\b.*\bpr\b.*\bmerge\b.*\-\-squash' && return 0
+
+  # Extract the message subject.
+  local msg=""
+
+  # 1. Heredoc: look for -m "$(cat <<EOF or -m "$(cat <<'EOF'
+  if echo "$COMMAND" | grep -qE "<<'?EOF'?"; then
+    # awk: after the <<EOF or <<'EOF' marker, the first non-empty content line
+    # before a standalone EOF is the subject.
+    msg=$(printf '%s\n' "$COMMAND" | awk '
+      /<<'"'"'?EOF'"'"'?/ { flag=1; next }
+      /^EOF$/ { flag=0 }
+      flag && !printed && NF>0 { print; printed=1; exit }
+    ')
+  fi
+
+  # 2. Inline -m "..." (double or single quotes). Only if heredoc didn't match.
+  if [ -z "$msg" ]; then
+    # Try double-quoted first, then single-quoted. Capture up to the closing
+    # quote. This is best-effort; exotic escaping falls through.
+    msg=$(printf '%s' "$COMMAND" | sed -nE 's/.*-m "([^"]*)".*/\1/p' | head -n 1)
+    if [ -z "$msg" ]; then
+      msg=$(printf '%s' "$COMMAND" | sed -nE "s/.*-m '([^']*)'.*/\\1/p" | head -n 1)
+    fi
+    # Split on real newlines; take first line.
+    msg=$(printf '%s\n' "$msg" | head -n 1)
+  fi
+
+  # 3. -F <file>. Only if no -m at all was seen.
+  if [ -z "$msg" ] && echo "$COMMAND" | grep -qE '\-F[[:space:]]+[^ ]+'; then
+    local f
+    f=$(echo "$COMMAND" | sed -nE 's/.*-F[[:space:]]+([^ ]+).*/\1/p' | head -n 1)
+    if [ -n "$f" ] && [ -r "$f" ]; then
+      msg=$(head -n 1 "$f")
+    fi
+  fi
+
+  # Empty: fall through (editor case or parse miss).
+  [ -z "$msg" ] && return 0
+
+  # Delegate to the subcommand. Capture both streams (print_fail uses stdout;
+  # echo-to-stderr is used for remediation lines).
+  local policy_err policy_exit=0
+  policy_err=$("$SCRIPT_DIR/process-checklist.sh" --check-commit-message "$msg" 2>&1) || policy_exit=$?
+
+  if [ "$policy_exit" -ne 0 ]; then
+    local reason
+    reason=$(echo "$policy_err" | tr '\n' ' ' | sed 's/"/\\"/g')
+    cat << HOOKEOF
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "$reason"}}
+HOOKEOF
+    exit 0
+  fi
+
+  return 0
+}
+
+bl006_check
+# --- end BL-006 block ---
+
 # Block git push --force (overwrites branch history)
 if echo "$COMMAND" | grep -qE '\bgit\b.*\bpush\b.*(-f|--force)'; then
   cat << HOOKEOF
 {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "Force push overwrites branch history and can destroy audit evidence. Use normal push. If you need to rewrite history, ask the Orchestrator."}}
+HOOKEOF
+  exit 0
+fi
+
+# Block gh repo create --push (bypasses branch-safety by pushing to a new remote without gate checks)
+if echo "$COMMAND" | grep -qE '\bgh\b.*\brepo\b.*\bcreate\b.*--push'; then
+  cat << HOOKEOF
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "gh repo create --push bypasses branch safety checks by pushing directly to a new remote. Create the repo without --push, then use git push after process checks pass."}}
 HOOKEOF
   exit 0
 fi
