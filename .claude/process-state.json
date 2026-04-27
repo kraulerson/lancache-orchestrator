@@ -1,9 +1,12 @@
 {
   "build_loop": {
-    "feature": null,
-    "step": 0,
-    "steps_completed": [],
-    "started_at": null
+    "feature": "BL5-F9-fastapi-skeleton",
+    "step": 2,
+    "steps_completed": [
+      "tests_written",
+      "tests_verified_failing"
+    ],
+    "started_at": "2026-04-27T12:20:24Z"
   },
   "uat_session": {
     "session_id": 2,
