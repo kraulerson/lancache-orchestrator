@@ -18,7 +18,7 @@ import asyncio
 import contextlib
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -119,6 +119,26 @@ class TestLifecycle:
             ):
                 pass
         assert exc_info.value.role in ("writer", "reader")
+
+
+# ----------------------------------------------------------------------
+# 1b. UAT-2 regression: Pool readers_count floor (V-1)
+# ----------------------------------------------------------------------
+
+
+class TestUat2PoolReadersCountFloor:
+    """V-1: Pool.create(readers_count=0) used to hang forever because
+    asyncio.Queue(maxsize=0) is unbounded but no readers are opened.
+    Settings clamps to >= 1 but Pool class also enforces it now."""
+
+    async def test_create_rejects_zero_readers(self, db_path: Path):
+        with pytest.raises(PoolInitError) as exc_info:
+            await Pool.create(database_path=db_path, readers_count=0)
+        assert "readers_count" in str(exc_info.value).lower()
+
+    async def test_create_rejects_negative_readers(self, db_path: Path):
+        with pytest.raises(PoolInitError):
+            await Pool.create(database_path=db_path, readers_count=-1)
 
 
 # ----------------------------------------------------------------------
@@ -289,6 +309,50 @@ class TestDataclassMapping:
             ("nope",),
         )
         assert games == []
+
+
+# ----------------------------------------------------------------------
+# 4b. UAT-2 regression: dataclass-mapping cls argument validation (V-4)
+# ----------------------------------------------------------------------
+
+
+class _NotADataclass:
+    """Plain class — used to verify read_one_as/read_all_as reject non-dataclass cls."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class TestUat2DataclassMappingRejectsNonDataclass:
+    """V-4: read_one_as / read_all_as / ReadTx.read_one_as / ReadTx.read_all_as /
+    WriteTx.read_one_as / WriteTx.read_all_as previously raised raw TypeError
+    on non-dataclass cls arg. Now wrapped as TypeError with a clear message
+    naming the offending argument."""
+
+    async def test_pool_read_one_as_rejects_non_dataclass(self, populated_pool: Pool):
+        with pytest.raises(TypeError, match="dataclass"):
+            await populated_pool.read_one_as(
+                _NotADataclass,
+                "SELECT id, platform, app_id, title FROM games WHERE id = ?",
+                (1,),
+            )
+
+    async def test_pool_read_all_as_rejects_non_dataclass(self, populated_pool: Pool):
+        with pytest.raises(TypeError, match="dataclass"):
+            await populated_pool.read_all_as(
+                _NotADataclass,
+                "SELECT id, platform, app_id, title FROM games",
+            )
+
+    async def test_read_tx_read_one_as_rejects_non_dataclass(self, populated_pool: Pool):
+        with pytest.raises(TypeError, match="dataclass"):
+            async with populated_pool.read_transaction() as tx:
+                await tx.read_one_as(
+                    _NotADataclass,
+                    "SELECT id, platform, app_id, title FROM games WHERE id = ?",
+                    (1,),
+                )
 
 
 # ----------------------------------------------------------------------
