@@ -40,15 +40,16 @@ class TestLifespanStartup:
 
 class TestLifespanFailures:
     async def test_lifespan_migration_failure_raises_systemexit(self, monkeypatch):
-        from asgi_lifespan import LifespanManager
-
+        """V-3 path / dev/null is rejected by migrate.run_migrations →
+        the lifespan catches MigrationError and raises SystemExit(1).
+        We bypass asgi-lifespan (it swallows SystemExit in its task
+        wrapper) and invoke FastAPI's lifespan_context directly."""
         from orchestrator.api.main import create_app
-        from orchestrator.db import migrate
 
         monkeypatch.setenv("ORCH_DATABASE_PATH", "/dev/null")  # V-3 reject path
         app = create_app()
-        with pytest.raises((SystemExit, migrate.MigrationError)):
-            async with LifespanManager(app):
+        with pytest.raises(SystemExit):
+            async with app.router.lifespan_context(app):
                 pass
 
     async def test_lifespan_returns_503_through_handler_when_unhealthy(self, lifespan_app):

@@ -1,8 +1,20 @@
-"""Tests for BodySizeCapMiddleware (spec §5.3)."""
+"""Tests for BodySizeCapMiddleware (spec §5.3).
+
+Note: body-cap is positioned OUTSIDE bearer-auth in the middleware stack
+(spec §5.1). The Content-Length path checks proactively (before any
+downstream middleware reads the body). The streaming path only fires
+when the app calls receive(); since bearer-auth doesn't read the body,
+unauthenticated streaming requests never hit the streaming cap. The
+streaming case therefore needs a request that reaches a body-reading
+layer — i.e., an authenticated request to a path the cap should still
+reject for size.
+"""
 
 from __future__ import annotations
 
 import json
+
+VALID_TOKEN = "a" * 32  # matches the conftest dummy token
 
 
 class TestBodySizeCapContentLength:
@@ -29,17 +41,71 @@ class TestBodySizeCapContentLength:
 
 
 class TestBodySizeCapStreaming:
-    async def test_chunked_oversize_rejected_413(self, client):
-        async def gen():
-            for _ in range(33):  # 33 KiB total > 32 KiB cap
-                yield b"x" * 1024
+    async def test_chunked_oversize_rejected_413_via_direct_middleware(self):
+        """Direct unit test: instantiate BodySizeCapMiddleware with a fake
+        downstream app that READS the body, send a fake ASGI streaming
+        request that exceeds the cap, verify 413 is sent.
 
-        r = await client.post(
-            "/api/v1/anything",
-            content=gen(),
-            headers={"Transfer-Encoding": "chunked"},
-        )
-        assert r.status_code == 413
+        Why direct: BL5 has no body-consuming endpoint (only GET /health),
+        so an HTTP-level streaming-cap test can't trigger the receive()
+        path. Direct middleware unit test verifies the streaming check
+        works as designed; integration coverage will land when the first
+        body-reading endpoint ships in BL6+."""
+        from orchestrator.api.middleware import BodySizeCapMiddleware
+
+        downstream_called: list[bool] = []
+        sent_messages: list[dict] = []
+
+        async def downstream_app(scope, receive, send):
+            # Drain the body — this is what triggers the streaming cap
+            while True:
+                msg = await receive()
+                if not msg.get("more_body", False):
+                    break
+            # If we got here without _BodyTooLargeError, the cap didn't fire.
+            downstream_called.append(True)
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [],
+                }
+            )
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        middleware = BodySizeCapMiddleware(downstream_app)
+
+        # Build the streaming chunks (no Content-Length → forces streaming path)
+        chunks = [b"x" * 1024 for _ in range(33)]  # 33 KiB > 32 KiB cap
+        chunks.append(b"")  # final empty chunk signals end
+
+        async def receive():
+            if not chunks:
+                return {"type": "http.disconnect"}
+            chunk = chunks.pop(0)
+            return {
+                "type": "http.request",
+                "body": chunk,
+                "more_body": bool(chunks),
+            }
+
+        async def send(message):
+            sent_messages.append(message)
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/whatever",
+            "headers": [],  # no content-length → forces streaming path
+        }
+
+        await middleware(scope, receive, send)
+
+        # Downstream should NOT have been called (cap fired first)
+        assert not downstream_called, "downstream app reached despite cap"
+        # First sent message should be a 413 response
+        assert sent_messages[0]["type"] == "http.response.start"
+        assert sent_messages[0]["status"] == 413
 
     async def test_chunked_under_cap_passes(self, client):
         async def gen():

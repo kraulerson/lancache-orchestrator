@@ -113,5 +113,5 @@ class TestBearerAuthLogging:
         assert len(rejected) >= 1
         e = rejected[0]
         if e.get("reason") == "bad_token":
-            assert "token_sha256_prefix" in e
-            assert len(e["token_sha256_prefix"]) == 8
+            assert "rejection_fingerprint" in e
+            assert len(e["rejection_fingerprint"]) == 8

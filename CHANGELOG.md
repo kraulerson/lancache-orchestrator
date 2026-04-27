@@ -20,6 +20,60 @@ for handoff clarity. Categories are ordered by impact severity.
 ## [Unreleased]
 
 ### Added
+- **FastAPI app skeleton** (BL5 / Feature 5) — `create_app()` factory at
+  `src/orchestrator/api/main.py`. Lifespan runs migrations + initializes
+  the BL4 pool singleton on startup; closes the pool with the BL4 30 s
+  hard timeout on shutdown. Run with
+  `uvicorn orchestrator.api.main:create_app --factory --host 127.0.0.1 --port 8765`.
+  See [ADR-0012](docs/ADR%20documentation/0012-fastapi-skeleton-architecture.md).
+- **`GET /api/v1/health`** endpoint per Bible §8.4. Returns the 7-field
+  response (status / version / uptime_sec / scheduler_running /
+  lancache_reachable / cache_volume_mounted / validator_healthy /
+  git_sha) with HTTP 200 if all subsystems healthy, 503 otherwise.
+  **Note:** BL5 ship state intentionally returns 503 because three
+  subsystems (`scheduler_running`, `lancache_reachable`,
+  `validator_healthy`) are stub-false until BL6+ flips them as features
+  land. Container HEALTHCHECK and k8s liveness probes should expect 503
+  during this transition.
+- **OpenAPI schema** at `/api/v1/openapi.json`, **Swagger UI** at
+  `/api/v1/docs`, **ReDoc** at `/api/v1/redoc`. `bearerAuth`
+  security_scheme registered so Swagger UI's Authorize button works.
+- **`asgi-lifespan==2.1.0`** added to `requirements-dev.txt` for
+  test-time lifespan integration.
+
+### Security
+- **TM-013 fingerprinting defense:** bearer-auth implemented as pure
+  ASGI middleware (not FastAPI Depends), so 404s on non-exempt paths
+  also require auth. Returns 401 with timing-safe `hmac.compare_digest`
+  comparison (UTF-8-encoded bytes, length-tolerant).
+- **OQ2 loopback enforcement:** path pattern
+  `^/api/v1/platforms/[^/]+/auth$` additionally requires
+  `request.client.host == "127.0.0.1"`. The route is reserved in BL5
+  (the actual handler lands in F1/F2); the middleware logic is in
+  place so BL6+ inherits enforcement automatically.
+- **TM-012 log redaction:** rejected bearer tokens logged with
+  `rejection_fingerprint` (8 hex of SHA-256, non-reversible). Field
+  name avoids the "token"/"auth"/"bearer"/"secret" keywords because
+  ID3's `_redact_sensitive_values` would auto-redact them. Verified by
+  `test_no_raw_token_in_logs` and `test_auth_rejected_event_emits_with_sha256_prefix`.
+- **TM-018 memory bomb defense:** ASGI middleware enforces 32 KiB
+  request-body cap (Bible §9.2). Two paths: Content-Length proactive
+  check (immediate 413 before any read); streaming check via
+  `receive()` interception (interrupts mid-stream when accumulated
+  bytes exceed cap). Streaming variant verified by direct middleware
+  unit test against a fake downstream app.
+- **CORS hardened:** `allow_credentials=False`. Bearer-token auth flows
+  in `Authorization` header, not cookies — closes the
+  `allow_origins=*` + `allow_credentials=true` footgun by constraint.
+  `allow_headers` whitelist: `Authorization`, `Content-Type`,
+  `X-Correlation-ID`. `expose_headers`: `X-Correlation-ID` (for
+  Game_shelf to log + correlate API calls).
+- **Correlation-ID propagation:** outermost middleware enters ID3's
+  `request_context()` per-request. Echoed in response header. Every
+  log line during request processing carries the correlation_id via
+  structlog contextvar — downstream debugging can grep one CID for
+  the full request trace.
+
 - **Async DB pool** (`src/orchestrator/db/pool.py`, BL4 / Feature 4) —
   hybrid 1-writer-N-reader topology on top of `aiosqlite`. Defense-in-depth
   write serialization (`asyncio.Lock` + `BEGIN IMMEDIATE` + `busy_timeout`).

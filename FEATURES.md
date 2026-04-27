@@ -172,4 +172,68 @@ filed as a follow-up.
 
 ---
 
+## Feature 5: BL5 — FastAPI Skeleton
+
+**Phase Built:** 2 (Milestone B, Build Loop 5)
+**Status:** Complete (2026-04-27)
+**Summary:** FastAPI application factory at `src/orchestrator/api/main.py:create_app`
+producing a configured FastAPI app with a 4-layer pure-ASGI middleware
+stack (CorrelationId / BodySizeCap / BearerAuth / CORS), an
+`@asynccontextmanager` lifespan that runs migrations and initializes
+the BL4 pool singleton, and one router (`/api/v1/health`) returning
+the 7-field response per Bible §8.4. Auth runs as middleware (not
+`Depends`) for TM-013 fingerprinting defense — 404s on non-exempt
+paths require auth. OQ2 loopback enforcement (`POST /api/v1/platforms/{name}/auth`
+requires `client.host == 127.0.0.1`) is in place even though the
+handler doesn't ship until F1/F2. Body-size cap (32 KiB) enforced via
+streaming-aware middleware: Content-Length proactive check + chunked
+`receive()` interception. Bearer auth uses `hmac.compare_digest` on
+UTF-8-encoded bytes (timing-safe). `bearerAuth` security_scheme
+registered so Swagger UI's Authorize button works.
+**Key Interfaces:**
+  - `src/orchestrator/api/main.py` — `create_app()` factory + lifespan
+    + middleware registration + OpenAPI security scheme
+  - `src/orchestrator/api/dependencies.py` — `AUTH_EXEMPT_PREFIXES`,
+    `LOOPBACK_ONLY_PATTERNS`, `BODY_SIZE_CAP_BYTES`, `__version__`,
+    `get_pool_dep`
+  - `src/orchestrator/api/middleware.py` — `CorrelationIdMiddleware`,
+    `BodySizeCapMiddleware`, `BearerAuthMiddleware`
+  - `src/orchestrator/api/routers/health.py` — `GET /api/v1/health`,
+    `HealthResponse` Pydantic model with `extra="forbid"`
+  - Boot: `uvicorn orchestrator.api.main:create_app --factory --host 127.0.0.1 --port 8765`
+**BL5 ship state — `/health` returns 503 by-design.** Three of the
+seven subsystems (`scheduler_running`, `lancache_reachable`,
+`validator_healthy`) are stub-false until BL6+ ships them as features
+land. Body still carries the full 7-field response so the operator
+sees exactly which subsystem is unhealthy. Container HEALTHCHECK +
+k8s liveness probes should expect 503 during this transition.
+**Related ADRs:**
+  - [`ADR-0012 — FastAPI Skeleton Architecture`](ADR%20documentation/0012-fastapi-skeleton-architecture.md)
+  - [`ADR-0010 — Settings Module Design`](ADR%20documentation/0010-settings-module-design.md) (consumed)
+  - [`ADR-0011 — DB Pool Architecture`](ADR%20documentation/0011-db-pool-architecture.md) (consumed)
+**Test Coverage:** Unit + integration — 48 tests across 7 files in
+`tests/api/`. 96% branch coverage on `src/orchestrator/api/` (236 stmts /
+34 branches). Two app fixtures: `unit_app` (no lifespan, deps
+overridden, app.state stubbed — 95% of tests) + `lifespan_app` (real
+lifespan via `asgi-lifespan.LifespanManager` — for integration
+coverage). Three client fixtures (default / loopback-127.0.0.1 /
+external-IP) for OQ2 testing via `httpx.ASGITransport(app, client=("ip", port))`.
+**Known Limitations:**
+  - `/api/v1/health` returns 503 by-design until BL6+ flips
+    `scheduler_running` / `lancache_reachable` / `validator_healthy`.
+  - Streaming body-cap (chunked transfer-encoding) is best-effort for
+    *unauthenticated* requests — bearer-auth rejects before the body
+    is read, so the streaming cap doesn't fire. Content-Length
+    proactive path covers all requests; streaming path covers
+    authenticated requests that consume the body. Verified by direct
+    middleware unit test in BL5; full HTTP-level streaming integration
+    coverage lands when the first body-consuming endpoint ships in
+    BL6+.
+  - 4 percentage points coverage gap (96% vs. plan target 95%
+    achieved — no follow-up needed; the 4% missing is defensive
+    catch blocks for `SchemaNotMigratedError`/`SchemaUnknownMigrationError`/`PoolError`
+    in lifespan + a non-numeric Content-Length defensive parse).
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->
