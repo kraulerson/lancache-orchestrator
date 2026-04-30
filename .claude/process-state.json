@@ -7,10 +7,17 @@
   },
   "uat_session": {
     "session_id": 3,
-    "step": 2,
+    "step": 9,
     "steps_completed": [
       "agents_dispatched",
-      "template_generated"
+      "template_generated",
+      "orchestrator_notified",
+      "results_received",
+      "completeness_verified",
+      "bugs_consolidated",
+      "triage_complete",
+      "remediation_complete",
+      "gate_passed"
     ],
     "started_at": "2026-04-27T23:23:54Z"
   },

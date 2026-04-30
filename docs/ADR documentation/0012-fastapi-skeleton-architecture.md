@@ -6,7 +6,7 @@
 **Related:** ADR-0001 (Orchestrator Architecture), ADR-0008 (Migration Runner), ADR-0009 (Logging Framework), ADR-0010 (Settings Module), ADR-0011 (DB Pool)
 **Feature:** BL5 — F9 partial (FastAPI skeleton)
 
-<!-- Last Updated: 2026-04-27 -->
+<!-- Last Updated: 2026-04-30 -->
 
 ## Context
 
@@ -112,3 +112,43 @@ The `status` field (a separate `Literal["ok", "degraded"]`) reflects pool-only h
 ## Decision
 
 **Accepted.** Implementation lands in `src/orchestrator/api/` (~315 LoC across 5 files). Test coverage at 96% branches across the API layer; full project suite at 329 tests passing. Phase 2.4 self-audit produced 1 SEV-3 (fixed inline) and 1 SEV-4 information item (accepted with documented rationale).
+
+---
+
+## Addendum — UAT-3 remediation (2026-04-30)
+
+UAT-3 (5 parallel audit agents + manual H-1 session) surfaced 11 SEV-2 + 4 SEV-3 items, all live items remediated test-first in `tests/api/test_uat3_remediation.py` (28 new regression tests). Three decisions in this ADR are revised:
+
+### D5 (revised) — Middleware ordering: CORS now outermost
+
+Original D5 ordered the stack outermost→innermost as `CorrelationId → BodySizeCap → BearerAuth → CORS`. UAT-3 finding **S2-F** showed that CORS-innermost causes 401/413 short-circuit responses to omit `Access-Control-Allow-Origin`, which the browser surfaces as a misleading "CORS error" instead of the real status. Fix: **CORS becomes outermost**. New order: `CORS → CorrelationId → BodySizeCap → BearerAuth`.
+
+Trade accepted: requests rejected at the CORS layer (mis-Origin clients) lack a `correlation_id` in their log line. Those rejections are rare and almost always client-misconfigured; the operator-debugging benefit on auth/cap rejections is large. Spec §5.1 language updated; original D5 rationale superseded.
+
+### D6 (clarified) — Fail-fast contract requires wrapping foreign exceptions
+
+D6 mandated `SystemExit(1)` on migration/pool init failure with a structured log. UAT-3 **S2-J** revealed the lifespan only catches its own exception hierarchy — a raw `sqlite3.OperationalError` from `migrate.run_migrations` (bad path, permission denied, read-only fs) propagated through `asyncio.to_thread` and produced a 50-line traceback instead of the contracted structured `api.boot.migrations_failed` event. Fix landed in `src/orchestrator/db/migrate.py`: `sqlite3.connect()` is wrapped to raise `MigrationError` so the lifespan's catch fires correctly. The contract is unchanged; the wrap is the implementation requirement to satisfy it.
+
+### D-NEW — `AUTH_EXEMPT_PREFIXES` is now `AUTH_EXEMPT_PATHS`
+
+UAT-3 **S2-A** flagged unanchored `path.startswith(p)` matching as a foot-gun: `/api/v1/healthxxx` would silently bypass auth in any future BL whose route shape collides. Fix: rename to `AUTH_EXEMPT_PATHS`, structure as a tuple of `(path, allow_subpaths)` pairs. Default is exact-match-only; `allow_subpaths=True` is opt-in for paths that need it (`/api/v1/docs` for Swagger UI's `/oauth2-redirect` sub-resource). Backwards-compat shim kept: `AUTH_EXEMPT_PREFIXES = tuple(p for p, _ in AUTH_EXEMPT_PATHS)`.
+
+### Other UAT-3 items (no decision change)
+
+- **S2-B** — `/health` truncates `git_sha` to 8 chars before unauth response (recon defense).
+- **S2-C + S3-h** — `/api/v1/openapi.json`, `/api/v1/docs`, `/api/v1/redoc` joined `LOOPBACK_ONLY_PATTERNS`. IPv6 forms (`::1`, `::ffff:127.0.0.1`) honored alongside `127.0.0.1`.
+- **S2-D** — Lifespan emits `api.boot.non_loopback_bind_warning` when `api_host != "127.0.0.1"`, with reverse-proxy bypass hint.
+- **S2-G** — `BodySizeCapMiddleware` tracks `response_started` flag to avoid emitting a duplicate `http.response.start` if the cap trips mid-stream.
+- **S2-I** — Module-level `app` attribute via PEP 562 `__getattr__` so standard `uvicorn module:app` invocations work without the `--factory` flag.
+- **S3-a** — Lifespan post-init steps in `try/finally`; `close_pool()` always runs if `init_pool()` succeeded.
+- **S3-k** — `_redact_sensitive_values` walks ASGI headers shape (list of bytes-tuples).
+- **S3-m** — Bearer scheme parse is case-insensitive (RFC 7235 §2.1).
+
+### Non-findings reclassified
+
+- **F-9 (X-Correlation-ID injection)** — agent classified SEV-4 assuming accept-and-use; manual session confirmed the middleware regenerates every correlation ID server-side and ignores client-supplied values. **Mitigated, not vulnerable.**
+- **S2-H (single-chunk body DoS)** — ASGI middleware boundary cannot reject below the `receive()` payload granularity; current behavior already halts allocation at the next chunk. Effective DoS bound is one chunk's memory peak. **No code change required**, regression test pinned.
+
+### UAT-3 remediation queue closed
+
+Live SEV-2: S2-A, S2-B, S2-C, S2-F, S2-I, S2-J — all fixed. Doc-only SEV-2: S2-D — warning added. Latent SEV-2: S2-E (LOOPBACK regex coupling) deferred to BL6 hardening sprint. Live SEV-3: S3-a, S3-h, S3-k, S3-m — all fixed. Test-gate counter resets after gate close. Full project suite: 358 → 386 tests passing (+28 regression tests).

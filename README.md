@@ -67,15 +67,21 @@ The bearer token should be deployed as a **Docker secret** mounted at `/run/secr
 
 ## Running the API (BL5+)
 
-The FastAPI app is invoked via uvicorn with the factory flag:
+The FastAPI app exposes both a module-level `app` (standard) and a `create_app()` factory:
 
 ```bash
+# Standard form — works in stock Dockerfiles and k8s manifests:
+uvicorn orchestrator.api.main:app --host 127.0.0.1 --port 8765
+
+# Factory form — useful for tests that need fresh app instances:
 uvicorn orchestrator.api.main:create_app --factory --host 127.0.0.1 --port 8765
 ```
 
-The `--factory` flag tells uvicorn that `create_app` is a callable returning the app, not the app itself. The lifespan runs migrations + initializes the BL4 DB pool on startup; closes the pool with a 30 s hard timeout on shutdown.
+The lifespan runs migrations + initializes the BL4 DB pool on startup; closes the pool with a 30 s hard timeout on shutdown.
 
-**BL5 health-check note:** `GET /api/v1/health` returns **HTTP 503** until BL6+ ships the scheduler, Lancache self-test, and validator subsystems. The body still contains the 7-field response so operators can see exactly which subsystems are unhealthy. Container `HEALTHCHECK` and k8s liveness probes should expect 503 during this transition window. See [ADR-0012](docs/ADR%20documentation/0012-fastapi-skeleton-architecture.md) for the design rationale.
+**Loopback restriction:** the OpenAPI schema (`/api/v1/openapi.json`) and the Swagger / ReDoc UIs (`/api/v1/docs`, `/api/v1/redoc`) are loopback-only. Browsing them on a non-loopback bind returns 403. If you bind the orchestrator to a non-loopback interface, expect a `api.boot.non_loopback_bind_warning` log line at startup — and note that **OQ2 loopback enforcement reads `scope["client"]` directly**, so a reverse proxy in front of the app silently disables OQ2. Either bind to a unix socket the proxy alone can reach, or enforce the equivalent gate at the proxy layer.
+
+**BL5 health-check note:** `GET /api/v1/health` returns **HTTP 503** until BL6+ ships the scheduler, Lancache self-test, and validator subsystems. The body still contains the 7-field response so operators can see exactly which subsystems are unhealthy. Container `HEALTHCHECK` and k8s liveness probes should expect 503 during this transition window. The unauth response truncates `git_sha` to 8 chars; full SHA is reserved for authenticated/internal observability surfaces. See [ADR-0012](docs/ADR%20documentation/0012-fastapi-skeleton-architecture.md) for the design rationale.
 
 ## Repository layout
 
