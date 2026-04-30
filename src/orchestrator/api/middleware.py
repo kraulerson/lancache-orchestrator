@@ -20,8 +20,9 @@ from typing import Any
 import structlog
 
 from orchestrator.api.dependencies import (
-    AUTH_EXEMPT_PREFIXES,
+    AUTH_EXEMPT_PATHS,
     BODY_SIZE_CAP_BYTES,
+    LOOPBACK_HOSTS,
     LOOPBACK_ONLY_PATTERNS,
 )
 from orchestrator.core.logging import request_context
@@ -132,8 +133,13 @@ class BodySizeCapMiddleware:
                 await self._send_413(send)
                 return
 
-        # Path 2: streaming — track bytes via wrapped receive()
+        # Path 2: streaming — track bytes via wrapped receive(). Also
+        # track whether the downstream has already started a response so
+        # we don't emit a duplicate http.response.start frame mid-stream
+        # (UAT-3 S2-G — ASGI protocol violation if cap fires after the
+        # downstream handler has already begun its response).
         bytes_received = 0
+        response_started = False
 
         async def receive_with_cap() -> dict[str, Any]:
             nonlocal bytes_received
@@ -145,16 +151,28 @@ class BodySizeCapMiddleware:
                     raise _BodyTooLargeError()
             return msg
 
+        async def send_with_start_tracking(message: dict[str, Any]) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
         try:
-            await self.app(scope, receive_with_cap, send)
+            await self.app(scope, receive_with_cap, send_with_start_tracking)
         except _BodyTooLargeError:
             _log.error(
                 "api.body_size_cap_exceeded",
                 path=scope["path"],
                 bytes_received=bytes_received,
                 cap=self.cap,
+                response_already_started=response_started,
             )
-            await self._send_413(send)
+            if not response_started:
+                await self._send_413(send)
+            # If response already started, the connection is mid-stream;
+            # we cannot emit a second response.start. Best the middleware
+            # can do is log and let the connection close naturally — the
+            # client sees a truncated body which signals the failure.
 
     @staticmethod
     async def _send_413(send: Send) -> None:
@@ -195,10 +213,33 @@ class BearerAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Skip exempt paths
-        if any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES):
-            await self.app(scope, receive, send)
-            return
+        # OQ2 loopback gate: applies BEFORE auth-exempt so that auth-exempt
+        # but loopback-restricted paths (openapi.json, docs, redoc — UAT-3
+        # S2-C) still get loopback enforcement. Both IPv4 and IPv6 loopback
+        # forms are accepted (S3-h).
+        if any(p.match(path) for p in LOOPBACK_ONLY_PATTERNS):
+            client_info = scope.get("client")
+            client_host = client_info[0] if client_info else None
+            if client_host not in LOOPBACK_HOSTS:
+                _log.warning(
+                    "api.auth.rejected",
+                    reason="non_loopback",
+                    path=path,
+                    client_host=client_host,
+                )
+                await self._send_403(send)
+                return
+
+        # Skip exempt paths — exact match for most, exact-or-subpath for
+        # the few that need it (e.g. Swagger UI loads /api/v1/docs/* assets).
+        # UAT-3 S2-A: /api/v1/healthxxx (substring) must NOT auto-bypass.
+        for exempt_path, allow_subpaths in AUTH_EXEMPT_PATHS:
+            if path == exempt_path:
+                await self.app(scope, receive, send)
+                return
+            if allow_subpaths and path.startswith(exempt_path + "/"):
+                await self.app(scope, receive, send)
+                return
 
         headers = dict(scope.get("headers", []))
         auth_header = headers.get(b"authorization", b"").decode("ascii", errors="ignore")
@@ -208,12 +249,20 @@ class BearerAuthMiddleware:
             await self._send_401(send)
             return
 
-        if not auth_header.startswith("Bearer "):
+        # RFC 7235 §2.1: auth scheme is case-insensitive ("Bearer", "bearer",
+        # "BEARER" all valid). UAT-3 S3-m fix.
+        scheme_sep = auth_header.find(" ")
+        if scheme_sep < 0:
+            _log.warning("api.auth.rejected", reason="malformed_header", path=path)
+            await self._send_401(send)
+            return
+        scheme = auth_header[:scheme_sep]
+        if scheme.lower() != "bearer":
             _log.warning("api.auth.rejected", reason="malformed_header", path=path)
             await self._send_401(send)
             return
 
-        token = auth_header[len("Bearer ") :].strip()
+        token = auth_header[scheme_sep + 1 :].strip()
         if not token:
             _log.warning("api.auth.rejected", reason="malformed_header", path=path)
             await self._send_401(send)
@@ -237,20 +286,8 @@ class BearerAuthMiddleware:
             await self._send_401(send)
             return
 
-        # OQ2: 127.0.0.1 enforcement on POST /api/v1/platforms/{name}/auth
-        if any(p.match(path) for p in LOOPBACK_ONLY_PATTERNS):
-            client_info = scope.get("client")
-            client_host = client_info[0] if client_info else None
-            if client_host != "127.0.0.1":
-                _log.warning(
-                    "api.auth.rejected",
-                    reason="non_loopback",
-                    path=path,
-                    client_host=client_host,
-                )
-                await self._send_403(send)
-                return
-
+        # OQ2 loopback gate already enforced earlier in this method (above
+        # the auth-exempt check). Authenticated request reaches the handler.
         await self.app(scope, receive, send)
 
     @staticmethod

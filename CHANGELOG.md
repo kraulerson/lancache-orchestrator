@@ -74,6 +74,78 @@ for handoff clarity. Categories are ordered by impact severity.
   structlog contextvar — downstream debugging can grep one CID for
   the full request trace.
 
+#### UAT-3 remediation (2026-04-30)
+
+Empirical UAT pass plus 5 parallel agents surfaced 11 SEV-2 + 4 SEV-3
+items against the BL5 surface; all live + queued items fixed test-first
+in this revision. See
+`tests/uat/sessions/2026-04-27-session-3/agent-results/_consolidated.md`
+and `tests/api/test_uat3_remediation.py` (28 new regression tests).
+
+- **S2-A — exempt-prefix exact-match.** `BearerAuthMiddleware` now uses
+  exact-or-subpath matching keyed on a per-path `allow_subpaths` flag
+  (`AUTH_EXEMPT_PATHS` in `dependencies.py`) instead of unanchored
+  `startswith`. Closes the latent foot-gun where a future route like
+  `/api/v1/healthcheck` would silently bypass auth.
+- **S2-B — `git_sha` recon defense.** `/api/v1/health` truncates the
+  `git_sha` field to 8 chars before returning it. Operators with CI
+  pipelines that set `GIT_SHA` to the full 40-char commit hash no
+  longer leak it pre-auth.
+- **S2-C + S3-h — schema/UI loopback restriction.** `/api/v1/openapi.json`,
+  `/api/v1/docs` (+ `/oauth2-redirect`), and `/api/v1/redoc` are now
+  gated behind the OQ2 loopback check. Loopback access works (developers
+  can browse Swagger), LAN access returns 403. IPv6 forms (`::1`,
+  `::ffff:127.0.0.1`) are honored alongside IPv4 `127.0.0.1`.
+- **S2-D — non-loopback bind warning.** Lifespan emits
+  `api.boot.non_loopback_bind_warning` at WARNING when `api_host !=
+  "127.0.0.1"`, with explicit hint about reverse-proxy OQ2 bypass risk.
+  Phase 3 backlog item: optional `OQ2_TRUSTED_PROXIES` allowlist.
+- **S2-F — CORS outermost.** Middleware order revised: CORS now wraps
+  CorrelationId/BodySizeCap/BearerAuth so 401/413 short-circuit
+  responses include `Access-Control-Allow-Origin` headers. Operators
+  see real status codes in the browser instead of the misleading
+  "CORS error" mask. Trade: CORS-rejected preflights lack a
+  correlation_id (those rejections are rare and client-misconfigured).
+- **S2-G — no duplicate `http.response.start`.** `BodySizeCapMiddleware`
+  tracks a `response_started` flag in the wrapped send; if the cap
+  trips after the downstream handler has begun streaming a response,
+  the middleware logs and lets the connection close naturally instead
+  of emitting a protocol-violating second start frame.
+- **S2-I — module-level `app`.** `orchestrator.api.main` exposes a
+  lazy `app` attribute via PEP 562 `__getattr__`. Standard
+  `uvicorn orchestrator.api.main:app` and Dockerfile `CMD ["uvicorn",
+  "orchestrator.api.main:app", ...]` patterns now work without the
+  `--factory` flag. Lazy construction means just importing the module
+  (e.g. for `create_app` in tests) doesn't load settings.
+- **S3-m — RFC 7235 case-insensitive Bearer scheme.** Middleware
+  accepts `bearer`, `BEARER`, `BeArEr`, etc. — HTTP scheme is
+  case-insensitive per RFC 7235 §2.1.
+
+### Changed
+- **Middleware ordering revised** (UAT-3 S2-F). New outermost-→innermost
+  order: `CORS → CorrelationId → BodySizeCap → BearerAuth`. Spec §5.1
+  language updated; ADR-0012 D5 superseded by ADR-0012 addendum.
+- **`AUTH_EXEMPT_PREFIXES` → `AUTH_EXEMPT_PATHS`.** Now a tuple of
+  `(path, allow_subpaths)` pairs. Backwards-compatibility shim
+  `AUTH_EXEMPT_PREFIXES = tuple(p for p, _ in AUTH_EXEMPT_PATHS)` kept
+  for any external import.
+
+### Fixed
+- **S2-J — migration runner wraps `sqlite3.OperationalError`** as
+  `MigrationError` so the lifespan's catch-and-`SystemExit(1)` contract
+  holds for the most common operator failures (bad path, permission
+  denied, read-only filesystem). Without this, raw sqlite3 errors
+  produced a 50-line traceback instead of the documented structured
+  `api.boot.migrations_failed` event.
+- **S3-a — lifespan partial-init cleanup.** Post-init steps run inside
+  `try/finally`; if any step after `init_pool()` raises, `close_pool()`
+  still executes so writer/reader connections aren't leaked at process
+  death.
+- **S3-k — ASGI-headers redaction.** `_redact_sensitive_values` now
+  detects the list-of-(bytes,bytes)-tuples shape used by `scope["headers"]`
+  and applies the sensitive-key regex per pair. Eliminates the latent
+  bypass if any future code logs `scope=scope`.
+
 - **Async DB pool** (`src/orchestrator/db/pool.py`, BL4 / Feature 4) —
   hybrid 1-writer-N-reader topology on top of `aiosqlite`. Defense-in-depth
   write serialization (`asyncio.Lock` + `BEGIN IMMEDIATE` + `busy_timeout`).
