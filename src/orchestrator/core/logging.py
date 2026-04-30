@@ -173,6 +173,19 @@ def _redact_sensitive_values(
     the string `"<cyclic>"` on repeat. Prevents `RecursionError` when a caller
     logs a self-referential structure (ORM backrefs, hand-rolled graphs)."""
 
+    def _is_asgi_headers_shape(obj: Any) -> bool:
+        """Detect the ASGI headers shape: a non-empty list/tuple where every
+        element is a 2-tuple whose first item is bytes-or-str. UAT-3 S3-k —
+        without this, logging `scope=scope` would bypass redaction because
+        `scope["headers"]` is a list of (bytes, bytes) tuples, and the regex
+        only walks dict KEYS."""
+        if not isinstance(obj, (list, tuple)) or not obj:
+            return False
+        return all(
+            isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], (bytes, str))
+            for item in obj
+        )
+
     def _walk(obj: Any, seen: frozenset[int]) -> Any:
         if isinstance(obj, (dict, list, tuple)):
             if id(obj) in seen:
@@ -183,6 +196,15 @@ def _redact_sensitive_values(
                 k: (_REDACTION_MARKER if _SENSITIVE_KEY_RE.search(str(k)) else _walk(v, seen))
                 for k, v in obj.items()
             }
+        if _is_asgi_headers_shape(obj):
+            redacted_headers: list[tuple[Any, Any]] = []
+            for k, v in obj:
+                key_str = k.decode("ascii", errors="ignore") if isinstance(k, bytes) else k
+                if _SENSITIVE_KEY_RE.search(key_str):
+                    redacted_headers.append((k, _REDACTION_MARKER))
+                else:
+                    redacted_headers.append((k, _walk(v, seen)))
+            return type(obj)(redacted_headers) if isinstance(obj, tuple) else redacted_headers
         if isinstance(obj, (list, tuple)):
             return type(obj)(_walk(x, seen) for x in obj)
         return obj

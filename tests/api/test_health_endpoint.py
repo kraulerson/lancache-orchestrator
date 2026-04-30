@@ -50,9 +50,11 @@ class TestHealthDynamicFields:
         r2 = await client.get("/api/v1/health")
         assert r2.json()["uptime_sec"] >= r1.json()["uptime_sec"] + 1
 
-    async def test_git_sha_echoes_app_state(self, client, unit_app):
+    async def test_git_sha_echoes_app_state_truncated(self, client, unit_app):
+        # UAT-3 S2-B: /health is unauthenticated, so the git_sha is
+        # truncated to 8 chars before being returned to the client.
         r = await client.get("/api/v1/health")
-        assert r.json()["git_sha"] == unit_app.state.git_sha
+        assert r.json()["git_sha"] == unit_app.state.git_sha[:8]
 
     async def test_cache_volume_mounted_reflects_stat(self, client, monkeypatch, tmp_path):
         from orchestrator.core.settings import get_settings

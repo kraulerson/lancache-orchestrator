@@ -468,7 +468,18 @@ def _run_migrations_locked(
 
     # Open connection in autocommit mode so our explicit BEGIN IMMEDIATE
     # starts a real transaction and the DDL inside it doesn't auto-commit.
-    conn = sqlite3.connect(db_path, isolation_level=None)
+    #
+    # UAT-3 S2-J: wrap sqlite3.OperationalError (raised on bad path,
+    # permission denied, read-only fs, missing parent dir, etc.) into our
+    # MigrationError hierarchy so the API lifespan's catch-and-SystemExit(1)
+    # contract holds for the most common operator failure modes — without
+    # this wrap, raw sqlite3 errors propagated through to_thread and
+    # produced a 50-line traceback instead of the documented structured
+    # `api.boot.migrations_failed` event.
+    try:
+        conn = sqlite3.connect(db_path, isolation_level=None)
+    except sqlite3.OperationalError as e:
+        raise MigrationError(f"Failed to open database at {db_path}: {e}") from e
     try:
         # busy_timeout MUST be the first PRAGMA: it applies to every
         # subsequent statement on this connection, including the

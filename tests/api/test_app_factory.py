@@ -32,15 +32,16 @@ class TestAppFactory:
         assert bearer["scheme"] == "bearer"
 
     def test_middleware_order_matches_spec(self):
-        """Spec §5.1: outermost-first order is CorrelationId, BodySizeCap,
-        BearerAuth, CORS. add_middleware prepends so the LAST add_middleware
-        call is the OUTERMOST layer at request time — i.e. user_middleware[0]
-        is outermost."""
+        """Spec §5.1 (revised post-UAT-3 S2-F): outermost-first order is
+        CORS, CorrelationId, BodySizeCap, BearerAuth. CORS moved to outermost
+        so 401/413 short-circuits include ACAO headers and the browser
+        surfaces the real status to the operator. add_middleware prepends
+        so user_middleware[0] is outermost."""
         app = create_app()
         names = [m.cls.__name__ for m in app.user_middleware]
+        assert names.index("CORSMiddleware") < names.index("CorrelationIdMiddleware")
         assert names.index("CorrelationIdMiddleware") < names.index("BodySizeCapMiddleware")
         assert names.index("BodySizeCapMiddleware") < names.index("BearerAuthMiddleware")
-        assert names.index("BearerAuthMiddleware") < names.index("CORSMiddleware")
 
     def test_auth_exempt_prefixes_align_with_documented_routes(self):
         """Spec §4: the exempt list must include /api/v1/health (the only

@@ -67,7 +67,13 @@ async def get_health(
         lancache_reachable=False,
         cache_volume_mounted=cache_volume_mounted,
         validator_healthy=False,
-        git_sha=request.app.state.git_sha,
+        # UAT-3 S2-B: /api/v1/health is unauthenticated, so the git_sha
+        # is reachable by anyone with network access. Truncate to 8 hex
+        # chars — enough to identify a build for ops, not enough for
+        # an attacker to fingerprint the exact commit on a public repo.
+        # Operators who explicitly want the full SHA should set
+        # GIT_SHA="<short>" themselves.
+        git_sha=request.app.state.git_sha[:8],
     )
 
     all_healthy = (

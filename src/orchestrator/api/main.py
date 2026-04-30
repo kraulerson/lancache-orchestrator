@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
@@ -36,6 +37,34 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
+_LOOPBACK_HOST_VALUES = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _detect_non_loopback_bind(settings_api_host: str) -> str | None:
+    """Return the non-loopback host string if any signal indicates it,
+    or None if all known signals say loopback. UAT-3 S2-D — covers
+    settings, the UVICORN_HOST env var, and `--host` in argv.
+    """
+    if settings_api_host not in _LOOPBACK_HOST_VALUES:
+        return settings_api_host
+
+    uvicorn_host = os.environ.get("UVICORN_HOST")
+    if uvicorn_host and uvicorn_host not in _LOOPBACK_HOST_VALUES:
+        return uvicorn_host
+
+    argv = sys.argv
+    for i, arg in enumerate(argv):
+        if arg == "--host" and i + 1 < len(argv):
+            value = argv[i + 1]
+            if value not in _LOOPBACK_HOST_VALUES:
+                return value
+        elif arg.startswith("--host="):
+            value = arg.split("=", 1)[1]
+            if value not in _LOOPBACK_HOST_VALUES:
+                return value
+    return None
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
@@ -47,7 +76,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(migrate.run_migrations, settings.database_path)
     except migrate.MigrationError as e:
         log.critical("api.boot.migrations_failed", reason=str(e))
-        raise SystemExit(1) from e
+        # `from None` breaks the exception cause chain so Starlette's lifespan
+        # handler doesn't print the underlying traceback after our structured
+        # event line — the structured event IS the operator-facing signal.
+        # UAT-3 S2-J full suppression.
+        raise SystemExit(1) from None
 
     # 2. Pool init
     log.info("api.boot.pool_starting")
@@ -55,21 +88,42 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await init_pool()
     except (SchemaNotMigratedError, SchemaUnknownMigrationError, PoolError) as e:
         log.critical("api.boot.pool_init_failed", reason=str(e))
-        raise SystemExit(1) from e
+        raise SystemExit(1) from None
 
-    # 3. Boot metadata
-    app.state.boot_time = time.monotonic()
-    app.state.git_sha = os.environ.get("GIT_SHA", "unknown")
-    log.info("api.boot.complete")
+    pool_initialized = True
 
-    yield
-
-    log.info("api.shutdown.starting")
     try:
-        await close_pool()
-    except PoolError as e:
-        log.error("api.shutdown.pool_close_failed", reason=str(e))
-    log.info("api.shutdown.complete")
+        # 3. Boot metadata
+        app.state.boot_time = time.monotonic()
+        app.state.git_sha = os.environ.get("GIT_SHA", "unknown")
+
+        # 4. Deployment-hardening warning: surface non-loopback bind at boot.
+        # UAT-3 S2-D: detect non-loopback from any of three signals so an
+        # operator running `uvicorn --host 0.0.0.0` from the CLI gets the
+        # warning even without ORCH_API_HOST set.
+        bind_signal = _detect_non_loopback_bind(settings.api_host)
+        if bind_signal is not None:
+            log.warning(
+                "api.boot.non_loopback_bind_warning",
+                api_host=bind_signal,
+                hint=(
+                    "Binding to a non-loopback interface exposes the API on "
+                    "the network. OQ2 loopback enforcement reads scope[client] "
+                    "directly — a reverse proxy in front of this app silently "
+                    "disables OQ2. Document deployment topology."
+                ),
+            )
+
+        log.info("api.boot.complete")
+        yield
+    finally:
+        log.info("api.shutdown.starting")
+        if pool_initialized:
+            try:
+                await close_pool()
+            except PoolError as e:
+                log.error("api.shutdown.pool_close_failed", reason=str(e))
+        log.info("api.shutdown.complete")
 
 
 def create_app() -> FastAPI:
@@ -92,13 +146,23 @@ def create_app() -> FastAPI:
         lifespan=_lifespan,
     )
 
-    # Middleware stack — registered in REVERSE order of how they wrap requests.
+    # Middleware stack — UAT-3 S2-F revised order. CORS is now OUTERMOST so
+    # short-circuit responses (401/413) include Access-Control-Allow-Origin
+    # headers and the browser surfaces the real status to the operator
+    # instead of a misleading "CORS error". CorrelationId moves one layer
+    # in; CORS-rejected requests therefore lack a correlation_id in logs,
+    # which is the accepted trade — those rejections are rare and almost
+    # always client-misconfigured, while the operator-debugging benefit
+    # of accurate status visibility for auth/cap rejections is large.
+    #
     # add_middleware prepends to user_middleware, so the LAST add_middleware
-    # call is the OUTERMOST layer at request time.
-    # Per spec §5.1 the desired order (outermost → innermost) is:
-    #   CorrelationId → BodySizeCap → BearerAuth → CORS
-    # So we register in REVERSE: CORS, BearerAuth, BodySizeCap, CorrelationId.
+    # call is the OUTERMOST layer at request time. Order applied (outermost
+    # → innermost): CORS → CorrelationId → BodySizeCap → BearerAuth.
+    # Registration order (innermost → outermost):
 
+    app.add_middleware(BearerAuthMiddleware)
+    app.add_middleware(BodySizeCapMiddleware)
+    app.add_middleware(CorrelationIdMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -107,9 +171,6 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type", "X-Correlation-ID"],
         expose_headers=["X-Correlation-ID"],
     )
-    app.add_middleware(BearerAuthMiddleware)
-    app.add_middleware(BodySizeCapMiddleware)
-    app.add_middleware(CorrelationIdMiddleware)
 
     # OpenAPI security scheme — middleware does the actual enforcement.
     # This block surfaces the bearer scheme in /api/v1/openapi.json so
@@ -139,3 +200,20 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
 
     return app
+
+
+# Module-level ASGI app for standard `uvicorn module:app` invocations
+# (UAT-3 S2-I — operators following stock FastAPI deploy patterns expect
+# a module-level `app`). Lazy via PEP 562 __getattr__ so just importing
+# the module (e.g. for create_app in tests) doesn't construct settings.
+# uvicorn's getattr(module, "app") triggers construction at boot.
+_lazy_app: FastAPI | None = None
+
+
+def __getattr__(name: str) -> Any:
+    global _lazy_app
+    if name == "app":
+        if _lazy_app is None:
+            _lazy_app = create_app()
+        return _lazy_app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
