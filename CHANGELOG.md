@@ -20,6 +20,19 @@ for handoff clarity. Categories are ordered by impact severity.
 ## [Unreleased]
 
 ### Added
+- **`GET /api/v1/platforms`** (BL6 / Feature 9 partial) — first real
+  domain endpoint on the BL5 substrate. Returns the auth + sync status
+  of every configured platform, with Steam pinned first in the response
+  order. Six fields per platform (name, auth_status, auth_method,
+  auth_expires_at, last_sync_at, last_error); `config` column
+  intentionally excluded from the response surface. `last_error`
+  truncated to 200 chars at the API layer (defense-in-depth on top of
+  upstream redaction). Pool failures translate to HTTP 503 with a
+  structured `api.platforms.read_failed` log event. Locks the wrapped
+  envelope shape `{"<resource>": [...]}` that every future F9 read
+  endpoint will inherit. See
+  [spec](docs/superpowers/specs/2026-04-30-bl6-platforms-readonly-design.md)
+  and [audit](docs/security-audits/bl6-f9-platforms-readonly-security-audit.md).
 - **FastAPI app skeleton** (BL5 / Feature 5) — `create_app()` factory at
   `src/orchestrator/api/main.py`. Lifespan runs migrations + initializes
   the BL4 pool singleton on startup; closes the pool with the BL4 30 s
