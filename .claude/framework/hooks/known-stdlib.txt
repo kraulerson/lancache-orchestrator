@@ -116,6 +116,7 @@ py:concurrent
 py:queue
 py:secrets
 py:uuid
+py:__future__
 
 # Go standard library
 go:fmt
