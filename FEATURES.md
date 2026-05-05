@@ -236,4 +236,47 @@ external-IP) for OQ2 testing via `httpx.ASGITransport(app, client=("ip", port))`
 
 ---
 
+## Feature 6: BL6 — `GET /api/v1/platforms` (read-only)
+
+**Phase Built:** 2 (Milestone B, Build Loop 6)
+**Status:** Complete (2026-05-04)
+**Summary:** First real F9 read endpoint on the BL5 substrate. Returns
+the auth + sync status of every configured platform (always exactly
+two rows: `steam`, `epic`). Bearer-required (NOT in
+`AUTH_EXEMPT_PATHS`). Wrapped envelope shape `{"platforms": [...]}` —
+locks the convention every future F9 endpoint inherits. Six fields
+per platform; `config` excluded entirely. `last_error` truncated to
+200 chars at the API layer (defense-in-depth on top of upstream
+redaction). Pool failures translate to HTTP 503 with structured
+`api.platforms.read_failed` log event. Steam-first sort via SQL
+`CASE WHEN name = 'steam' THEN 0 ELSE 1 END, name`.
+**Key Interfaces:**
+  - `src/orchestrator/api/routers/platforms.py` —
+    `PlatformResponse` + `PlatformListResponse` Pydantic models with
+    `extra="forbid"`, `list_platforms` GET handler
+  - Wired in `src/orchestrator/api/main.py` via
+    `app.include_router(platforms_router)`
+  - Wire format: `{"platforms": [{"name", "auth_status",
+    "auth_method", "auth_expires_at", "last_sync_at", "last_error"},
+    ...]}`
+**Locked decisions (D1-D8):**
+  D1 `config` excluded · D2 wrapped envelope · D3 `last_error` 200-char
+  truncation · D4 Steam-first sort · D5 no ETag for v1 · D6 PoolError
+  → 503 · D7 bearer required · D8 `extra="forbid"`. See
+  [spec](superpowers/specs/2026-04-30-bl6-platforms-readonly-design.md).
+**Test Coverage:** 23 tests in `tests/api/test_platforms_router.py`
+(~280 LoC) across 7 classes: happy path, auth, last_error truncation,
+config exclusion, response schema strictness, pool-failure 503,
+ordering. ≥95% branch coverage on `routers/platforms.py`.
+**Related Audit:** [`bl6-f9-platforms-readonly-security-audit.md`](security-audits/bl6-f9-platforms-readonly-security-audit.md) — 0 findings.
+**Known Limitations:**
+  - No ETag / conditional-response support (D5, deferred to a
+    follow-up if Game_shelf surfaces real polling load).
+  - No per-platform endpoint (`GET /api/v1/platforms/{name}`); the
+    list is small enough that clients fetch the whole thing.
+  - No `meta` envelope field yet; will be added uniformly when the
+    first paginated F9 endpoint (`/games`) lands.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->

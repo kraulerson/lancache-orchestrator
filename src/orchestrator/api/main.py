@@ -23,6 +23,7 @@ from orchestrator.api.middleware import (
     CorrelationIdMiddleware,
 )
 from orchestrator.api.routers.health import router as health_router
+from orchestrator.api.routers.platforms import router as platforms_router
 from orchestrator.core.settings import get_settings
 from orchestrator.db import migrate
 from orchestrator.db.pool import (
@@ -198,6 +199,7 @@ def create_app() -> FastAPI:
 
     # Routers
     app.include_router(health_router)
+    app.include_router(platforms_router)
 
     return app
 
