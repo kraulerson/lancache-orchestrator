@@ -5,10 +5,11 @@
     "ID4-settings",
     "BL4-DB-pool",
     "UAT-2-remediation",
-    "BL5-F9-fastapi-skeleton"
+    "BL5-F9-fastapi-skeleton",
+    "BL6-F9-platforms-readonly"
   ],
-  "features_since_last_test": 0,
-  "features_since_last_health_check": 3,
+  "features_since_last_test": 1,
+  "features_since_last_health_check": 4,
   "test_interval": 2,
   "last_test_session": "2026-04-30",
   "testing_required": false,
