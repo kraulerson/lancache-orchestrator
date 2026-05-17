@@ -118,6 +118,36 @@ class TestFieldValidators:
         s = Settings(orchestrator_token=SecretStr(raw))
         assert s.orchestrator_token.get_secret_value() == "y" * 32
 
+    def test_uat2_v5_token_with_null_byte_rejected(self):
+        """V-5: Token containing NUL must be rejected. NUL would truncate
+        log lines and could enable downstream parser confusion."""
+        raw = "a" * 31 + "\x00"  # 32 chars but contains NUL
+        with pytest.raises(ValueError):
+            Settings(orchestrator_token=raw)
+
+    def test_uat2_v5_token_with_crlf_rejected(self):
+        """V-5: Token containing CR/LF must be rejected. Embedded line
+        breaks could enable log-line injection or HTTP header smuggling
+        if echoed back. Trailing whitespace is still stripped (existing
+        behavior) — only embedded control chars in the body are rejected."""
+        raw = "a" * 16 + "\r\n" + "a" * 14  # 32 chars, embedded CRLF
+        with pytest.raises(ValueError):
+            Settings(orchestrator_token=raw)
+
+    def test_uat2_v5_token_with_tab_in_body_rejected(self):
+        """V-5: Token with embedded tab is rejected. (Trailing tab/whitespace
+        is stripped by _strip_token before length check.)"""
+        raw = "a" * 16 + "\t" + "a" * 15  # 32 chars, embedded TAB
+        with pytest.raises(ValueError):
+            Settings(orchestrator_token=raw)
+
+    def test_uat2_v5_clean_token_with_only_trailing_whitespace_still_works(self):
+        """V-5 must not regress legitimate tokens — trailing whitespace
+        is still stripped (Bible §7.3 contract)."""
+        raw = "  " + "a" * 32 + "  \n"
+        s = Settings(orchestrator_token=raw)
+        assert s.orchestrator_token.get_secret_value() == "a" * 32
+
     def test_short_token_validation_error_does_not_echo_raw(self):
         """SEV-2 regression: pydantic's ValidationError.input_value
         echoes the raw rejected value unconditionally. On a startup
@@ -280,7 +310,11 @@ REDACTION_TOKEN_SHAPES = [
     pytest.param("a" * 32, id="alphanumeric"),
     pytest.param("0123456789abcdef" * 4, id="hex"),
     pytest.param("Zm9vYmFyYmF6" + "=" * 20, id="base64-padding"),
-    pytest.param("x" * 16 + "\n" + "y" * 16, id="embedded-newline"),
+    # NB: previously had `"x"*16 + "\n" + "y"*16` ("embedded-newline"). UAT-2
+    # finding V-5 made embedded control chars an outright validation rejection,
+    # so the redaction-of-newline-token shape is now unreachable. Coverage is
+    # provided by the V-5 regression tests that assert rejection.
+    pytest.param("p1+p2-mixed-symbols-padding-XYZ#", id="symbol-rich"),
     pytest.param("🔒secret-ünïcödé-token-padded-000", id="unicode"),
 ]
 

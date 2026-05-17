@@ -511,6 +511,62 @@ def test_strict_mode_read_via_settings_not_direct_env(
         migrate.run_migrations(db_path, migrations_dir=migs_dir)
 
 
+# ---------------------------------------------------------------------------
+# UAT-2 regression: filesystem-check hardening (V-2, V-3)
+# ---------------------------------------------------------------------------
+
+
+def test_uat2_v2_symlink_resolves_to_real_path_for_fs_check(
+    one_valid_migration: Path,
+    migs_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V-2: A symlink that resolves to an NFS-mounted target must trigger
+    the local-fs assertion based on the RESOLVED path, not the symlink's
+    own location. Otherwise NFS-on-WAL silent corruption is reachable
+    through a single symlink hop.
+    """
+    real_target = tmp_path / "real_db_on_nfs.db"
+    symlink_path = tmp_path / "local_symlink.db"
+    symlink_path.symlink_to(real_target)
+
+    captured: list[str] = []
+
+    def fake_detect(p: Path) -> str:
+        captured.append(str(p))
+        # Real target reports 'nfs' (simulating NFS mount); symlink itself
+        # would report 'apfs' (local).
+        if "real_db_on_nfs" in str(p):
+            return "nfs"
+        return "apfs"
+
+    monkeypatch.setattr(migrate, "_detect_filesystem_type", fake_detect)
+
+    with pytest.raises(migrate.MigrationError, match=r"(?i)nfs|network"):
+        migrate.run_migrations(symlink_path, migrations_dir=migs_dir)
+
+    # The detect call must have received the RESOLVED path, not the symlink.
+    assert any("real_db_on_nfs" in p for p in captured), (
+        f"_detect_filesystem_type was not called on the resolved path: {captured}"
+    )
+
+
+def test_uat2_v3_rejects_character_device_database_path(
+    one_valid_migration: Path,
+    migs_dir: Path,
+) -> None:
+    """V-3: /dev/null and other character/block devices must be rejected
+    as database_path. Previously sqlite would silently open them and all
+    writes would vanish."""
+    from pathlib import Path as _Path
+
+    if not _Path("/dev/null").exists():
+        pytest.skip("/dev/null not available on this platform")
+    with pytest.raises(migrate.MigrationError, match=r"(?i)character|block|device"):
+        migrate.run_migrations(_Path("/dev/null"), migrations_dir=migs_dir)
+
+
 def test_post_apply_sanity_failure_rolls_back(
     one_valid_migration: Path,
     migs_dir: Path,
