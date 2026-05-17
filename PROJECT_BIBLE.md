@@ -125,6 +125,7 @@ Issued during Phase 2 construction:
 - **ADR-0009** — Logging framework architecture (BL2, ID3).
 - **ADR-0010** — Settings module design (BL3, ID4) + BL4 addendum (DB pool fields).
 - **ADR-0011** — DB pool architecture (BL4) — hybrid 1-writer-N-reader topology, defense-in-depth write serialization, comprehensive API surface.
+- **ADR-0012** — FastAPI skeleton architecture (BL5) — hybrid module layout, pure-ASGI middleware stack (CorrelationId / BodySizeCap / BearerAuth / CORS), lifespan-managed pool, fail-fast 503 health policy.
 
 Pending / scheduled:
 
@@ -408,9 +409,9 @@ No Sentry, no Datadog, no Grafana, no Prometheus. Post-MVP Prometheus endpoint c
 
 ## 9. Interface Specifications (CLI + REST + Status Page + Game_shelf contract)
 
-<!-- Last Updated: 2026-04-20 -->
+<!-- Last Updated: 2026-04-27 -->
 
-Full artifact: `docs/phase-1/interface-spec.md`. Summary here.
+Full artifact: `docs/phase-1/interface-spec.md`. Summary here. **BL5 implements the REST API skeleton** (F9 partial); see ADR-0012 for design.
 
 ### 9.1 CLI (F11)
 

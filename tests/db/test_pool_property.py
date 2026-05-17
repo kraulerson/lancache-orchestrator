@@ -51,6 +51,49 @@ class TestTemplateOnly:
         sql = "SELECT * FROM games WHERE id = ? AND platform = ?"
         assert _template_only(sql) == sql
 
+    # ----------- UAT-2 regression V-6: hex + sci-notation -----------
+
+    def test_uat2_v6_hex_literal_replaced(self):
+        """V-6: Hex literals like 0xDEADBEEF previously passed through
+        _template_only unchanged, leaking the value into log output."""
+        sql = "SELECT * FROM t WHERE flags = 0xDEADBEEF"
+        result = _template_only(sql)
+        assert "0xDEADBEEF" not in result
+        assert "DEADBEEF" not in result
+
+    def test_uat2_v6_lowercase_hex_literal_replaced(self):
+        sql = "SELECT * FROM t WHERE flags = 0xcafebabe"
+        result = _template_only(sql)
+        assert "cafebabe" not in result
+        assert "0xcafebabe" not in result
+
+    def test_uat2_v6_capital_x_hex_replaced(self):
+        sql = "SELECT * FROM t WHERE flags = 0XBEEF"
+        result = _template_only(sql)
+        assert "BEEF" not in result
+
+    def test_uat2_v6_scientific_notation_replaced(self):
+        """V-6: Sci-notation like 1.5e10 was being chopped to '?.5e1?',
+        leaking middle digits."""
+        sql = "SELECT * FROM t WHERE size = 1.5e10"
+        result = _template_only(sql)
+        assert "1.5e10" not in result
+        assert ".5e1" not in result
+        assert ".5e" not in result
+
+    def test_uat2_v6_negative_sci_notation_replaced(self):
+        sql = "SELECT * FROM t WHERE rate = -2.71e-3"
+        result = _template_only(sql)
+        assert "2.71" not in result
+        assert "e-3" not in result
+        assert "-2.71e-3" not in result
+
+    def test_uat2_v6_explicit_positive_sci_notation_replaced(self):
+        sql = "SELECT * FROM t WHERE rate = 1.0e+5"
+        result = _template_only(sql)
+        assert "1.0e+5" not in result
+        assert "e+5" not in result
+
 
 class TestShape:
     @given(st.lists(_param_value, max_size=10))
