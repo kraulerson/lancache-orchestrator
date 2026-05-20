@@ -22,6 +22,7 @@ from orchestrator.api.middleware import (
     BodySizeCapMiddleware,
     CorrelationIdMiddleware,
 )
+from orchestrator.api.routers.games import router as games_router
 from orchestrator.api.routers.health import router as health_router
 from orchestrator.api.routers.platforms import router as platforms_router
 from orchestrator.core.settings import get_settings
@@ -200,6 +201,7 @@ def create_app() -> FastAPI:
     # Routers
     app.include_router(health_router)
     app.include_router(platforms_router)
+    app.include_router(games_router)
 
     return app
 
