@@ -44,8 +44,9 @@ GAMES_FILTER_ALLOW_LIST = FilterAllowList(
         "status": FilterFieldSpec(ops={"eq", "in"}, value_type=str),
         "owned": FilterFieldSpec(ops={"eq"}, value_type=int),
         "size_bytes": FilterFieldSpec(ops={"eq", "gte", "lte"}, value_type=int),
-        "last_prefilled_at": FilterFieldSpec(ops={"gte", "lte"}, value_type=str),
-        "last_validated_at": FilterFieldSpec(ops={"gte", "lte"}, value_type=str),
+        # UAT-4 S3-a: timestamp value_type enforces ISO 8601 format on the value
+        "last_prefilled_at": FilterFieldSpec(ops={"gte", "lte"}, value_type="timestamp"),
+        "last_validated_at": FilterFieldSpec(ops={"gte", "lte"}, value_type="timestamp"),
     }
 )
 
@@ -60,6 +61,10 @@ _GAMES_COLUMNS = (
     "current_version, cached_version, status, "
     "last_validated_at, last_prefilled_at, last_error, metadata"
 )
+
+# UAT-4 S3-e: cap metadata bytes before json.loads to defend against
+# billion-laughs-style payloads + bounded memory per row.
+_MAX_METADATA_BYTES = 65536  # 64 KiB; realistic typical is <1 KiB
 
 _log = structlog.get_logger(__name__)
 
@@ -122,7 +127,11 @@ class GamesMeta(BaseModel):
     limit: int
     offset: int
     has_more: bool
-    applied_filters: dict[str, FilterCriterion]
+    # UAT-4 S2-A: plain dict shape — `{field: {op: value}}` — to avoid the
+    # all-7-op-keys-with-6-nulls FilterCriterion serialization. The
+    # FilterCriterion model is kept above only so OpenAPI schema generation
+    # documents the valid `op` keys; runtime uses this dict directly.
+    applied_filters: dict[str, dict[str, Any]]
     applied_sort: list[SortFieldResponse]
 
 
@@ -177,7 +186,9 @@ async def list_games(
         return JSONResponse(content={"detail": str(e)}, status_code=400)
 
     where_sql, where_params = build_where_clause(filters, allow_list=GAMES_FILTER_ALLOW_LIST)
-    order_sql = build_order_by_clause(sort)
+    # UAT-4 S3-b: pass allow_list to build_order_by_clause for the defensive
+    # re-check of field names, matching build_where_clause symmetry.
+    order_sql = build_order_by_clause(sort, allow_list=GAMES_SORT_ALLOW_LIST)
 
     # nosem: S608 — where_sql + order_sql are built from allow-list-validated
     # field names only; user values flow through `?` placeholders. See
@@ -201,16 +212,29 @@ async def list_games(
     games: list[GameResponse] = []
     for row in rows:
         raw_meta = row["metadata"]
+        metadata: dict[str, Any] | None
         if raw_meta is None:
-            metadata: dict[str, Any] | None = None
+            metadata = None
+        elif len(raw_meta) > _MAX_METADATA_BYTES:
+            # UAT-4 S3-e: size-cap short-circuit before json.loads
+            _log.warning(
+                "api.games.metadata_oversized",
+                game_id=row["id"],
+                size_bytes=len(raw_meta),
+                cap=_MAX_METADATA_BYTES,
+            )
+            metadata = None
         else:
             try:
                 parsed = json.loads(raw_meta)
                 metadata = parsed if isinstance(parsed, dict) else None
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError, RecursionError) as e:
+                # UAT-4 S3-d: catch RecursionError on deeply-nested JSON;
+                # was previously uncaught → 500 from the router.
                 _log.warning(
                     "api.games.metadata_parse_failed",
                     game_id=row["id"],
+                    reason=type(e).__name__,
                 )
                 metadata = None
 
@@ -235,16 +259,15 @@ async def list_games(
             )
         )
 
-    # applied_filters echo: convert {field: {op: value}} -> {field: FilterCriterion}
-    applied_filters: dict[str, FilterCriterion] = {}
-    for field_name, ops in filters.items():
-        crit_kwargs: dict[str, Any] = {}
-        for op, value in ops.items():
-            if op == "in":
-                crit_kwargs["in_"] = value
-            else:
-                crit_kwargs[op] = value
-        applied_filters[field_name] = FilterCriterion(**crit_kwargs)
+    # UAT-4 S2-A: build applied_filters as a plain dict matching the parsed
+    # `{field: {op: value}}` shape. Previously this went through a
+    # FilterCriterion Pydantic model whose model_dump emitted all 7 op
+    # keys per field with 6 nulls — contract drift from spec §3.2.
+    # FilterCriterion remains in the response model for OpenAPI schema
+    # documentation, but the runtime path emits compact dicts directly.
+    applied_filters: dict[str, dict[str, Any]] = {
+        field_name: dict(ops) for field_name, ops in filters.items()
+    }
 
     applied_sort = [SortFieldResponse(field=s.field, direction=s.direction) for s in sort]
 
