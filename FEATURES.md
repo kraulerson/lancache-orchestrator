@@ -279,4 +279,49 @@ ordering. ≥95% branch coverage on `routers/platforms.py`.
 
 ---
 
+## Feature 7: BL7 — `GET /api/v1/games` (read-only, paginated)
+
+**Phase Built:** 2 (Milestone B, Build Loop 7)
+**Status:** Complete (2026-05-20)
+**Summary:** First paginated F9 read endpoint on the BL5+BL6 substrate.
+Returns the games library with filter, sort, and offset-based
+pagination. Wrapped envelope `{"games": [...], "meta": {...}}` with
+rich meta including `total`, `has_more`, `applied_filters`, and
+`applied_sort` echo. Per-endpoint filter/sort allow-list acts as both
+the security boundary AND the docs surface.
+**Key Interfaces:**
+  - `src/orchestrator/api/routers/games.py` — `GameResponse`,
+    `GameListResponse`, `GamesMeta`, `FilterCriterion`,
+    `SortFieldResponse` Pydantic models; `list_games` handler
+  - `src/orchestrator/api/_query_helpers.py` — `parse_pagination`,
+    `parse_filters`, `parse_sort`, `build_where_clause`,
+    `build_order_by_clause`; `FilterAllowList`, `SortAllowList`,
+    `FilterFieldSpec`, `SortField`, `PaginationParams`,
+    `QueryParamError`
+  - Wired in `src/orchestrator/api/main.py` via
+    `app.include_router(games_router)`
+**Locked decisions (D1-D12):** offset pagination · rich meta envelope ·
+default=50/max=500 (reject 400) · operator-suffix filters · multi-field
+sort with `id:asc` tie-breaker (de-dup) · metadata as parsed JSON ·
+last_error 200-char truncation · empty result returns 200 · unknown
+field/op → 400 · Pydantic `extra="forbid"` · bearer required ·
+PoolError → 503. See
+[spec](superpowers/specs/2026-05-17-bl7-games-readonly-design.md).
+**Test Coverage:** 70 tests across `tests/api/test_games_router.py`
+(38 HTTP-level tests) and `tests/api/test_query_helpers.py` (32 unit
+tests including a Hypothesis property test for SQL injection
+resistance). Branch coverage ≥95% on both modules.
+**Related Audit:** [`bl7-f9-games-readonly-security-audit.md`](security-audits/bl7-f9-games-readonly-security-audit.md) — 0 findings.
+**Known Limitations:**
+  - No title search (`_like`) in BL7 — deferred to BL-future-search
+    (needs FTS5 or trigram support). Game_shelf can client-side filter
+    50 rows on title trivially.
+  - No per-game endpoint `GET /api/v1/games/{id}` — clients read the
+    list and index client-side; if a real need surfaces, additive.
+  - `_query_helpers.py` operator surface declares `gt`/`lt`/`ne` for
+    future endpoints, but no current field's allow-list permits them.
+    They become available when a future endpoint opts in.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->

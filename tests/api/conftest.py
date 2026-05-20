@@ -26,6 +26,49 @@ from tests.db.conftest import (  # noqa: F401
     populated_pool,
 )
 
+
+@pytest_asyncio.fixture
+async def games_pool_100(populated_pool):  # noqa: F811
+    """populated_pool seeded with 100 games for pagination tests.
+
+    Adds 95 games to the 5 already in populated_pool. Mix of platforms
+    (steam/epic), statuses (across the 8 enum values), and sizes for
+    filter/sort coverage.
+    """
+    import json
+
+    async with populated_pool.write_transaction() as tx:
+        for i in range(6, 101):  # ids 6..100 (5 already exist)
+            platform = "steam" if i % 2 == 0 else "epic"
+            status = [
+                "unknown",
+                "not_downloaded",
+                "up_to_date",
+                "pending_update",
+                "downloading",
+                "validation_failed",
+                "blocked",
+                "failed",
+            ][i % 8]
+            await tx.execute(
+                "INSERT INTO games "
+                "(platform, app_id, title, owned, size_bytes, status, "
+                "last_prefilled_at, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    platform,
+                    f"app_{i:03d}",
+                    f"Game {i:03d}",
+                    i % 2,
+                    i * 1_000_000_000,
+                    status,
+                    f"2026-05-{(i % 28) + 1:02d}T00:00:00Z" if i % 3 == 0 else None,
+                    json.dumps({"depots": [i * 10, i * 10 + 1]}),
+                ),
+            )
+    return populated_pool
+
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
