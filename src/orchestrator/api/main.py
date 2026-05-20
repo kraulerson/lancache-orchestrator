@@ -24,6 +24,7 @@ from orchestrator.api.middleware import (
 )
 from orchestrator.api.routers.games import router as games_router
 from orchestrator.api.routers.health import router as health_router
+from orchestrator.api.routers.jobs import router as jobs_router
 from orchestrator.api.routers.platforms import router as platforms_router
 from orchestrator.core.settings import get_settings
 from orchestrator.db import migrate
@@ -202,6 +203,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(platforms_router)
     app.include_router(games_router)
+    app.include_router(jobs_router)
 
     return app
 

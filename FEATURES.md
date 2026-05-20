@@ -324,4 +324,46 @@ resistance). Branch coverage ≥95% on both modules.
 
 ---
 
+## Feature 8: BL8 — `GET /api/v1/jobs` (read-only, paginated)
+
+**Phase Built:** 2 (Milestone B, Build Loop 8)
+**Status:** Complete (2026-05-20)
+**Summary:** Second paginated F9 read endpoint. Returns the orchestrator
+jobs feed with filter, sort, and offset-based pagination. Inherits
+BL7's wrapped envelope `{"jobs": [...], "meta": {...}}` with all
+UAT-4 hardening (compact applied_filters echo, INT64 range checks,
+_in cardinality cap, identifier validation, etc.). Default sort
+`id:desc` keeps active jobs surfaced via explicit
+`?state_in=queued,running` filter (the canonical Game_shelf
+active-jobs query). **Zero changes to the shared `_query_helpers.py`
+module** — validates the convention-propagation proposition.
+**Key Interfaces:**
+  - `src/orchestrator/api/routers/jobs.py` — `JobResponse`,
+    `JobListResponse`, `JobsMeta`, `SortFieldResponse` Pydantic models;
+    `JOBS_FILTER_ALLOW_LIST`, `JOBS_SORT_ALLOW_LIST`; `list_jobs` handler
+  - Wired in `src/orchestrator/api/main.py` via
+    `app.include_router(jobs_router)`
+**Locked decisions (D1-D14):** id:desc default sort · payload as parsed
+JSON · _is_null deferred · no derived fields · error 200-char truncation
+· D6-D14 inherited from BL7+UAT-4. See
+[spec](superpowers/specs/2026-05-20-bl8-jobs-readonly-design.md).
+**Test Coverage:** 37 tests in `tests/api/test_jobs_router.py` across
+9 classes (empty DB, happy path, pagination, enum filters, scalar
+filters, timestamp filters, sort + tie-breaker dedup, applied echo,
+payload + error handling, error paths, pool failure). Plus
+`jobs_pool_seeded` fixture in `conftest.py` (~50 jobs across all enum
+combinations, including 1 oversized + 1 malformed + 1 non-dict payload).
+**Related Audit:** [`bl8-f9-jobs-readonly-security-audit.md`](security-audits/bl8-f9-jobs-readonly-security-audit.md) — 0 findings.
+**Known Limitations:**
+  - No `_is_null` operator — orphan-job queries (`?game_id_is_null=true`)
+    require direct DB access until a real Game_shelf need surfaces.
+  - No derived fields — `duration_sec` is client-derivable from
+    `started_at` + `finished_at`; `age_sec` would break response
+    determinism.
+  - `?source=...` queries are full-table-scan (no index). At expected
+    scale (thousands of rows) this is acceptable; `idx_jobs_source`
+    is a future migration if it becomes a hot path.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->
