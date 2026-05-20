@@ -20,6 +20,22 @@ for handoff clarity. Categories are ordered by impact severity.
 ## [Unreleased]
 
 ### Added
+- **`GET /api/v1/games`** (BL7 / Feature 9 partial) — first paginated F9
+  read endpoint. Returns the games library with filter (operator-suffix
+  syntax: `field`, `field_in`, `field_gte`, `field_lte`), sort (multi-field
+  with `:asc`/`:desc` + server-appended `id:asc` tie-breaker with
+  de-duplication), and offset-based pagination (default 50, max 500,
+  reject 400 above max). Rich meta envelope: `total`, `limit`, `offset`,
+  `has_more`, `applied_filters`, `applied_sort`. New shared module
+  `src/orchestrator/api/_query_helpers.py` provides parser/validator/SQL
+  builder primitives reusable by every future paginated F9 endpoint
+  (`/jobs`, `/manifests`, etc.). `metadata` column included as parsed JSON
+  (null on parse failure); `last_error` truncated to 200 chars (BL6
+  pattern). Pool failures translate to 503 with structured
+  `api.games.read_failed` log. SQL injection resistance pinned by both
+  unit tests and a Hypothesis property test. See
+  [spec](docs/superpowers/specs/2026-05-17-bl7-games-readonly-design.md)
+  and [audit](docs/security-audits/bl7-f9-games-readonly-security-audit.md).
 - **`GET /api/v1/platforms`** (BL6 / Feature 9 partial) — first real
   domain endpoint on the BL5 substrate. Returns the auth + sync status
   of every configured platform, with Steam pinned first in the response
