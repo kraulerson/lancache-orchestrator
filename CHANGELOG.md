@@ -20,6 +20,19 @@ for handoff clarity. Categories are ordered by impact severity.
 ## [Unreleased]
 
 ### Added
+- **`GET /api/v1/jobs`** (BL8 / Feature 9 partial) — second paginated F9
+  read endpoint. Returns the orchestrator jobs feed with filter, sort,
+  and pagination. Default sort `id:desc` (most-recently-created first);
+  active jobs surface via `?state_in=queued,running`. Per-endpoint
+  filterable: `kind`, `game_id`, `platform`, `state`, `progress` (range),
+  `source`, `started_at`/`finished_at` (range). Sortable: `id`, `kind`,
+  `state`, `progress`, `started_at`, `finished_at`. `payload` JSON column
+  included as parsed dict (UAT-4 hardening: 64 KiB cap + RecursionError
+  catch + null on parse failure); `error` truncated to 200 chars.
+  Validates the proposition that BL7+UAT-4-hardened `_query_helpers.py`
+  conventions propagate cheaply — **zero changes to the shared module**.
+  See [spec](docs/superpowers/specs/2026-05-20-bl8-jobs-readonly-design.md)
+  and [audit](docs/security-audits/bl8-f9-jobs-readonly-security-audit.md).
 - **`GET /api/v1/games`** (BL7 / Feature 9 partial) — first paginated F9
   read endpoint. Returns the games library with filter (operator-suffix
   syntax: `field`, `field_in`, `field_gte`, `field_lte`), sort (multi-field

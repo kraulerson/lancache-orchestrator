@@ -69,6 +69,166 @@ async def games_pool_100(populated_pool):  # noqa: F811
     return populated_pool
 
 
+@pytest_asyncio.fixture
+async def jobs_pool_seeded(populated_pool):  # noqa: F811
+    """populated_pool seeded with ~50 jobs across kinds/states/sources.
+
+    Mix designed for BL8 filter+sort+pagination tests:
+    - 5 kinds x multiple states (covers all kind/state enum values)
+    - 4 sources represented
+    - timestamps: queued has both NULL; running has started_at only;
+      terminal states have both
+    - progress: NULL for queued; partial for running; 1.0 for succeeded
+    - error: populated only for failed jobs
+    - payload: small dict on most; null on a few; one oversized (>64 KiB);
+      one malformed JSON; one non-dict JSON (array)
+    """
+    import json as _json
+
+    async with populated_pool.write_transaction() as tx:
+
+        async def _ins(
+            kind,
+            state,
+            *,
+            game_id=None,
+            platform=None,
+            progress=None,
+            source="scheduler",
+            started_at=None,
+            finished_at=None,
+            error=None,
+            payload=None,
+        ):
+            await tx.execute(
+                "INSERT INTO jobs "
+                "(kind, game_id, platform, state, progress, source, "
+                " started_at, finished_at, error, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    kind,
+                    game_id,
+                    platform,
+                    state,
+                    progress,
+                    source,
+                    started_at,
+                    finished_at,
+                    error,
+                    payload,
+                ),
+            )
+
+        # Queued jobs (5)
+        for i in range(5):
+            await _ins(
+                kind=["prefill", "validate", "library_sync", "auth_refresh", "sweep"][i],
+                state="queued",
+                game_id=(i + 1) if i < 3 else None,
+                platform="steam" if i % 2 == 0 else "epic",
+                payload=_json.dumps({"queued_at": f"2026-05-20T1{i}:00:00Z"}),
+            )
+
+        # Running jobs (5)
+        for i in range(5):
+            await _ins(
+                kind=["prefill", "prefill", "validate", "library_sync", "sweep"][i],
+                state="running",
+                game_id=(i + 1) if i < 4 else None,
+                platform="steam" if i % 2 == 0 else "epic",
+                progress=0.1 + i * 0.2,
+                source=["scheduler", "scheduler", "cli", "gameshelf", "api"][i],
+                started_at=f"2026-05-20T1{i}:00:00Z",
+                payload=_json.dumps({"depots": [100 + i, 101 + i]}),
+            )
+
+        # Succeeded jobs (20)
+        for i in range(20):
+            await _ins(
+                kind=["prefill", "validate", "library_sync"][i % 3],
+                state="succeeded",
+                game_id=((i % 5) + 1),
+                platform="steam" if i % 2 == 0 else "epic",
+                progress=1.0,
+                source=["scheduler", "scheduler", "scheduler", "cli"][i % 4],
+                started_at=f"2026-05-{15 + (i % 5):02d}T08:00:00Z",
+                finished_at=f"2026-05-{15 + (i % 5):02d}T09:00:00Z",
+                payload=_json.dumps({"bytes": 1000000 * (i + 1)}),
+            )
+
+        # Failed jobs (10)
+        for i in range(10):
+            await _ins(
+                kind=["prefill", "auth_refresh"][i % 2],
+                state="failed",
+                game_id=((i % 3) + 1),
+                platform="steam",
+                progress=0.5 + (i % 5) * 0.1,
+                source="scheduler",
+                started_at=f"2026-05-{10 + (i % 8):02d}T10:00:00Z",
+                finished_at=f"2026-05-{10 + (i % 8):02d}T11:00:00Z",
+                error=f"simulated failure #{i}: " + ("x" * 50),
+                payload=_json.dumps({"attempt": i + 1}),
+            )
+
+        # Cancelled jobs (5)
+        for i in range(5):
+            await _ins(
+                kind="sweep",
+                state="cancelled",
+                source="cli",
+                started_at=f"2026-05-{5 + i:02d}T12:00:00Z",
+                finished_at=f"2026-05-{5 + i:02d}T12:01:00Z",
+                payload=_json.dumps({"reason": "operator_abort"}),
+            )
+
+        # One job with NULL payload
+        await _ins(
+            kind="sweep",
+            state="succeeded",
+            source="scheduler",
+            started_at="2026-04-01T00:00:00Z",
+            finished_at="2026-04-01T00:05:00Z",
+        )
+
+        # One job with oversized payload (>64 KiB)
+        big = _json.dumps({"data": "x" * 70000})
+        await _ins(
+            kind="prefill",
+            state="succeeded",
+            game_id=1,
+            platform="steam",
+            progress=1.0,
+            started_at="2026-04-02T00:00:00Z",
+            finished_at="2026-04-02T01:00:00Z",
+            payload=big,
+        )
+
+        # One job with malformed JSON payload
+        await _ins(
+            kind="validate",
+            state="failed",
+            game_id=2,
+            platform="steam",
+            started_at="2026-04-03T00:00:00Z",
+            finished_at="2026-04-03T00:01:00Z",
+            error="json corrupt",
+            payload="{not valid json",
+        )
+
+        # One job with non-dict JSON payload (array)
+        await _ins(
+            kind="sweep",
+            state="succeeded",
+            source="scheduler",
+            started_at="2026-04-04T00:00:00Z",
+            finished_at="2026-04-04T00:05:00Z",
+            payload=_json.dumps([1, 2, 3]),
+        )
+
+    return populated_pool
+
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
