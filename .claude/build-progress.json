@@ -7,10 +7,11 @@
     "UAT-2-remediation",
     "BL5-F9-fastapi-skeleton",
     "BL6-F9-platforms-readonly",
-    "BL7-F9-games-readonly"
+    "BL7-F9-games-readonly",
+    "BL8-F9-jobs-readonly"
   ],
-  "features_since_last_test": 0,
-  "features_since_last_health_check": 1,
+  "features_since_last_test": 1,
+  "features_since_last_health_check": 2,
   "test_interval": 2,
   "last_test_session": "2026-05-20",
   "testing_required": false,
