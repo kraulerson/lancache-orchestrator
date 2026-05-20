@@ -7,32 +7,120 @@ SortAllowList values describing what their endpoint permits, then compose
 the helpers below to parse incoming Query params and produce parameterized
 SQL fragments.
 
-Design conventions locked in spec 2026-05-17-bl7-games-readonly-design.md:
+Design conventions locked in spec 2026-05-17-bl7-games-readonly-design.md
+and revised in UAT-4 (2026-05-20):
+
 - Offset-based pagination (limit/offset query params)
 - Operator-suffix filter syntax: field, field_in, field_gte, field_lte,
   field_gt, field_lt, field_ne (per-endpoint allow-list narrows to subset)
-- Multi-field sort: ?sort=a:desc,b:asc
+- Multi-field sort: ?sort=a:desc,b:asc; empty entries are skipped and if
+  the user-sort ends up empty the default applies (UAT-4 S2-B fix).
 - Server-appended tie-breaker (with de-dup if user already sorted by it)
+- `_in` lists capped at MAX_IN_VALUES per request (UAT-4 S2-C)
+- Integer values must fit signed 64-bit (UAT-4 S2-D)
+- FilterAllowList / SortAllowList field names must be valid SQL
+  identifiers and must not collide with reserved param names
+  (UAT-4 S3-h, S3-i, S3-j)
+- FilterFieldSpec.validator (optional) is called after coercion to enforce
+  per-field content rules (e.g., timestamp ISO format) (UAT-4 S3-a)
 
 Security invariants:
 - User values flow EXCLUSIVELY through SQL parameter binds (never f-string
   or %-formatted into the SQL text). Field names ARE interpolated into SQL
   but only AFTER allow-list validation guarantees they're safe identifiers
   from the endpoint's declared field set.
+- Both build_where_clause AND build_order_by_clause defensively re-validate
+  field names against the allow-list (UAT-4 S3-b).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from starlette.datastructures import QueryParams
+
+
+# Module constants
+MAX_IN_VALUES = 100  # UAT-4 S2-C
+INT64_MIN = -(2**63)
+INT64_MAX = 2**63 - 1
+_IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+_RESERVED_PARAM_NAMES = frozenset({"limit", "offset", "sort"})
+_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?$"
+)
 
 
 class QueryParamError(ValueError):
     """Raised when a query param fails parse/validation. The router catches
     this and returns 400 with the error message as `detail`."""
+
+
+# ---------------------------------------------------------------------------
+# Identifier validation (UAT-4 S3-h, S3-i, S3-j)
+# ---------------------------------------------------------------------------
+
+
+def _validate_identifier(name: str, *, kind: str) -> None:
+    """Validate a SQL identifier used as a field name.
+
+    Rejects anything that isn't lowercase snake_case ASCII. The orchestrator's
+    schema uses this convention; tightening to it lets us interpolate field
+    names into SQL with confidence. Reserved param names (limit/offset/sort)
+    are also rejected because the filter parser would silently swallow them.
+    """
+    if not _IDENTIFIER_RE.match(name):
+        raise ValueError(
+            f"{kind}: {name!r} is not a valid identifier (must match ^[a-z_][a-z0-9_]*$)"
+        )
+    if name in _RESERVED_PARAM_NAMES:
+        raise ValueError(
+            f"{kind}: {name!r} is reserved (cannot use limit/offset/sort as a field name)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Value validators (UAT-4 S3-a)
+# ---------------------------------------------------------------------------
+
+
+def _validate_timestamp_string(value: str) -> None:
+    """Validate that a string looks like an ISO 8601 date or datetime.
+
+    Accepts:
+    - YYYY-MM-DD
+    - YYYY-MM-DDTHH:MM:SS
+    - YYYY-MM-DDTHH:MM:SS.fff
+    - With optional Z or ±HH:MM timezone
+    """
+    if not _TIMESTAMP_RE.match(value):
+        raise ValueError(
+            f"invalid timestamp format: {value!r} (expected ISO 8601 date or datetime)"
+        )
+    # Also try a strict parse so e.g. month=13 is rejected
+    try:
+        # Handle "Z" suffix (datetime.fromisoformat in <3.11 doesn't)
+        normalized = value.rstrip("Z")
+        if "T" in normalized or " " in normalized:
+            datetime.fromisoformat(normalized.replace(" ", "T"))
+        else:
+            datetime.strptime(normalized, "%Y-%m-%d")
+    except ValueError as e:
+        raise ValueError(f"invalid timestamp value: {value!r} ({e})") from e
+
+
+# Sentinel-string value_types used at the spec layer to distinguish
+# str-valued fields that need extra validation. Callers pass either a real
+# Python type (str/int/float/bool) OR the string "timestamp".
+_VALUE_TYPE_VALIDATORS: dict[str, Callable[[str], None]] = {
+    "timestamp": _validate_timestamp_string,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +165,8 @@ def parse_pagination(
         raise QueryParamError(f"limit must be <= {max_limit}, got {limit}")
     if offset < 0:
         raise QueryParamError(f"offset must be >= 0, got {offset}")
+    if offset > INT64_MAX:
+        raise QueryParamError(f"offset out of range (signed 64-bit), got {offset}")
 
     return PaginationParams(limit=limit, offset=offset)
 
@@ -98,30 +188,54 @@ _OP_SQL = {
 }
 
 
+# Acceptable value_type specifiers: real Python types OR the string
+# "timestamp" (extensible at the validator dispatch layer).
+ValueTypeSpec = type | str
+
+
 @dataclass(frozen=True)
 class FilterFieldSpec:
-    """Declarative spec for one filter field: allowed ops + Python type."""
+    """Declarative spec for one filter field: allowed ops + Python type
+    (or sentinel string for typed-string variants like "timestamp")."""
 
     ops: set[str]  # subset of {"eq", "in", "gte", "lte", "gt", "lt", "ne"}
-    value_type: type  # str, int, float, bool
+    value_type: ValueTypeSpec  # str, int, float, bool, or "timestamp"
 
 
 @dataclass(frozen=True)
 class FilterAllowList:
-    """Per-endpoint declaration of permitted filter fields and operators."""
+    """Per-endpoint declaration of permitted filter fields and operators.
 
-    by_field: dict[str, FilterFieldSpec]
+    UAT-4 S3-h, S3-j: validates field names at construction. Field names
+    must be valid SQL identifiers and must not collide with reserved
+    param names (limit, offset, sort).
+    """
+
+    by_field: dict[str, FilterFieldSpec] = field(default_factory=dict)
 
     def __init__(self, by_field: dict[str, FilterFieldSpec]) -> None:
+        for name in by_field:
+            _validate_identifier(name, kind="filter field")
+        # Validate ops against known _OP_SQL keys (+ "in")
+        known_ops = set(_OP_SQL.keys()) | {"in"}
+        for name, spec in by_field.items():
+            unknown = spec.ops - known_ops
+            if unknown:
+                raise ValueError(f"filter field {name!r}: unknown operators {unknown!r}")
         # frozen dataclass with non-default __init__ — use object.__setattr__
         object.__setattr__(self, "by_field", dict(by_field))
 
 
-def _coerce_value(raw: str, value_type: type, field_name: str, op: str) -> Any:
-    """Coerce a string query-param value to the spec'd Python type."""
+def _coerce_value(raw: str, value_type: ValueTypeSpec, field_name: str, op: str) -> Any:
+    """Coerce a string query-param value to the spec'd Python type, then
+    apply per-type validation (UAT-4 S2-D int range, S3-a timestamp format).
+    """
     try:
         if value_type is int:
-            return int(raw)
+            coerced = int(raw)
+            if not (INT64_MIN <= coerced <= INT64_MAX):
+                raise ValueError(f"value out of range (signed 64-bit): {coerced}")
+            return coerced
         if value_type is float:
             return float(raw)
         if value_type is bool:
@@ -130,10 +244,17 @@ def _coerce_value(raw: str, value_type: type, field_name: str, op: str) -> Any:
             if raw in ("0", "false", "False"):
                 return False
             raise ValueError(f"not boolean: {raw!r}")
-        # default: str
+        if isinstance(value_type, str):
+            # Typed-string variant (e.g., "timestamp")
+            validator = _VALUE_TYPE_VALIDATORS.get(value_type)
+            if validator is None:
+                raise ValueError(f"unknown typed-string value_type: {value_type!r}")
+            validator(raw)
+            return raw
+        # default: plain str
         return raw
     except (TypeError, ValueError) as e:
-        raise QueryParamError(f"invalid value for {field_name}_{op}: {raw!r}") from e
+        raise QueryParamError(f"invalid value for {field_name}_{op}: {raw!r} ({e})") from e
 
 
 def parse_filters(
@@ -143,17 +264,17 @@ def parse_filters(
 ) -> dict[str, dict[str, Any]]:
     """Parse query params into a `{field: {op: value}}` structure.
 
-    Raises QueryParamError on unknown field, unknown op, or value-type
-    mismatch. Returns empty dict if no filter params present.
+    Raises QueryParamError on unknown field, unknown op, value-type
+    mismatch, or `_in` list exceeding MAX_IN_VALUES (UAT-4 S2-C).
+    Returns empty dict if no filter params present.
 
     Reserved param names (limit, offset, sort) are skipped; they belong to
     pagination/sort, not filters.
     """
-    reserved = {"limit", "offset", "sort"}
     result: dict[str, dict[str, Any]] = {}
 
     for key in params:
-        if key in reserved:
+        if key in _RESERVED_PARAM_NAMES:
             continue
 
         # Field + operator parse. Try each known suffix; the first match wins.
@@ -177,10 +298,12 @@ def parse_filters(
 
         raw_value = params[key]
         if op == "in":
-            values = [
-                _coerce_value(v.strip(), spec.value_type, field_name, op)
-                for v in raw_value.split(",")
-            ]
+            raw_values = raw_value.split(",")
+            if len(raw_values) > MAX_IN_VALUES:
+                raise QueryParamError(
+                    f"too many values for {field_name}_in: {len(raw_values)} (cap: {MAX_IN_VALUES})"
+                )
+            values = [_coerce_value(v.strip(), spec.value_type, field_name, op) for v in raw_values]
             result.setdefault(field_name, {})["in"] = values
         else:
             value = _coerce_value(raw_value, spec.value_type, field_name, op)
@@ -199,6 +322,11 @@ def build_where_clause(
     Returns `("", [])` for empty filters. Field names are interpolated into
     SQL (validated safe via the allow_list); values are ALWAYS parameterized
     via `?` placeholders.
+
+    UAT-4 S3-c: raises QueryParamError (→ 400) on unknown op, not KeyError
+    (→ 500). The defensive re-check on field names against the allow_list
+    is a layered invariant — even if a caller assembles the filters dict
+    by hand, we won't interpolate a wild identifier.
     """
     if not filters:
         return "", []
@@ -207,10 +335,6 @@ def build_where_clause(
     params: list[Any] = []
 
     for field_name, ops in filters.items():
-        # Defensive re-check: every field must be in the allow_list. The
-        # caller (parse_filters) already validated, but this is a layered
-        # invariant — if a future caller assembles the filters dict by
-        # hand, we still won't interpolate a wild identifier.
         if field_name not in allow_list.by_field:
             raise QueryParamError(f"unknown filter field: {field_name}")
 
@@ -219,9 +343,11 @@ def build_where_clause(
                 placeholders = ", ".join("?" for _ in value)
                 fragments.append(f"{field_name} IN ({placeholders})")
                 params.extend(value)
-            else:
+            elif op in _OP_SQL:
                 fragments.append(_OP_SQL[op].format(field=field_name))
                 params.append(value)
+            else:
+                raise QueryParamError(f"unknown operator {op!r} for field {field_name!r}")
 
     return "WHERE " + " AND ".join(fragments), params
 
@@ -239,7 +365,14 @@ class SortField:
 
 @dataclass(frozen=True)
 class SortAllowList:
-    fields: set[str]
+    """UAT-4 S3-i: validates field names at construction."""
+
+    fields: set[str] = field(default_factory=set)
+
+    def __init__(self, fields: set[str]) -> None:
+        for name in fields:
+            _validate_identifier(name, kind="sort field")
+        object.__setattr__(self, "fields", set(fields))
 
 
 def parse_sort(
@@ -251,15 +384,16 @@ def parse_sort(
 ) -> list[SortField]:
     """Parse `sort` query param into a list of `SortField` entries.
 
-    Empty/absent sort applies `default`. Server-appends `tie_breaker` unless
-    the user's sort already orders by `tie_breaker.field` (in either
-    direction) — the user's explicit ordering wins.
+    Empty/absent sort applies `default`. UAT-4 S2-B: if the user supplies
+    a sort string but all entries are empty after stripping (e.g., `,,,`),
+    the default also applies — silently dropping the default would be a
+    bug. Server-appends `tie_breaker` unless the user's sort already orders
+    by `tie_breaker.field` (in either direction) — the user's explicit
+    ordering wins.
     """
     raw = params.get("sort")
-    if not raw:
-        user_sort = list(default)
-    else:
-        user_sort = []
+    user_sort: list[SortField] = []
+    if raw:
         for entry in raw.split(","):
             entry = entry.strip()
             if not entry:
@@ -279,6 +413,12 @@ def parse_sort(
             narrowed_direction: Literal["asc", "desc"] = direction  # type: ignore[assignment]
             user_sort.append(SortField(field=field_name, direction=narrowed_direction))
 
+    # UAT-4 S2-B: if parse produced nothing (empty raw OR all entries empty),
+    # apply default. Previously, non-empty-but-all-empty-entries silently
+    # produced only the tie-breaker.
+    if not user_sort:
+        user_sort = list(default)
+
     # Append tie_breaker if not already sorting by its field
     if not any(s.field == tie_breaker.field for s in user_sort):
         user_sort.append(tie_breaker)
@@ -286,9 +426,23 @@ def parse_sort(
     return user_sort
 
 
-def build_order_by_clause(sort: list[SortField]) -> str:
-    """Build the `ORDER BY ...` SQL fragment from validated sort spec."""
+def build_order_by_clause(
+    sort: list[SortField],
+    *,
+    allow_list: SortAllowList | None = None,
+) -> str:
+    """Build the `ORDER BY ...` SQL fragment from validated sort spec.
+
+    UAT-4 S3-b: when `allow_list` is provided, defensively re-validate
+    every field against it before interpolating into SQL. Callers that
+    construct SortField hand (i.e., not via parse_sort) get the same
+    safety net as build_where_clause already had.
+    """
     if not sort:
         return ""
+    if allow_list is not None:
+        for s in sort:
+            if s.field not in allow_list.fields:
+                raise QueryParamError(f"{s.field!r} is not a sortable field (not allowed)")
     entries = [f"{s.field} {s.direction.upper()}" for s in sort]
     return "ORDER BY " + ", ".join(entries)
