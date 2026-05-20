@@ -366,4 +366,57 @@ combinations, including 1 oversized + 1 malformed + 1 non-dict payload).
 
 ---
 
+## Feature 9: BL9 — `GET /api/v1/manifests` (read-only, paginated)
+
+**Phase Built:** 2 (Milestone B, Build Loop 9)
+**Status:** Complete (2026-05-20)
+**Summary:** Third paginated F9 read endpoint. Introduces the **`?include=`
+opt-in expansion convention** via a thin (~30 LoC) extension to
+`_query_helpers.py`. Default sort `fetched_at:desc` matches the
+`idx_manifests_game_fetched` index. `raw` BLOB column excluded. With
+`?include=game`, response embeds `{title, platform, app_id}` via a
+follow-up `WHERE id IN (...)` games lookup keyed by the distinct
+game_ids on the page (switched from the LEFT JOIN spec'd in D7 to
+avoid an ambiguous-`id` issue with the unqualified ORDER BY
+tie-breaker — same wire behavior, cleaner SQL). Validates that the
+shared module can grow new primitives cheaply when a real new use case
+(FK expansion) arises.
+**Key Interfaces:**
+  - `src/orchestrator/api/routers/manifests.py` — `ManifestResponse`,
+    `ManifestListResponse`, `ManifestsMeta`, `SortFieldResponse`,
+    `GameSummary` Pydantic models; 3 allow-lists;
+    `list_manifests` handler with separate games-lookup query
+  - `src/orchestrator/api/_query_helpers.py` — NEW: `IncludeAllowList`
+    dataclass + `parse_includes` function; `"include"` added to
+    `_RESERVED_PARAM_NAMES`
+  - Wired in `src/orchestrator/api/main.py` via
+    `app.include_router(manifests_router)`
+**Locked decisions (D1-D8):** raw BLOB excluded · default sort
+fetched_at:desc · version eq+_in · ?include=game always-present field
+null when absent · NEW IncludeAllowList primitive · GameSummary 3-field
+shape · separate follow-up games query (originally spec'd as LEFT JOIN;
+swapped during implementation — same wire) · applied_includes sorted
+echo. D9-D20 inherited from BL7+UAT-4+BL8. See
+[spec](superpowers/specs/2026-05-20-bl9-manifests-readonly-design.md).
+**Test Coverage:** 34 tests in `tests/api/test_manifests_router.py`
+across 10 classes + 8 tests in `tests/api/test_query_helpers.py` for
+the new `parse_includes` + `IncludeAllowList` primitives. Plus
+`manifests_pool_seeded` fixture in `conftest.py` (21 manifests across
+5 baseline games).
+**Related Audit:** [`bl9-f9-manifests-readonly-security-audit.md`](security-audits/bl9-f9-manifests-readonly-security-audit.md) — 0 findings.
+**Known Limitations:**
+  - `raw` BLOB column not exposed; out-of-band diagnostic endpoint
+    (`GET /manifests/{id}/raw`) deferred until real operator need
+    surfaces.
+  - `?sort=total_bytes:desc` / `?sort=chunk_count:desc` use full table
+    scan + temp B-tree (no covering index). Acceptable at expected
+    scale (thousands of manifests); add covering index only if
+    profiling shows a hot path.
+  - `?include=game` adds one extra round-trip when requested. At expected
+    scale (one IN-list of at most `limit` keys) the cost is negligible;
+    JOIN-based single-query alternative was considered but caused
+    ambiguous-`id` SQL builder conflict (see security audit).
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->
