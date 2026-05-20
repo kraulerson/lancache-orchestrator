@@ -390,3 +390,81 @@ class TestSqlInjectionResistance:
         # Specifically, the injection payload must never appear in SQL
         assert "DROP TABLE" not in sql
         assert "';" not in sql
+
+
+# ---------------------------------------------------------------------------
+# BL9: parse_includes + IncludeAllowList
+# ---------------------------------------------------------------------------
+
+
+class TestParseIncludes:
+    def test_absent_returns_empty_set(self):
+        from orchestrator.api._query_helpers import IncludeAllowList, parse_includes
+
+        result = parse_includes(
+            QueryParams(""),
+            allow_list=IncludeAllowList(keys={"game"}),
+        )
+        assert result == set()
+
+    def test_empty_string_returns_empty_set(self):
+        from orchestrator.api._query_helpers import IncludeAllowList, parse_includes
+
+        result = parse_includes(
+            QueryParams("include="),
+            allow_list=IncludeAllowList(keys={"game"}),
+        )
+        assert result == set()
+
+    def test_single_value(self):
+        from orchestrator.api._query_helpers import IncludeAllowList, parse_includes
+
+        result = parse_includes(
+            QueryParams("include=game"),
+            allow_list=IncludeAllowList(keys={"game"}),
+        )
+        assert result == {"game"}
+
+    def test_multi_value_deduped(self):
+        from orchestrator.api._query_helpers import IncludeAllowList, parse_includes
+
+        result = parse_includes(
+            QueryParams("include=game,game,game"),
+            allow_list=IncludeAllowList(keys={"game"}),
+        )
+        assert result == {"game"}
+
+    def test_whitespace_stripped(self):
+        from orchestrator.api._query_helpers import IncludeAllowList, parse_includes
+
+        result = parse_includes(
+            QueryParams("include= game , game "),
+            allow_list=IncludeAllowList(keys={"game"}),
+        )
+        assert result == {"game"}
+
+    def test_unknown_key_raises(self):
+        from orchestrator.api._query_helpers import (
+            IncludeAllowList,
+            QueryParamError,
+            parse_includes,
+        )
+
+        with pytest.raises(QueryParamError, match=r"include keys not allowed"):
+            parse_includes(
+                QueryParams("include=games"),
+                allow_list=IncludeAllowList(keys={"game"}),
+            )
+
+    def test_invalid_identifier_rejected_at_construction(self):
+        from orchestrator.api._query_helpers import IncludeAllowList
+
+        with pytest.raises(ValueError, match=r"valid identifier|must match"):
+            IncludeAllowList(keys={"1=1 OR x"})
+
+    def test_reserved_param_name_rejected_at_construction(self):
+        from orchestrator.api._query_helpers import IncludeAllowList
+
+        for reserved in ("limit", "offset", "sort", "include"):
+            with pytest.raises(ValueError, match=r"reserved"):
+                IncludeAllowList(keys={reserved})

@@ -51,7 +51,7 @@ MAX_IN_VALUES = 100  # UAT-4 S2-C
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
 _IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
-_RESERVED_PARAM_NAMES = frozenset({"limit", "offset", "sort"})
+_RESERVED_PARAM_NAMES = frozenset({"limit", "offset", "sort", "include"})
 _TIMESTAMP_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?$"
 )
@@ -375,6 +375,23 @@ class SortAllowList:
         object.__setattr__(self, "fields", set(fields))
 
 
+@dataclass(frozen=True)
+class IncludeAllowList:
+    """Per-endpoint declaration of permitted ?include= expansion keys.
+
+    BL9: opt-in FK expansion convention. Each endpoint declares
+    which include keys are allowed (e.g., {"game"} for /manifests).
+    Identifier-validated at construction.
+    """
+
+    keys: frozenset[str] = field(default_factory=frozenset)
+
+    def __init__(self, keys: set[str] | frozenset[str]) -> None:
+        for k in keys:
+            _validate_identifier(k, kind="include key")
+        object.__setattr__(self, "keys", frozenset(keys))
+
+
 def parse_sort(
     params: QueryParams,
     *,
@@ -446,3 +463,32 @@ def build_order_by_clause(
                 raise QueryParamError(f"{s.field!r} is not a sortable field (not allowed)")
     entries = [f"{s.field} {s.direction.upper()}" for s in sort]
     return "ORDER BY " + ", ".join(entries)
+
+
+# ---------------------------------------------------------------------------
+# Includes (BL9: opt-in FK expansion via ?include=)
+# ---------------------------------------------------------------------------
+
+
+def parse_includes(
+    params: QueryParams,
+    *,
+    allow_list: IncludeAllowList,
+) -> set[str]:
+    """Parse ?include= query param into a deduplicated set of include keys.
+
+    Empty/absent ?include= returns an empty set. Unknown keys raise
+    QueryParamError. Values are comma-separated; per-key whitespace
+    stripped; deduplicated; empty values dropped.
+
+    The `include` query param is reserved (see _RESERVED_PARAM_NAMES) so
+    the filter parser will not interpret it as a filter field.
+    """
+    raw = params.get("include")
+    if not raw:
+        return set()
+    requested = {k.strip() for k in raw.split(",") if k.strip()}
+    unknown = requested - allow_list.keys
+    if unknown:
+        raise QueryParamError(f"include keys not allowed: {sorted(unknown)}")
+    return requested

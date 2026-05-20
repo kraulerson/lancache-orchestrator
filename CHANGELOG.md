@@ -20,6 +20,23 @@ for handoff clarity. Categories are ordered by impact severity.
 ## [Unreleased]
 
 ### Added
+- **`GET /api/v1/manifests`** (BL9 / Feature 9 partial) — third paginated F9
+  read endpoint, introduces the **`?include=` opt-in expansion convention**.
+  Default sort `fetched_at:desc` (matches `idx_manifests_game_fetched`).
+  Per-endpoint filterable: `game_id` (eq, `_in`), `version` (eq, `_in`),
+  `fetched_at` (range), `chunk_count` (range), `total_bytes` (range).
+  Sortable: `id`, `game_id`, `version`, `fetched_at`, `chunk_count`,
+  `total_bytes`. `raw` BLOB column intentionally excluded. With
+  `?include=game`, the response embeds a `game: {title, platform, app_id}`
+  summary via a follow-up `WHERE id IN (...)` games lookup keyed by the
+  distinct game_ids on the page (switched from the LEFT JOIN spec'd in D7
+  to avoid an ambiguous-`id` issue with the unqualified ORDER BY tie-breaker
+  — same wire behavior, cleaner SQL). Adds `IncludeAllowList` +
+  `parse_includes` to `_query_helpers.py` (+~30 LoC, identifier-validated
+  + `"include"` reserved) — future endpoints can opt-in to FK expansion
+  cheaply. See
+  [spec](docs/superpowers/specs/2026-05-20-bl9-manifests-readonly-design.md)
+  and [audit](docs/security-audits/bl9-f9-manifests-readonly-security-audit.md).
 - **`GET /api/v1/jobs`** (BL8 / Feature 9 partial) — second paginated F9
   read endpoint. Returns the orchestrator jobs feed with filter, sort,
   and pagination. Default sort `id:desc` (most-recently-created first);

@@ -229,6 +229,64 @@ async def jobs_pool_seeded(populated_pool):  # noqa: F811
     return populated_pool
 
 
+@pytest_asyncio.fixture
+async def manifests_pool_seeded(populated_pool):  # noqa: F811
+    """populated_pool seeded with ~21 manifests across the 5 baseline games.
+
+    Mix designed for BL9 filter+sort+pagination+include tests:
+    - 5 games (ids 1-5) each get 3-5 manifests (history)
+    - version formats vary: Steam-style numeric IDs, Epic-style dotted
+    - chunk_count spread: 100, 250, 1820, 5000, 50000
+    - total_bytes spread: 500 MB to 100 GB
+    - fetched_at spread across past month (per-manifest distinct)
+    - raw BLOB: small constant byte sequence (not zstd-parsed; just NOT NULL)
+    """
+    raw_placeholder = b"\x28\xb5\x2f\xfd\x00\x00stub-zstd-payload"  # zstd magic + stub
+
+    async with populated_pool.write_transaction() as tx:
+        manifests_seed = [
+            # game_id, version, chunk_count, total_bytes, fetched_at_day_offset
+            (1, "10001", 100, 1_000_000_000, 28),
+            (1, "10002", 250, 2_500_000_000, 21),
+            (1, "10003", 1820, 5_000_000_000, 14),
+            (1, "10004", 5000, 25_000_000_000, 7),
+            (1, "10005", 12000, 75_000_000_000, 1),
+            (2, "20001", 500, 5_000_000_000, 25),
+            (2, "20002", 1500, 15_000_000_000, 10),
+            (2, "20003", 3000, 30_000_000_000, 3),
+            (3, "30001", 100, 500_000_000, 30),
+            (3, "30002", 800, 8_000_000_000, 20),
+            (3, "30003", 1200, 12_000_000_000, 12),
+            (3, "30004", 2400, 22_000_000_000, 5),
+            (4, "v1.0.0", 200, 1_500_000_000, 27),
+            (4, "v1.1.0", 450, 4_500_000_000, 19),
+            (4, "v1.2.0", 900, 9_000_000_000, 11),
+            (4, "v2.0.0", 2200, 22_000_000_000, 4),
+            (5, "++Release-1.0", 350, 3_500_000_000, 29),
+            (5, "++Release-1.1", 700, 7_000_000_000, 22),
+            (5, "++Release-1.2", 1400, 14_000_000_000, 15),
+            (5, "++Release-2.0", 2800, 28_000_000_000, 8),
+            (5, "++Release-2.1", 50000, 100_000_000_000, 2),
+        ]
+
+        for game_id, version, chunk_count, total_bytes, days_ago in manifests_seed:
+            day = 20 - days_ago
+            if day <= 0:
+                month = 4
+                day = 30 + day
+            else:
+                month = 5
+            fetched_at = f"2026-{month:02d}-{day:02d}T12:00:00Z"
+            await tx.execute(
+                "INSERT INTO manifests "
+                "(game_id, version, fetched_at, chunk_count, total_bytes, raw) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (game_id, version, fetched_at, chunk_count, total_bytes, raw_placeholder),
+            )
+
+    return populated_pool
+
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
