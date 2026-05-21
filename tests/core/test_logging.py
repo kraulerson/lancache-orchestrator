@@ -440,3 +440,55 @@ def test_cyclic_event_dict_does_not_recurse_infinitely(
 
     out = capsys.readouterr().out
     assert "<cyclic>" in out
+
+
+# ---------------------------------------------------------------------------
+# Issue #50: correlation_id survives _redact_sensitive_values (regression)
+# ---------------------------------------------------------------------------
+
+
+def test_correlation_id_key_not_matched_by_sensitive_key_re() -> None:
+    """Direct regex check. Adding any pattern to `_SENSITIVE_KEY_RE` that
+    matches 'correlation_id' would break the contract."""
+    assert log_mod._SENSITIVE_KEY_RE.search("correlation_id") is None
+
+
+def test_api_request_completed_event_preserves_correlation_id(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Mirrors how `CorrelationIdMiddleware` emits the events around each
+    request: bind a cid into contextvars, emit `api.request.received`
+    then `api.request.completed`, and verify both events carry the
+    full unredacted UUID in the JSON output."""
+    log_mod.configure_logging()
+    fixed_cid = "abc123def456"
+    with log_mod.request_context(correlation_id=fixed_cid):
+        log = structlog.get_logger()
+        log.info("api.request.received", method="GET", path="/api/v1/games")
+        log.info("api.request.completed", duration_ms=12)
+
+    out = capsys.readouterr().out
+    events = [json.loads(line) for line in out.splitlines() if line.strip()]
+    received = next(e for e in events if e["event"] == "api.request.received")
+    completed = next(e for e in events if e["event"] == "api.request.completed")
+    assert received["correlation_id"] == fixed_cid
+    assert completed["correlation_id"] == fixed_cid
+    assert log_mod._REDACTION_MARKER not in received["correlation_id"]
+    assert log_mod._REDACTION_MARKER not in completed["correlation_id"]
+
+
+def test_sensitive_kwarg_alongside_correlation_id_redacts_only_sensitive(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sanity check: if an event carries BOTH correlation_id and a
+    sensitive field (e.g., 'token'), only the sensitive field is
+    redacted — the cid passes through unchanged."""
+    log_mod.configure_logging()
+    fixed_cid = "fedcba987654"
+    with log_mod.request_context(correlation_id=fixed_cid):
+        structlog.get_logger().info("api.combined", token="dont-leak-me-aaa")
+
+    out = capsys.readouterr().out
+    record = next(json.loads(line) for line in out.splitlines() if line.strip())
+    assert record["correlation_id"] == fixed_cid
+    assert record["token"] == log_mod._REDACTION_MARKER
