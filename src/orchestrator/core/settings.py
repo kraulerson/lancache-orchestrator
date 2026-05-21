@@ -84,6 +84,14 @@ class Settings(BaseSettings):
     db_cache_size_kib: int = Field(default=16384, ge=1024, le=1048576)
     db_mmap_size_bytes: int = Field(default=268_435_456, ge=0, le=17_179_869_184)
     db_journal_size_limit_bytes: int = Field(default=67_108_864, ge=1_048_576, le=1_073_741_824)
+    # Issue #40: low-free-space threshold for the DB-volume health check. When
+    # `free_pct` drops below this, health_check surfaces `low_space=True` and
+    # the pool emits a rate-limited `pool.disk_low` WARNING.
+    pool_disk_low_pct: float = Field(default=10.0, gt=0.0, le=100.0)
+    # Issue #41: emit `pool.query_completed` at DEBUG after each successful
+    # read/write helper call (with template-only SQL + param shape, never raw
+    # values). Opt-in to avoid log volume at INFO/WARN deployments.
+    pool_query_log_completed: bool = Field(default=False)
 
     @field_validator("cors_origins")
     @classmethod

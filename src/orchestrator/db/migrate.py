@@ -72,8 +72,18 @@ _NETWORK_FSTYPES = frozenset(
     }
 )
 
+# Issue #20: widened to also match CREATE [TEMP|TEMPORARY] TABLE,
+# CREATE VIRTUAL TABLE … USING …, with optional schema-qualified name (main.foo).
+# `_DROP_TABLE_RE` is subtracted so a migration that drops a table no longer
+# leaves a stale expectation in the post-apply sanity check.
 _CREATE_TABLE_RE = re.compile(
-    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)",
+    r"CREATE\s+(?:TEMP(?:ORARY)?\s+|VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+    r"(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?([a-zA-Z_][a-zA-Z0-9_]*)",
+    re.IGNORECASE,
+)
+_DROP_TABLE_RE = re.compile(
+    r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?"
+    r"([a-zA-Z_][a-zA-Z0-9_]*)",
     re.IGNORECASE,
 )
 
@@ -303,6 +313,12 @@ def _load_checksum_manifest(source: Path | Traversable) -> dict[int, tuple[str, 
             raise MigrationError(f"CHECKSUMS line {lineno}: non-integer id {id_str!r}") from e
         if not _SHA_RE.match(sha.lower()):
             raise MigrationError(f"CHECKSUMS line {lineno}: invalid sha256 {sha!r}")
+        # Issue #21: validate filename at parse time. Defense-in-depth: a
+        # future refactor that uses the manifest filename for a path join
+        # would otherwise be traversal-vulnerable. _MIGRATION_NAME_RE locks
+        # the form to NNNN_snake_case.sql with no path separators.
+        if not _MIGRATION_NAME_RE.match(fn):
+            raise MigrationError(f"CHECKSUMS line {lineno}: invalid migration filename {fn!r}")
         if mid in result:
             raise MigrationError(f"CHECKSUMS line {lineno}: duplicate id {mid}")
         result[mid] = (sha.lower(), fn)
@@ -371,11 +387,86 @@ def _assert_no_gaps(applied: set[int], available: set[int]) -> None:
 
 
 def _split_sql(script: str) -> list[str]:
-    """Strip comments and split on `;`. Migration SQL must not contain
-    semicolons inside string literals (DDL rarely does)."""
-    stripped = re.sub(r"--[^\n]*", "", script)
-    stripped = re.sub(r"/\*.*?\*/", "", stripped, flags=re.DOTALL)
-    return [s.strip() for s in stripped.split(";") if s.strip()]
+    """Strip comments and split on `;`, honoring string literals.
+
+    Issue #19: prior implementation used global regex strips for `--` line
+    comments and `/* */` block comments, then split on `;`. Migrations that
+    contain a semicolon or comment delimiter INSIDE a string literal would
+    be mis-split mid-statement. This tokenizer walks the script character
+    by character, tracking whether we're inside `'...'`/`"..."` literals
+    (with `''` / `""` doubled-quote escaping per SQL standard) before
+    deciding whether a `;`/`--`/`/*` is structural or literal content.
+    """
+    statements: list[str] = []
+    buf: list[str] = []
+    i = 0
+    n = len(script)
+    in_single = False  # inside '…'
+    in_double = False  # inside "…"
+    while i < n:
+        ch = script[i]
+        nxt = script[i + 1] if i + 1 < n else ""
+
+        if in_single:
+            buf.append(ch)
+            if ch == "'" and nxt == "'":
+                # doubled '' escape; consume the pair as literal content
+                buf.append(nxt)
+                i += 2
+                continue
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+        if in_double:
+            buf.append(ch)
+            if ch == '"' and nxt == '"':
+                buf.append(nxt)
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+
+        # Not in a string literal — comments and statement separators apply.
+        if ch == "-" and nxt == "-":
+            # line comment: consume until newline
+            while i < n and script[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and nxt == "*":
+            # block comment: consume until */
+            i += 2
+            while i < n - 1 and not (script[i] == "*" and script[i + 1] == "/"):
+                i += 1
+            i += 2  # past the */ (or end-of-input if unterminated)
+            continue
+        if ch == "'":
+            in_single = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == ";":
+            stmt = "".join(buf).strip()
+            if stmt:
+                statements.append(stmt)
+            buf = []
+            i += 1
+            continue
+
+        buf.append(ch)
+        i += 1
+
+    tail = "".join(buf).strip()
+    if tail:
+        statements.append(tail)
+    return statements
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +483,10 @@ def _expected_tables_for(migrations: list[_Migration]) -> set[str]:
         for stmt in _split_sql(mig.sql):
             for name in _CREATE_TABLE_RE.findall(stmt):
                 tables.add(name)
+            # Issue #20: subtract drops so the expected set tracks the
+            # cumulative end-state, not just everything ever created.
+            for name in _DROP_TABLE_RE.findall(stmt):
+                tables.discard(name)
     return tables
 
 

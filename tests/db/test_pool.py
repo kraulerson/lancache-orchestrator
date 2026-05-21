@@ -686,3 +686,249 @@ class TestModuleSingleton:
         await close_pool()
         with pytest.raises(PoolNotInitializedError):
             get_pool()
+
+
+# ----------------------------------------------------------------------
+# Issue #40: disk-space metrics in health_check
+# ----------------------------------------------------------------------
+
+
+class TestHealthCheckDiskMetrics:
+    async def test_disk_block_present_and_shape(self, db_path: Path) -> None:
+        async with Pool.create(database_path=db_path, readers_count=2) as pool:
+            health = await pool.health_check()
+        assert "disk" in health
+        disk = health["disk"]
+        assert set(disk.keys()) == {
+            "path",
+            "total_bytes",
+            "free_bytes",
+            "free_pct",
+            "low_space",
+        }
+        assert disk["total_bytes"] > 0
+        assert disk["free_bytes"] >= 0
+        assert 0.0 <= disk["free_pct"] <= 100.0
+
+    async def test_low_space_false_on_real_disk(self, db_path: Path) -> None:
+        async with Pool.create(database_path=db_path, readers_count=2) as pool:
+            health = await pool.health_check()
+        # No realistic test runner is on a <10% disk; if this fails the runner
+        # actually has low disk and that's the only correct answer.
+        if shutil_disk_usage_free_pct() >= 10.0:
+            assert health["disk"]["low_space"] is False
+
+    async def test_low_space_triggered_by_low_threshold(self, db_path: Path, monkeypatch) -> None:
+        """Force the threshold above the current free_pct to trigger the path."""
+        from orchestrator.core.settings import get_settings
+
+        monkeypatch.setenv("ORCH_DISK_LOW_PCT_OVERRIDE_TEST", "1")  # unused; just ensures clean env
+        get_settings.cache_clear()
+
+        async with Pool.create(database_path=db_path, readers_count=2) as pool:
+            # Override the cached threshold to force low_space=True
+            pool._disk_low_pct = 99.99
+            pool._last_disk_low_warn_monotonic = 0.0  # reset rate-limit
+            health = await pool.health_check()
+        assert health["disk"]["low_space"] is True
+
+    async def test_disk_check_handles_oserror_gracefully(self, db_path: Path, monkeypatch) -> None:
+        """If shutil.disk_usage raises, health_check returns a sentinel."""
+
+        from orchestrator.db import pool as pool_mod
+
+        def _raise_oserror(_path: str):
+            raise PermissionError("simulated /proc unreadable")
+
+        async with Pool.create(database_path=db_path, readers_count=2) as pool:
+            monkeypatch.setattr(pool_mod.shutil, "disk_usage", _raise_oserror)
+            health = await pool.health_check()
+        disk = health["disk"]
+        assert disk["low_space"] is False  # don't false-alarm when probe failed
+        assert "error" in disk
+        assert "PermissionError" in disk["error"]
+
+    async def test_disk_check_walks_up_to_existing_parent(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        """db_path may not exist on first boot; probe walks up parents."""
+        async with Pool.create(database_path=db_path, readers_count=2) as pool:
+            # Force the database_path to a deep nonexistent path
+            nonexistent_dir = tmp_path / "does" / "not" / "exist"
+            pool._database_path = nonexistent_dir / "orch.db"
+            disk = pool._check_disk()
+        assert "error" not in disk
+        assert disk["total_bytes"] > 0
+
+
+def shutil_disk_usage_free_pct() -> float:
+    import shutil
+
+    u = shutil.disk_usage(".")
+    return u.free / u.total * 100.0 if u.total > 0 else 0.0
+
+
+# ----------------------------------------------------------------------
+# Issue #41: pool.query_completed logging is opt-in
+# ----------------------------------------------------------------------
+
+
+class TestPoolQueryCompletedLogging:
+    async def test_default_off_emits_no_event(self, db_path: Path, monkeypatch, capsys) -> None:
+        from orchestrator.core.logging import configure_logging
+
+        monkeypatch.delenv("ORCH_POOL_QUERY_LOG_COMPLETED", raising=False)
+        from orchestrator.core.settings import get_settings
+
+        get_settings.cache_clear()
+        configure_logging()
+        async with Pool.create(database_path=db_path, readers_count=2) as pool:
+            await pool.read_one("SELECT 1 AS x")
+        out = capsys.readouterr().out
+        # The event must NOT appear when the flag is off
+        assert "pool.query_completed" not in out
+
+    async def test_opt_in_emits_query_completed_event(self, db_path: Path, monkeypatch) -> None:
+        """When the Settings flag is on, every successful read/write helper
+        calls `_emit_query_completed`. Verify by spying on `_log.debug`
+        directly — capsys interaction with structlog level config is
+        brittle in suite ordering."""
+        from orchestrator.core.settings import get_settings
+        from orchestrator.db import pool as pool_mod
+
+        monkeypatch.setenv("ORCH_POOL_QUERY_LOG_COMPLETED", "1")
+        get_settings.cache_clear()
+        assert get_settings().pool_query_log_completed is True
+
+        events: list[tuple[str, dict]] = []
+
+        def _spy(event: str, **kwargs: Any) -> None:
+            events.append((event, kwargs))
+
+        monkeypatch.setattr(pool_mod._log, "debug", _spy)
+
+        async with Pool.create(database_path=db_path, readers_count=2) as pool:
+            assert pool._log_query_completed is True
+            await pool.read_one("SELECT 1 AS x")
+            await pool.execute_write("CREATE TABLE foo (x INT)")
+
+        completed = [(e, kw) for e, kw in events if e == "pool.query_completed"]
+        assert len(completed) >= 2
+        roles = {kw["role"] for _, kw in completed}
+        assert {"reader", "writer"}.issubset(roles)
+        for _, kw in completed:
+            assert "duration_ms" in kw
+            assert "sql" in kw
+            assert "params" in kw
+
+        get_settings.cache_clear()
+
+
+# ----------------------------------------------------------------------
+# Issue #42: branch-coverage push on pool.py
+# ----------------------------------------------------------------------
+
+
+class TestBranchCoverageGaps:
+    """Targeted tests for branches the existing suite didn't exercise."""
+
+    async def test_wrap_aiosqlite_error_catchall(self) -> None:
+        """Branch: _wrap_aiosqlite_error's PoolError catch-all (unrecognized
+        aiosqlite.Error subclass) must return a wrapped PoolError, not bubble."""
+        import aiosqlite
+
+        from orchestrator.db.pool import PoolError, _wrap_aiosqlite_error
+
+        class _CustomAioErr(aiosqlite.Error):
+            pass
+
+        wrapped = _wrap_aiosqlite_error(
+            _CustomAioErr("custom failure"),
+            sql="SELECT 1",
+            params=(),
+            role="reader",
+        )
+        assert isinstance(wrapped, PoolError)
+
+    async def test_writer_unreachable_error_carries_message(self) -> None:
+        from orchestrator.db.pool import WriterUnreachableError
+
+        e = WriterUnreachableError("writer probe timeout")
+        assert "writer probe timeout" in str(e)
+        assert e.reason == "writer probe timeout"
+
+    async def test_reader_unreachable_error_carries_index_and_reason(self) -> None:
+        from orchestrator.db.pool import ReaderUnreachableError
+
+        e = ReaderUnreachableError(2, "reader probe timeout")
+        assert "reader[2]" in str(e)
+        assert e.reader_index == 2
+        assert e.reason == "reader probe timeout"
+
+    async def test_pragma_value_matches_numeric_tolerance(self) -> None:
+        """Branch: _pragma_value_matches accepts numeric equivalence."""
+        from orchestrator.db.pool import _pragma_value_matches
+
+        # int vs str-repr of int should match (real callers compare 1 vs "1")
+        assert _pragma_value_matches("foreign_keys", 1, 1) is True
+        assert _pragma_value_matches("foreign_keys", 1, "1") is True
+
+    async def test_classify_integrity_error_message_fallback(self) -> None:
+        """Branch: when aiosqlite has no sqlite_errorcode, fall back to msg match."""
+        import aiosqlite
+
+        from orchestrator.db.pool import _classify_integrity_error
+
+        # Force a stub error without sqlite_errorcode
+        e = aiosqlite.IntegrityError("UNIQUE constraint failed: foo.id")
+        # _classify returns (kind, table, column) — message match fallback path
+        kind, _table, _column = _classify_integrity_error(e)
+        assert kind in ("unique", "fk", "check", "notnull", "other")
+
+    async def test_close_pool_when_already_closed(self, db_path: Path) -> None:
+        """Branch: close_pool called twice — second call is a no-op."""
+        import os
+
+        from orchestrator.core.settings import get_settings
+        from orchestrator.db.pool import init_pool
+
+        os.environ["ORCH_DATABASE_PATH"] = str(db_path)
+        get_settings.cache_clear()
+        # Apply migrations first (init_pool verifies schema)
+        from orchestrator.db.migrate import run_migrations
+
+        run_migrations(db_path)
+        await init_pool()
+        await close_pool()
+        # Second call should not raise
+        await close_pool()
+
+    async def test_check_is_dataclass_rejects_non_dataclass(self) -> None:
+        from orchestrator.db.pool import _check_is_dataclass
+
+        with pytest.raises(TypeError, match=r"not a dataclass|dataclass"):
+            _check_is_dataclass(dict)
+
+    async def test_row_to_dict_handles_none(self) -> None:
+        from orchestrator.db.pool import _row_to_dict
+
+        assert _row_to_dict(None) is None
+
+    async def test_row_to_dataclass_handles_none(self) -> None:
+        from orchestrator.db.pool import _row_to_dataclass
+
+        @dataclass
+        class _Foo:
+            x: int
+
+        assert _row_to_dataclass(_Foo, None) is None
+
+    async def test_is_disk_io_error_recognizes_message(self) -> None:
+        # Real path: aiosqlite raises OperationalError with this message
+        import aiosqlite
+
+        from orchestrator.db.pool import _is_disk_io_error
+
+        assert _is_disk_io_error(aiosqlite.OperationalError("disk I/O error")) is True
+        # Unrelated error
+        assert _is_disk_io_error(ValueError("nope")) is False
