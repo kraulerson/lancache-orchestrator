@@ -806,3 +806,134 @@ async def test_verify_schema_current_detects_unknown(
         with pytest.raises(SchemaUnknownMigrationError) as exc_info:
             await migrate.verify_schema_current(conn)
         assert exc_info.value.unknown == [1]
+
+
+# ---------------------------------------------------------------------------
+# Issue #19: _split_sql honors string literals
+# ---------------------------------------------------------------------------
+
+
+class TestSplitSqlStringLiteralAware:
+    def test_semicolon_inside_single_quote_literal_not_split(self) -> None:
+        sql = "INSERT INTO t (col) VALUES (';-- oops'); SELECT 1;"
+        result = migrate._split_sql(sql)
+        assert result == ["INSERT INTO t (col) VALUES (';-- oops')", "SELECT 1"]
+
+    def test_semicolon_inside_double_quote_identifier_not_split(self) -> None:
+        sql = 'CREATE TABLE "t;weird" (x INTEGER); SELECT 1;'
+        result = migrate._split_sql(sql)
+        assert result == ['CREATE TABLE "t;weird" (x INTEGER)', "SELECT 1"]
+
+    def test_doubled_single_quote_escape_preserved(self) -> None:
+        # SQL escape: '' inside '...' is a literal single quote.
+        sql = "INSERT INTO t VALUES ('it''s fine'); SELECT 2;"
+        result = migrate._split_sql(sql)
+        assert result == ["INSERT INTO t VALUES ('it''s fine')", "SELECT 2"]
+
+    def test_line_comment_inside_literal_not_stripped(self) -> None:
+        sql = "INSERT INTO t VALUES ('-- not a comment'); SELECT 3;"
+        result = migrate._split_sql(sql)
+        assert result == ["INSERT INTO t VALUES ('-- not a comment')", "SELECT 3"]
+
+    def test_block_comment_inside_literal_not_stripped(self) -> None:
+        sql = "INSERT INTO t VALUES ('text /* not comment */ more'); SELECT 4;"
+        result = migrate._split_sql(sql)
+        assert result == [
+            "INSERT INTO t VALUES ('text /* not comment */ more')",
+            "SELECT 4",
+        ]
+
+    def test_real_line_comment_stripped(self) -> None:
+        sql = "SELECT 1; -- this is a comment\nSELECT 2;"
+        result = migrate._split_sql(sql)
+        assert result == ["SELECT 1", "SELECT 2"]
+
+    def test_real_block_comment_stripped(self) -> None:
+        sql = "SELECT 1; /* block\nmultiline */ SELECT 2;"
+        result = migrate._split_sql(sql)
+        assert result == ["SELECT 1", "SELECT 2"]
+
+    def test_trailing_semicolon_handled(self) -> None:
+        assert migrate._split_sql("SELECT 1;") == ["SELECT 1"]
+        assert migrate._split_sql("SELECT 1") == ["SELECT 1"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #20: _expected_tables_for handles VIRTUAL/TEMP/DROP + schema-qualified
+# ---------------------------------------------------------------------------
+
+
+class TestExpectedTablesParsing:
+    def _mig(self, mid: int, sql: str):
+        return migrate._Migration(mid=mid, name="t", sql=sql, sha="", filename=f"{mid:04d}_t.sql")
+
+    def test_create_virtual_table_detected(self) -> None:
+        mig = self._mig(1, "CREATE VIRTUAL TABLE fts USING fts5(body);")
+        assert "fts" in migrate._expected_tables_for([mig])
+
+    def test_create_temp_table_detected(self) -> None:
+        mig = self._mig(1, "CREATE TEMP TABLE staging (x INT);")
+        assert "staging" in migrate._expected_tables_for([mig])
+
+    def test_create_temporary_table_detected(self) -> None:
+        mig = self._mig(1, "CREATE TEMPORARY TABLE staging (x INT);")
+        assert "staging" in migrate._expected_tables_for([mig])
+
+    def test_schema_qualified_name_picks_table_only(self) -> None:
+        mig = self._mig(1, "CREATE TABLE main.foo (x INT);")
+        tables = migrate._expected_tables_for([mig])
+        assert "foo" in tables
+        assert "main" not in tables
+        assert "main.foo" not in tables
+
+    def test_drop_table_subtracts(self) -> None:
+        mig = self._mig(
+            1,
+            "CREATE TABLE foo (x INT); CREATE TABLE bar (y INT); DROP TABLE foo;",
+        )
+        tables = migrate._expected_tables_for([mig])
+        assert "bar" in tables
+        assert "foo" not in tables
+        assert "schema_migrations" in tables
+
+    def test_drop_table_if_exists_subtracts(self) -> None:
+        mig = self._mig(1, "CREATE TABLE foo (x INT); DROP TABLE IF EXISTS foo;")
+        assert "foo" not in migrate._expected_tables_for([mig])
+
+    def test_create_then_drop_in_separate_migrations(self) -> None:
+        m1 = self._mig(1, "CREATE TABLE foo (x INT);")
+        m2 = self._mig(2, "DROP TABLE foo;")
+        assert "foo" not in migrate._expected_tables_for([m1, m2])
+
+
+# ---------------------------------------------------------------------------
+# Issue #21: CHECKSUMS filename validated at parse time
+# ---------------------------------------------------------------------------
+
+
+class TestChecksumFilenameValidation:
+    def test_path_traversal_filename_rejected(self, migs_dir, db_path) -> None:
+        _write_migration(migs_dir, 1, "initial", _VALID_FIRST_MIG)
+        sha = _sha256(_VALID_FIRST_MIG)
+        (migs_dir / "CHECKSUMS").write_text(f"1 {sha} ../../etc/passwd\n", encoding="utf-8")
+        with pytest.raises(migrate.MigrationError, match=r"invalid migration filename"):
+            migrate.run_migrations(db_path, migrations_dir=migs_dir)
+
+    def test_reserved_filename_rejected(self, migs_dir, db_path) -> None:
+        _write_migration(migs_dir, 1, "initial", _VALID_FIRST_MIG)
+        sha = _sha256(_VALID_FIRST_MIG)
+        (migs_dir / "CHECKSUMS").write_text(f"1 {sha} CHECKSUMS\n", encoding="utf-8")
+        with pytest.raises(migrate.MigrationError, match=r"invalid migration filename"):
+            migrate.run_migrations(db_path, migrations_dir=migs_dir)
+
+    def test_init_py_filename_rejected(self, migs_dir, db_path) -> None:
+        _write_migration(migs_dir, 1, "initial", _VALID_FIRST_MIG)
+        sha = _sha256(_VALID_FIRST_MIG)
+        (migs_dir / "CHECKSUMS").write_text(f"1 {sha} __init__.py\n", encoding="utf-8")
+        with pytest.raises(migrate.MigrationError, match=r"invalid migration filename"):
+            migrate.run_migrations(db_path, migrations_dir=migs_dir)
+
+    def test_valid_filename_accepted(self, migs_dir, db_path) -> None:
+        _write_migration(migs_dir, 1, "initial", _VALID_FIRST_MIG)
+        _write_checksums(migs_dir, [(1, _sha256(_VALID_FIRST_MIG), "0001_initial.sql")])
+        migrate.run_migrations(db_path, migrations_dir=migs_dir)
