@@ -8,16 +8,18 @@ from typing import TYPE_CHECKING, Any, Literal
 import structlog
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from orchestrator.api._query_helpers import (
     FilterAllowList,
     FilterFieldSpec,
+    IncludeAllowList,
     QueryParamError,
     SortAllowList,
     build_order_by_clause,
     build_where_clause,
     parse_filters,
+    parse_includes,
     parse_pagination,
     parse_sort,
 )
@@ -56,6 +58,9 @@ JOBS_FILTER_ALLOW_LIST = FilterAllowList(
 JOBS_SORT_ALLOW_LIST = SortAllowList(
     fields={"id", "kind", "state", "progress", "started_at", "finished_at"}
 )
+
+# UAT-5 U5-8: enforce ?include= convention (no includable keys today on jobs).
+JOBS_INCLUDE_ALLOW_LIST = IncludeAllowList(keys=set())
 
 # All schema columns listed explicitly so the SELECT is stable across
 # future migrations.
@@ -152,6 +157,8 @@ async def list_jobs(
             default=list(DEFAULT_SORT),
             tie_breaker=TIE_BREAKER,
         )
+        # UAT-5 U5-8: enforce ?include= rejection on jobs (no includable keys).
+        parse_includes(request.query_params, allow_list=JOBS_INCLUDE_ALLOW_LIST)
     except QueryParamError as e:
         return JSONResponse(content={"detail": str(e)}, status_code=400)
 
@@ -181,6 +188,14 @@ async def list_jobs(
         payload: dict[str, Any] | None
         if raw_payload is None:
             payload = None
+        elif not isinstance(raw_payload, (str, bytes, bytearray)):
+            # UAT-5 U5-3: defensive guard against non-buffer pool returns.
+            _log.warning(
+                "api.jobs.payload_unexpected_type",
+                job_id=row["id"],
+                value_type=type(raw_payload).__name__,
+            )
+            payload = None
         elif len(raw_payload) > PAYLOAD_MAX_BYTES:
             _log.warning(
                 "api.jobs.payload_oversized",
@@ -204,21 +219,33 @@ async def list_jobs(
         raw_err = row["error"]
         err = raw_err[:ERROR_TRUNCATE] if raw_err else None
 
-        jobs.append(
-            JobResponse(
-                id=row["id"],
-                kind=row["kind"],
-                game_id=row["game_id"],
-                platform=row["platform"],
-                state=row["state"],
-                progress=row["progress"],
-                source=row["source"],
-                started_at=row["started_at"],
-                finished_at=row["finished_at"],
-                error=err,
-                payload=payload,
+        # UAT-5 U5-2: wrap per-row response construction. Pydantic Literal[]
+        # fields (kind, platform, state, source) raise ValidationError if the
+        # DB row holds an out-of-allow-list value. Skip with a structured log
+        # rather than 500-crashing the whole request.
+        try:
+            jobs.append(
+                JobResponse(
+                    id=row["id"],
+                    kind=row["kind"],
+                    game_id=row["game_id"],
+                    platform=row["platform"],
+                    state=row["state"],
+                    progress=row["progress"],
+                    source=row["source"],
+                    started_at=row["started_at"],
+                    finished_at=row["finished_at"],
+                    error=err,
+                    payload=payload,
+                )
             )
-        )
+        except ValidationError as e:
+            _log.warning(
+                "api.jobs.row_dropped",
+                job_id=row["id"],
+                reason="response_model_validation_failed",
+                errors=[{"loc": err["loc"], "type": err["type"]} for err in e.errors()],
+            )
 
     # UAT-4 S2-A: plain-dict applied_filters from parsed filters directly
     applied_filters: dict[str, dict[str, Any]] = {

@@ -19,6 +19,41 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Security
+- **UAT-5 remediation (7 findings)** hardening the BL5-BL9 API surface:
+  - **U5-1 [SEV-2]** (`middleware.py`) — bearer-auth Authorization header now
+    decoded with `errors="strict"` (was `errors="ignore"`, which silently
+    dropped non-ASCII bytes); added 4096-byte header-size cap. Non-conforming
+    HTTP clients can no longer send byte sequences that decode to the same
+    token via silent normalization.
+  - **U5-2 [SEV-2]** (`routers/games.py`, `routers/jobs.py`, `routers/platforms.py`) —
+    per-row response-model construction wrapped in `try/except ValidationError`.
+    Out-of-Literal DB values (CHECK-constraint drift, raw SQL writes) now drop
+    the offending row with a structured `api.{entity}.row_dropped` log instead
+    of crashing the whole request to 500.
+  - **U5-3 [SEV-2]** (`routers/games.py`, `routers/jobs.py`) — defensive
+    `isinstance(raw_meta, (str, bytes, bytearray))` guard before `len()` on
+    metadata/payload bytes. Future pool drivers that return non-buffer types
+    (dict, int) no longer raise unhandled TypeError to 500.
+  - **U5-4 [SEV-2]** (`_query_helpers.py`) — `_coerce_value` rejects
+    non-finite floats (`NaN`, `Infinity`, `-Infinity`). Previously these
+    flowed through to `json.dumps` and crashed to 500; now they 400 with a
+    clear `value must be finite` message.
+  - **U5-5 [SEV-2]** (`routers/platforms.py`) — platforms now rejects any
+    query parameter with 400 for cross-router consistency. Previously
+    `?password=foo` silently returned 200 (the other 3 F9 endpoints all 400).
+  - **U5-6 [SEV-2]** (`routers/platforms.py`) — added `PlatformsMeta` to the
+    response envelope (`{platforms, meta}`). Envelope shape now matches
+    games/jobs/manifests; meta carries `total` plus empty
+    `applied_filters`/`applied_sort` (platforms doesn't paginate or filter).
+  - **U5-8 [SEV-3]** (`routers/games.py`, `routers/jobs.py`) — both routers
+    declare an empty `IncludeAllowList` and call `parse_includes`. Any
+    `?include=foo` value now rejects with 400; previously silently ignored.
+    Locks in the BL9 convention so future typos surface.
+
+  See [UAT-5 session](tests/uat/sessions/2026-05-20-session-5/) for full
+  consolidated findings + 4 individual + 2 umbrella issues filed (#78-#87).
+
 ### Added
 - **`GET /api/v1/manifests`** (BL9 / Feature 9 partial) — third paginated F9
   read endpoint, introduces the **`?include=` opt-in expansion convention**.

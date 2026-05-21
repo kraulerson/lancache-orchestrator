@@ -47,6 +47,11 @@ _UUID4_RE = re.compile(
     re.IGNORECASE,
 )
 
+# UAT-5 U5-1: cap Authorization header size to prevent unbounded allocation
+# through attacker-controlled headers. 4096 is comfortably above realistic
+# bearer tokens (typical opaque tokens are 32-128 hex/base64 chars).
+_MAX_AUTH_HEADER_BYTES = 4096
+
 
 # ----------------------------------------------------------------------
 # CorrelationIdMiddleware (spec §5.2)
@@ -242,7 +247,34 @@ class BearerAuthMiddleware:
                 return
 
         headers = dict(scope.get("headers", []))
-        auth_header = headers.get(b"authorization", b"").decode("ascii", errors="ignore")
+        raw_auth = headers.get(b"authorization", b"")
+
+        # UAT-5 U5-1: reject oversized Authorization headers BEFORE any
+        # decode/hmac work. Real bearer tokens are ASCII opaque strings; an
+        # attacker sending megabytes of header bytes shouldn't get to allocate
+        # them through string ops. 4096 is comfortably above realistic bearer
+        # widths.
+        if len(raw_auth) > _MAX_AUTH_HEADER_BYTES:
+            _log.warning(
+                "api.auth.rejected",
+                reason="oversized_header",
+                path=path,
+                header_bytes=len(raw_auth),
+            )
+            await self._send_401(send)
+            return
+
+        # UAT-5 U5-1: strict ASCII decode. Previous code used errors="ignore"
+        # which silently dropped non-ASCII bytes — two distinct candidate
+        # tokens with different non-ASCII content could collide on the
+        # decoded form. Reject anything that isn't a clean ASCII byte
+        # sequence as malformed.
+        try:
+            auth_header = raw_auth.decode("ascii", errors="strict")
+        except UnicodeDecodeError:
+            _log.warning("api.auth.rejected", reason="non_ascii_header", path=path)
+            await self._send_401(send)
+            return
 
         if not auth_header:
             _log.warning("api.auth.rejected", reason="missing_header", path=path)

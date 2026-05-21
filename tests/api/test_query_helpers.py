@@ -170,6 +170,36 @@ class TestParseFilters:
                 allow_list=_games_allow_list(),
             )
 
+    # UAT-5 U5-4 regression: NaN/Infinity float strings must reject at parse time
+    # so json.dumps doesn't fail downstream.
+    def test_float_nan_rejected(self):
+        from orchestrator.api._query_helpers import (
+            FilterAllowList,
+            FilterFieldSpec,
+            QueryParamError,
+            parse_filters,
+        )
+
+        allow = FilterAllowList(
+            {"progress": FilterFieldSpec(ops={"eq", "gte", "lte"}, value_type=float)}
+        )
+        for raw in ("NaN", "nan", "Infinity", "-Infinity", "inf", "-inf"):
+            with pytest.raises(QueryParamError, match=r"finite|invalid value"):
+                parse_filters(QueryParams(f"progress_gte={raw}"), allow_list=allow)
+
+    def test_float_finite_accepted(self):
+        from orchestrator.api._query_helpers import (
+            FilterAllowList,
+            FilterFieldSpec,
+            parse_filters,
+        )
+
+        allow = FilterAllowList(
+            {"progress": FilterFieldSpec(ops={"eq", "gte", "lte"}, value_type=float)}
+        )
+        result = parse_filters(QueryParams("progress_gte=0.5"), allow_list=allow)
+        assert result == {"progress": {"gte": 0.5}}
+
 
 # ---------------------------------------------------------------------------
 # parse_sort

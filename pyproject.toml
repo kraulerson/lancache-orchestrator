@@ -23,7 +23,7 @@ where = ["src"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
-extend-exclude = ["spikes"]
+extend-exclude = ["spikes", "tests/uat/sessions"]
 force-exclude = true
 
 [tool.ruff.format]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 VALID_TOKEN = "a" * 32  # matches the conftest dummy token
 
@@ -66,6 +67,62 @@ class TestBearerAuthRejection:
         )
         # Auth passed; route doesn't exist → 404.
         assert r.status_code == 404
+
+    # UAT-5 U5-1: hardening tests for the Authorization header decode path.
+    # httpx itself refuses to send non-ASCII Authorization values (RFC 7230);
+    # the attack vector is a non-conforming HTTP client that sends raw bytes.
+    # Drive the middleware directly via a synthetic ASGI scope to verify.
+    async def test_non_ascii_bytes_in_header_rejected(self, unit_app):
+        from orchestrator.api.middleware import BearerAuthMiddleware
+
+        captured: dict[str, Any] = {}
+
+        async def _receive() -> dict[str, Any]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def _send(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                captured["status"] = message["status"]
+
+        async def _inner_app(scope, receive, send) -> None:  # would-be unreachable
+            captured["reached_inner"] = True
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        mw = BearerAuthMiddleware(_inner_app)
+        # Hand-construct raw header bytes with embedded non-ASCII (U+00A0).
+        bad_value = b"Bearer " + b"a" * 24 + b"\xc2\xa0" + b"a" * 4
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/anything",
+            "headers": [(b"authorization", bad_value)],
+            "client": ("127.0.0.1", 12345),
+            "query_string": b"",
+        }
+        await mw(scope, _receive, _send)
+        assert captured.get("status") == 401
+        assert not captured.get("reached_inner")
+
+    async def test_oversized_authorization_header_rejected(self, client):
+        """4096-byte cap on the Authorization header value. Anything
+        larger short-circuits to 401 without reaching hmac.compare_digest."""
+        huge = "Bearer " + ("a" * 10_000)
+        r = await client.get(
+            "/api/v1/anything",
+            headers={"Authorization": huge},
+        )
+        assert r.status_code == 401
+
+    async def test_oversized_just_under_cap_still_compared(self, client):
+        """Boundary: a header just under the 4096 cap reaches token compare
+        and gets a normal 401 for bad_token (not oversized_header)."""
+        almost = "Bearer " + ("a" * 4000)  # well under 4096
+        r = await client.get(
+            "/api/v1/anything",
+            headers={"Authorization": almost},
+        )
+        assert r.status_code == 401
 
 
 class TestBearerAuthOQ2Loopback:

@@ -35,6 +35,7 @@ Security invariants:
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -237,7 +238,13 @@ def _coerce_value(raw: str, value_type: ValueTypeSpec, field_name: str, op: str)
                 raise ValueError(f"value out of range (signed 64-bit): {coerced}")
             return coerced
         if value_type is float:
-            return float(raw)
+            coerced_f = float(raw)
+            # UAT-5 U5-4: stdlib float() accepts "NaN"/"Infinity"; json.dumps then
+            # raises ValueError ("out of range") → 500. Reject non-finite values
+            # at the parse boundary so they become a 400 instead.
+            if not math.isfinite(coerced_f):
+                raise ValueError(f"value must be finite: {coerced_f}")
+            return coerced_f
         if value_type is bool:
             if raw in ("1", "true", "True"):
                 return True
