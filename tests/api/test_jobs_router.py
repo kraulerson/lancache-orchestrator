@@ -406,6 +406,92 @@ class TestJobsPayloadAndError:
         long_rows = [j for j in r.json()["jobs"] if j["error"] and len(j["error"]) >= 200]
         assert any(len(j["error"]) == 200 for j in long_rows)
 
+    # UAT-5 U5-3: defend against non-string raw_payload pool returns
+    async def test_non_buffer_payload_type_returns_null(self, client, populated_pool):
+        from unittest.mock import patch
+
+        async def _read_all(*_a, **_kw):
+            return [
+                {
+                    "id": 1,
+                    "kind": "prefill",
+                    "game_id": None,
+                    "platform": "steam",
+                    "state": "succeeded",
+                    "progress": 1.0,
+                    "source": "scheduler",
+                    "started_at": "2026-04-04T00:00:00Z",
+                    "finished_at": "2026-04-04T00:05:00Z",
+                    "error": None,
+                    "payload": {"already-decoded": True},  # non-buffer type
+                }
+            ]
+
+        async def _read_one(*_a, **_kw):
+            return {"total": 1}
+
+        with (
+            patch("orchestrator.db.pool.Pool.read_all", new=_read_all),
+            patch("orchestrator.db.pool.Pool.read_one", new=_read_one),
+        ):
+            r = await client.get(
+                "/api/v1/jobs?limit=500",
+                headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            )
+        assert r.status_code == 200  # NOT 500
+        job = r.json()["jobs"][0]
+        assert job["payload"] is None
+
+    # UAT-5 U5-2: Pydantic Literal[] crash on out-of-allow-list DB value
+    async def test_out_of_literal_state_skips_row(self, client, populated_pool):
+        from unittest.mock import patch
+
+        async def _read_all_garbage_state(*_a, **_kw):
+            return [
+                {
+                    "id": 1,
+                    "kind": "prefill",
+                    "game_id": None,
+                    "platform": "steam",
+                    "state": "garbage_value",  # not in Literal
+                    "progress": 1.0,
+                    "source": "scheduler",
+                    "started_at": "2026-04-04T00:00:00Z",
+                    "finished_at": "2026-04-04T00:05:00Z",
+                    "error": None,
+                    "payload": None,
+                },
+                {
+                    "id": 2,
+                    "kind": "sweep",
+                    "game_id": None,
+                    "platform": None,
+                    "state": "succeeded",
+                    "progress": 1.0,
+                    "source": "scheduler",
+                    "started_at": "2026-04-04T00:00:00Z",
+                    "finished_at": "2026-04-04T00:05:00Z",
+                    "error": None,
+                    "payload": None,
+                },
+            ]
+
+        async def _read_one(*_a, **_kw):
+            return {"total": 2}
+
+        with (
+            patch("orchestrator.db.pool.Pool.read_all", new=_read_all_garbage_state),
+            patch("orchestrator.db.pool.Pool.read_one", new=_read_one),
+        ):
+            r = await client.get(
+                "/api/v1/jobs?limit=500",
+                headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            )
+        assert r.status_code == 200  # NOT 500
+        body = r.json()
+        assert [j["id"] for j in body["jobs"]] == [2]  # bad row dropped
+        assert body["meta"]["total"] == 2
+
 
 # ---------------------------------------------------------------------------
 # Error paths
@@ -438,6 +524,22 @@ class TestJobsErrorPaths:
     async def test_unauth_401(self, client, jobs_pool_seeded):
         r = await client.get("/api/v1/jobs")
         assert r.status_code == 401
+
+    # UAT-5 U5-8: enforce ?include= convention. jobs has no includable keys.
+    async def test_unknown_include_key_400(self, client, jobs_pool_seeded):
+        r = await client.get(
+            "/api/v1/jobs?include=foo",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+        assert "include" in r.json()["detail"].lower()
+
+    async def test_empty_include_accepted(self, client, jobs_pool_seeded):
+        r = await client.get(
+            "/api/v1/jobs?include=&limit=3",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 200  # empty include is a no-op
 
 
 # ---------------------------------------------------------------------------

@@ -381,6 +381,23 @@ class TestGamesErrors:
         )
         assert r.status_code == 400
 
+    # UAT-5 U5-8: enforce ?include= convention. games has no includable keys
+    # so any ?include= value should 400.
+    async def test_unknown_include_key_400(self, client, games_pool_100):
+        r = await client.get(
+            "/api/v1/games?include=foo",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+        assert "include" in r.json()["detail"].lower()
+
+    async def test_empty_include_accepted(self, client, games_pool_100):
+        r = await client.get(
+            "/api/v1/games?include=&limit=3",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 200  # empty include is a no-op
+
 
 # ---------------------------------------------------------------------------
 # Auth (smoke)
@@ -468,6 +485,100 @@ class TestGamesMetadata:
         )
         game = next(g for g in r.json()["games"] if g["id"] == 1)
         assert game["metadata"] is None
+
+    # UAT-5 U5-3: defend against non-string raw_meta pool returns
+    async def test_non_buffer_metadata_type_returns_null(self, client, populated_pool):
+        from unittest.mock import patch
+
+        async def _read_all_with_dict_meta(*_a, **_kw):
+            return [
+                {
+                    "id": 1,
+                    "platform": "steam",
+                    "app_id": "10",
+                    "title": "Counter-Strike",
+                    "owned": 1,
+                    "size_bytes": 1000,
+                    "current_version": None,
+                    "cached_version": None,
+                    "status": "up_to_date",
+                    "last_validated_at": None,
+                    "last_prefilled_at": None,
+                    "last_error": None,
+                    "metadata": {"already-decoded": True},  # non-buffer type
+                }
+            ]
+
+        async def _read_one(*_a, **_kw):
+            return {"total": 1}
+
+        with (
+            patch("orchestrator.db.pool.Pool.read_all", new=_read_all_with_dict_meta),
+            patch("orchestrator.db.pool.Pool.read_one", new=_read_one),
+        ):
+            r = await client.get(
+                "/api/v1/games?limit=500",
+                headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            )
+        assert r.status_code == 200  # NOT 500
+        game = r.json()["games"][0]
+        assert game["metadata"] is None
+
+    # UAT-5 U5-2: Pydantic Literal[] crash on out-of-allow-list DB value
+    async def test_out_of_literal_status_skips_row(self, client, populated_pool):
+        from unittest.mock import patch
+
+        async def _read_all_garbage_status(*_a, **_kw):
+            return [
+                {
+                    "id": 1,
+                    "platform": "steam",
+                    "app_id": "10",
+                    "title": "BAD ROW",
+                    "owned": 1,
+                    "size_bytes": 1000,
+                    "current_version": None,
+                    "cached_version": None,
+                    "status": "garbage_value",  # not in Literal
+                    "last_validated_at": None,
+                    "last_prefilled_at": None,
+                    "last_error": None,
+                    "metadata": None,
+                },
+                {
+                    "id": 2,
+                    "platform": "steam",
+                    "app_id": "20",
+                    "title": "GOOD ROW",
+                    "owned": 1,
+                    "size_bytes": 2000,
+                    "current_version": None,
+                    "cached_version": None,
+                    "status": "up_to_date",
+                    "last_validated_at": None,
+                    "last_prefilled_at": None,
+                    "last_error": None,
+                    "metadata": None,
+                },
+            ]
+
+        async def _read_one(*_a, **_kw):
+            return {"total": 2}
+
+        with (
+            patch("orchestrator.db.pool.Pool.read_all", new=_read_all_garbage_status),
+            patch("orchestrator.db.pool.Pool.read_one", new=_read_one),
+        ):
+            r = await client.get(
+                "/api/v1/games?limit=500",
+                headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            )
+        assert r.status_code == 200  # NOT 500
+        body = r.json()
+        # bad row skipped; good row remains
+        assert [g["id"] for g in body["games"]] == [2]
+        # total still reflects DB count (the bad row exists, we just skipped it)
+        assert body["meta"]["total"] == 2
 
 
 # ---------------------------------------------------------------------------

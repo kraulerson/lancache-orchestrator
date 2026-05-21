@@ -8,16 +8,18 @@ from typing import TYPE_CHECKING, Any, Literal
 import structlog
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from orchestrator.api._query_helpers import (
     FilterAllowList,
     FilterFieldSpec,
+    IncludeAllowList,
     QueryParamError,
     SortAllowList,
     build_order_by_clause,
     build_where_clause,
     parse_filters,
+    parse_includes,
     parse_pagination,
     parse_sort,
 )
@@ -53,6 +55,12 @@ GAMES_FILTER_ALLOW_LIST = FilterAllowList(
 GAMES_SORT_ALLOW_LIST = SortAllowList(
     fields={"id", "title", "status", "size_bytes", "last_prefilled_at", "last_validated_at"}
 )
+
+# UAT-5 U5-8: games doesn't currently support any ?include= expansion, but
+# the convention from BL9 (/manifests) is that endpoints declare an
+# IncludeAllowList explicitly. With an empty allow-list, any ?include= value
+# is rejected with 400. Locks in convention enforcement so typos surface.
+GAMES_INCLUDE_ALLOW_LIST = IncludeAllowList(keys=set())
 
 # All schema columns explicitly listed so the SELECT is stable across
 # future migrations (a new column won't accidentally appear in the wire).
@@ -182,6 +190,11 @@ async def list_games(
             default=list(DEFAULT_SORT),
             tie_breaker=TIE_BREAKER,
         )
+        # UAT-5 U5-8: enforce ?include= convention even though games has no
+        # includable keys today. Empty allow-list rejects any ?include=foo
+        # with 400 — locks in convention so a typo against the API surfaces
+        # rather than being silently ignored.
+        parse_includes(request.query_params, allow_list=GAMES_INCLUDE_ALLOW_LIST)
     except QueryParamError as e:
         return JSONResponse(content={"detail": str(e)}, status_code=400)
 
@@ -215,6 +228,17 @@ async def list_games(
         metadata: dict[str, Any] | None
         if raw_meta is None:
             metadata = None
+        elif not isinstance(raw_meta, (str, bytes, bytearray)):
+            # UAT-5 U5-3: defensive guard against future pool drivers that
+            # may auto-decode JSON columns to dict/list/int. The original
+            # `len(raw_meta) > cap` check raised TypeError for non-buffer
+            # types (uncaught → 500). Treat as malformed → metadata=None.
+            _log.warning(
+                "api.games.metadata_unexpected_type",
+                game_id=row["id"],
+                value_type=type(raw_meta).__name__,
+            )
+            metadata = None
         elif len(raw_meta) > _MAX_METADATA_BYTES:
             # UAT-4 S3-e: size-cap short-circuit before json.loads
             _log.warning(
@@ -241,23 +265,37 @@ async def list_games(
         raw_err = row["last_error"]
         last_error = raw_err[:LAST_ERROR_TRUNCATE] if raw_err else None
 
-        games.append(
-            GameResponse(
-                id=row["id"],
-                platform=row["platform"],
-                app_id=row["app_id"],
-                title=row["title"],
-                owned=row["owned"],
-                size_bytes=row["size_bytes"],
-                current_version=row["current_version"],
-                cached_version=row["cached_version"],
-                status=row["status"],
-                last_validated_at=row["last_validated_at"],
-                last_prefilled_at=row["last_prefilled_at"],
-                last_error=last_error,
-                metadata=metadata,
+        # UAT-5 U5-2: wrap per-row response-model construction in try/except.
+        # Pydantic Literal[] columns (platform, status) raise ValidationError
+        # if the DB row holds an out-of-allow-list value (CHECK constraint
+        # dropped in a future migration, fixture bug, raw SQL writes, …).
+        # Previously the exception propagated as 500. Skip the row with a
+        # structured log instead, matching the metadata-parse pattern.
+        try:
+            games.append(
+                GameResponse(
+                    id=row["id"],
+                    platform=row["platform"],
+                    app_id=row["app_id"],
+                    title=row["title"],
+                    owned=row["owned"],
+                    size_bytes=row["size_bytes"],
+                    current_version=row["current_version"],
+                    cached_version=row["cached_version"],
+                    status=row["status"],
+                    last_validated_at=row["last_validated_at"],
+                    last_prefilled_at=row["last_prefilled_at"],
+                    last_error=last_error,
+                    metadata=metadata,
+                )
             )
-        )
+        except ValidationError as e:
+            _log.warning(
+                "api.games.row_dropped",
+                game_id=row["id"],
+                reason="response_model_validation_failed",
+                errors=[{"loc": err["loc"], "type": err["type"]} for err in e.errors()],
+            )
 
     # UAT-4 S2-A: build applied_filters as a plain dict matching the parsed
     # `{field: {op: value}}` shape. Previously this went through a

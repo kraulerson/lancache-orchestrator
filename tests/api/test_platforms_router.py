@@ -36,10 +36,33 @@ class TestPlatformsHappyPath:
             headers={"Authorization": f"Bearer {VALID_TOKEN}"},
         )
         body = r.json()
-        # Wrapped envelope per D2.
+        # UAT-5 U5-6: envelope extended with `meta` for parity with games/
+        # jobs/manifests. Platforms doesn't paginate, so meta just carries
+        # `total` + empty applied_filters/applied_sort.
         assert isinstance(body, dict)
-        assert list(body.keys()) == ["platforms"]
+        assert set(body.keys()) == {"platforms", "meta"}
         assert isinstance(body["platforms"], list)
+        assert set(body["meta"].keys()) == {"total", "applied_filters", "applied_sort"}
+        assert body["meta"]["total"] == len(body["platforms"])
+        assert body["meta"]["applied_filters"] == {}
+        assert body["meta"]["applied_sort"] == []
+
+    # UAT-5 U5-5: cross-router consistency — unknown query params are 400'd
+    # everywhere else; platforms was the outlier (silently 200'd).
+    async def test_unknown_query_param_returns_400(self, client):
+        r = await client.get(
+            "/api/v1/platforms?password=foo",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+        assert "unknown query parameter" in r.json()["detail"].lower()
+
+    async def test_multiple_unknown_query_params_returns_400(self, client):
+        r = await client.get(
+            "/api/v1/platforms?foo=1&bar=2",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
 
     async def test_response_field_set_per_platform(self, client):
         r = await client.get(
