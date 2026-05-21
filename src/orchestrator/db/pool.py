@@ -15,19 +15,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import shutil
 import time
 from collections.abc import AsyncIterator, Generator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import fields, is_dataclass
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from pathlib import Path
+from typing import Any, Literal, TypeVar
 
 import aiosqlite
 import structlog
 
 from orchestrator.core.settings import get_settings
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 T = TypeVar("T")
 
@@ -589,6 +588,16 @@ class Pool:
         self._total_writes = 0
         self._total_reads = 0
 
+        # Issue #40: disk-low rate-limiter — emit the warning at most once
+        # per 60s to avoid log flooding when the volume sits below threshold.
+        self._last_disk_low_warn_monotonic: float = 0.0
+
+        # Issue #41: query-completed logging is opt-in via Settings.
+        # Cached at construction so we don't re-read on every query.
+        settings = get_settings()
+        self._log_query_completed: bool = settings.pool_query_log_completed
+        self._disk_low_pct: float = settings.pool_disk_low_pct
+
         # Background fire-and-forget tasks (replacement, safe-close).
         # Held to prevent GC; cleaned up via add_done_callback.
         self._bg_tasks: set[asyncio.Task[Any]] = set()
@@ -906,9 +915,32 @@ class Pool:
 
     # --- Single-statement helpers -------------------------------------
 
+    def _emit_query_completed(
+        self,
+        *,
+        role: str,
+        sql: str,
+        params: Any,
+        t0: float,
+    ) -> None:
+        """Issue #41: emit `pool.query_completed` at DEBUG with timing and
+        scrubbed metadata. No-op unless `Settings.pool_query_log_completed`
+        is True (opt-in to avoid log volume at INFO/WARN deployments)."""
+        if not self._log_query_completed:
+            return
+        duration_ms = (time.perf_counter() - t0) * 1000
+        _log.debug(
+            "pool.query_completed",
+            role=role,
+            sql=_template_only(sql),
+            params=_shape(params),
+            duration_ms=duration_ms,
+        )
+
     async def read_one(
         self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()
     ) -> dict[str, Any] | None:
+        t0 = time.perf_counter()
         async with self._checkout_reader() as conn:
             try:
                 cur = await conn.execute(sql, params)
@@ -917,6 +949,7 @@ class Pool:
                 finally:
                     await cur.close()
                 self._total_reads += 1
+                self._emit_query_completed(role="reader", sql=sql, params=params, t0=t0)
                 return _row_to_dict(row)
             except aiosqlite.Error as e:
                 raise _wrap_aiosqlite_error(e, sql=sql, params=params, role="reader") from e
@@ -924,6 +957,7 @@ class Pool:
     async def read_all(
         self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()
     ) -> list[dict[str, Any]]:
+        t0 = time.perf_counter()
         async with self._checkout_reader() as conn:
             try:
                 cur = await conn.execute(sql, params)
@@ -932,6 +966,7 @@ class Pool:
                 finally:
                     await cur.close()
                 self._total_reads += 1
+                self._emit_query_completed(role="reader", sql=sql, params=params, t0=t0)
                 return [r for r in (_row_to_dict(row) for row in rows) if r is not None]
             except aiosqlite.Error as e:
                 raise _wrap_aiosqlite_error(e, sql=sql, params=params, role="reader") from e
@@ -940,6 +975,7 @@ class Pool:
         self, cls: type[T], sql: str, params: Sequence[Any] | Mapping[str, Any] = ()
     ) -> T | None:
         _check_is_dataclass(cls)
+        t0 = time.perf_counter()
         async with self._checkout_reader() as conn:
             try:
                 cur = await conn.execute(sql, params)
@@ -948,6 +984,7 @@ class Pool:
                 finally:
                     await cur.close()
                 self._total_reads += 1
+                self._emit_query_completed(role="reader", sql=sql, params=params, t0=t0)
                 return _row_to_dataclass(cls, row)
             except aiosqlite.Error as e:
                 raise _wrap_aiosqlite_error(e, sql=sql, params=params, role="reader") from e
@@ -956,6 +993,7 @@ class Pool:
         self, cls: type[T], sql: str, params: Sequence[Any] | Mapping[str, Any] = ()
     ) -> list[T]:
         _check_is_dataclass(cls)
+        t0 = time.perf_counter()
         async with self._checkout_reader() as conn:
             try:
                 cur = await conn.execute(sql, params)
@@ -964,6 +1002,7 @@ class Pool:
                 finally:
                     await cur.close()
                 self._total_reads += 1
+                self._emit_query_completed(role="reader", sql=sql, params=params, t0=t0)
                 return [
                     obj for obj in (_row_to_dataclass(cls, row) for row in rows) if obj is not None
                 ]
@@ -971,6 +1010,7 @@ class Pool:
                 raise _wrap_aiosqlite_error(e, sql=sql, params=params, role="reader") from e
 
     async def execute_write(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> int:
+        t0 = time.perf_counter()
         async with self._checkout_writer() as conn:
             try:
                 cur = await conn.execute(sql, params)
@@ -980,6 +1020,7 @@ class Pool:
                     await cur.close()
                 await conn.commit()
                 self._total_writes += 1
+                self._emit_query_completed(role="writer", sql=sql, params=params, t0=t0)
                 return rowcount
             except aiosqlite.Error as e:
                 # Best-effort rollback; ignore if there's no active txn.
@@ -992,6 +1033,7 @@ class Pool:
         sql: str,
         params_seq: Iterable[Sequence[Any] | Mapping[str, Any]],
     ) -> int:
+        t0 = time.perf_counter()
         async with self._checkout_writer() as conn:
             try:
                 cur = await conn.executemany(sql, params_seq)
@@ -1001,6 +1043,7 @@ class Pool:
                     await cur.close()
                 await conn.commit()
                 self._total_writes += 1
+                self._emit_query_completed(role="writer", sql=sql, params="<many>", t0=t0)
                 return rowcount
             except aiosqlite.Error as e:
                 with contextlib.suppress(Exception):
@@ -1113,6 +1156,59 @@ class Pool:
                 "replacements": self._replacement_count["reader"],
             },
             "uptime_sec": int(time.monotonic() - self._created_monotonic),
+            # Issue #40: disk metrics for the DB volume so operators can see
+            # the root cause of disk-i/o-error storms before the volume fills.
+            "disk": self._check_disk(),
+        }
+
+    def _check_disk(self) -> dict[str, Any]:
+        """Return disk-space metrics for the DB volume.
+
+        Issue #40: `shutil.disk_usage` is stdlib, doesn't fault on missing
+        paths (we walk up parents to find an existing dir), and is cheap
+        enough to call per health probe. On any unexpected error we return
+        a minimal `{path, error}` shape so the rest of health_check still
+        works — operators see an explicit failure mode rather than a 500.
+        """
+        target = Path(self._database_path).parent
+        # Walk parents until one exists (database dir might not be created yet
+        # on first boot; shutil.disk_usage raises FileNotFoundError otherwise).
+        probe_path = target
+        while not probe_path.exists() and probe_path != probe_path.parent:
+            probe_path = probe_path.parent
+
+        try:
+            usage = shutil.disk_usage(str(probe_path))
+        except OSError as e:  # /proc weirdness, permission denied, etc.
+            return {
+                "path": str(target),
+                "error": f"{type(e).__name__}: {e}",
+                "low_space": False,
+            }
+
+        free_pct = (usage.free / usage.total * 100.0) if usage.total > 0 else 0.0
+        low_space = free_pct < self._disk_low_pct
+
+        # Rate-limit the warning to one per 60s. The metric itself is always
+        # returned; only the structured log event is suppressed in-between.
+        if low_space:
+            now = time.monotonic()
+            if now - self._last_disk_low_warn_monotonic >= 60.0:
+                _log.warning(
+                    "pool.disk_low",
+                    path=str(probe_path),
+                    free_bytes=usage.free,
+                    free_pct=round(free_pct, 2),
+                    threshold_pct=self._disk_low_pct,
+                )
+                self._last_disk_low_warn_monotonic = now
+
+        return {
+            "path": str(probe_path),
+            "total_bytes": usage.total,
+            "free_bytes": usage.free,
+            "free_pct": round(free_pct, 2),
+            "low_space": low_space,
         }
 
     async def schema_status(self) -> dict[str, Any]:
