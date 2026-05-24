@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     # values). Opt-in to avoid log volume at INFO/WARN deployments.
     pool_query_log_completed: bool = Field(default=False)
 
+    # --- Steam worker (BL10 / F1) ---
+    steam_worker_python_path: Path = Path("/opt/orchestrator/venv-steam-worker/bin/python")
+    steam_worker_ipc_timeout_sec: int = Field(default=30, ge=1, le=600)
+    steam_worker_max_restart_attempts: int = Field(default=3, ge=0, le=10)
+    steam_session_dir: Path = Path("/var/lib/orchestrator/steam_session")
+    jobs_worker_poll_interval_sec: float = Field(default=1.0, gt=0.0, le=60.0)
+
     @field_validator("cors_origins")
     @classmethod
     def _reject_empty_cors_origin(cls, v: list[str]) -> list[str]:
