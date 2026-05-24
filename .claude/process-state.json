@@ -1,9 +1,9 @@
 {
   "build_loop": {
-    "feature": null,
+    "feature": "BL10-F1-steam-auth-substrate",
     "step": 0,
     "steps_completed": [],
-    "started_at": null
+    "started_at": "2026-05-24T23:20:21Z"
   },
   "uat_session": {
     "session_id": 5,
