@@ -41,6 +41,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
+from pydantic import BaseModel, ConfigDict
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -51,11 +53,24 @@ if TYPE_CHECKING:
 MAX_IN_VALUES = 100  # UAT-4 S2-C
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
+# Issue #86.D4: canonical name for the per-row error-truncation cap shared
+# across platforms/games/jobs routers. Was previously 3 separate constants
+# (`_LAST_ERROR_TRUNCATE`, `LAST_ERROR_TRUNCATE`, `ERROR_TRUNCATE`).
+ERROR_TRUNCATE_BYTES = 200
 _IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 _RESERVED_PARAM_NAMES = frozenset({"limit", "offset", "sort", "include"})
 _TIMESTAMP_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?$"
 )
+
+
+# Issue #86.D2: shared Pydantic response model for sort meta. Was
+# duplicated across games.py / jobs.py / manifests.py; OpenAPI happens to
+# dedupe but any future divergence breaks the schema.
+class SortFieldResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    field: str
+    direction: Literal["asc", "desc"]
 
 
 class QueryParamError(ValueError):
@@ -414,9 +429,14 @@ def parse_sort(
     bug. Server-appends `tie_breaker` unless the user's sort already orders
     by `tie_breaker.field` (in either direction) — the user's explicit
     ordering wins.
+
+    Issue #86.D1: user-supplied sort entries are deduped by field name
+    (first occurrence wins). Prevents `?sort=id:asc,id:desc` from
+    producing `ORDER BY id ASC, id DESC` (which works but is nonsense).
     """
     raw = params.get("sort")
     user_sort: list[SortField] = []
+    seen_fields: set[str] = set()
     if raw:
         for entry in raw.split(","):
             entry = entry.strip()
@@ -433,6 +453,10 @@ def parse_sort(
                 raise QueryParamError(f"{field_name!r} is not a sortable field")
             if direction not in ("asc", "desc"):
                 raise QueryParamError(f"invalid sort direction: {direction!r}")
+            # Issue #86.D1: skip duplicate field references — first wins
+            if field_name in seen_fields:
+                continue
+            seen_fields.add(field_name)
             # Narrow str → Literal for type checker after runtime validation
             narrowed_direction: Literal["asc", "desc"] = direction  # type: ignore[assignment]
             user_sort.append(SortField(field=field_name, direction=narrowed_direction))

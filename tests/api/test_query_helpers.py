@@ -307,6 +307,49 @@ class TestParseSort:
                 tie_breaker=SortField(field="id", direction="asc"),
             )
 
+    # Issue #86.D1: user-supplied sort entries deduped (first wins).
+    def test_user_supplied_duplicate_field_deduped_first_wins(self):
+        from orchestrator.api._query_helpers import SortField, parse_sort
+
+        result = parse_sort(
+            QueryParams("sort=title:asc,title:desc"),
+            allow_list=_games_sort_allow_list(),
+            default=[SortField(field="title", direction="asc")],
+            tie_breaker=SortField(field="id", direction="asc"),
+        )
+        # title:asc (first) wins; title:desc dropped; tie-breaker appended.
+        fields = [(s.field, s.direction) for s in result]
+        assert fields == [("title", "asc"), ("id", "asc")]
+
+    def test_user_supplied_triple_duplicate_only_first_kept(self):
+        from orchestrator.api._query_helpers import SortField, parse_sort
+
+        result = parse_sort(
+            QueryParams("sort=id:desc,id:asc,id:asc"),
+            allow_list=_games_sort_allow_list(),
+            default=[SortField(field="title", direction="asc")],
+            tie_breaker=SortField(field="id", direction="asc"),
+        )
+        # id:desc is the first user entry AND matches the tie-breaker field;
+        # tie-breaker NOT appended (user already orders by id).
+        fields = [(s.field, s.direction) for s in result]
+        assert fields == [("id", "desc")]
+
+    # Issue #86.D7: multi-field user sort whose explicit ordering includes
+    # the tie-breaker field must NOT get the server-appended tie-breaker.
+    def test_multi_field_user_sort_with_tie_breaker_overlap(self):
+        from orchestrator.api._query_helpers import SortField, parse_sort
+
+        result = parse_sort(
+            QueryParams("sort=size_bytes:desc,id:asc"),
+            allow_list=_games_sort_allow_list(),
+            default=[SortField(field="title", direction="asc")],
+            tie_breaker=SortField(field="id", direction="asc"),
+        )
+        fields = [(s.field, s.direction) for s in result]
+        # Tie-breaker dedupe still works for multi-field user sorts.
+        assert fields == [("size_bytes", "desc"), ("id", "asc")]
+
 
 # ---------------------------------------------------------------------------
 # build_where_clause

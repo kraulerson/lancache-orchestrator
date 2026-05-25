@@ -15,6 +15,7 @@ from orchestrator.api._query_helpers import (
     IncludeAllowList,
     QueryParamError,
     SortAllowList,
+    SortFieldResponse,
     build_order_by_clause,
     build_where_clause,
     parse_filters,
@@ -88,12 +89,6 @@ class ManifestResponse(BaseModel):
     total_bytes: int
     # Spec D4: always-present field; populated iff ?include=game was requested.
     game: GameSummary | None
-
-
-class SortFieldResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    field: str
-    direction: Literal["asc", "desc"]
 
 
 class ManifestsMeta(BaseModel):

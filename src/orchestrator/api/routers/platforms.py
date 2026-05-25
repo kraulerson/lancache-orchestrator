@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from orchestrator.api._query_helpers import ERROR_TRUNCATE_BYTES
 from orchestrator.api.dependencies import get_pool_dep
 from orchestrator.db.pool import PoolError
 
@@ -16,7 +17,6 @@ if TYPE_CHECKING:
     from orchestrator.db.pool import Pool
 
 
-_LAST_ERROR_TRUNCATE = 200
 _log = structlog.get_logger(__name__)
 
 
@@ -117,7 +117,7 @@ async def list_platforms(
                     auth_expires_at=row["auth_expires_at"],
                     last_sync_at=row["last_sync_at"],
                     last_error=(
-                        row["last_error"][:_LAST_ERROR_TRUNCATE] if row["last_error"] else None
+                        row["last_error"][:ERROR_TRUNCATE_BYTES] if row["last_error"] else None
                     ),
                 )
             )

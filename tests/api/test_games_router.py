@@ -155,6 +155,43 @@ class TestGamesPagination:
         assert len(body["games"]) == 50
         assert body["meta"]["has_more"] is False
 
+    # Issue #86.D5: offset > total returns empty array + correct meta.total
+    # + has_more=false. Previously untested.
+    async def test_offset_past_end_returns_empty_with_correct_total(self, client, games_pool_100):
+        r = await client.get(
+            "/api/v1/games?limit=10&offset=10000",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["games"] == []
+        assert body["meta"]["total"] == 100
+        assert body["meta"]["has_more"] is False
+        assert body["meta"]["offset"] == 10000
+
+    async def test_offset_exactly_at_total_returns_empty(self, client, games_pool_100):
+        r = await client.get(
+            "/api/v1/games?limit=10&offset=100",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        body = r.json()
+        assert body["games"] == []
+        assert body["meta"]["has_more"] is False
+
+    # Issue #86.D6: inverted range filter (gte > lte) silently returns
+    # empty. This is the documented contract — no error, just an empty
+    # result. Lock the behavior in a test so future refactors don't
+    # accidentally change it.
+    async def test_inverted_size_range_returns_empty(self, client, games_pool_100):
+        r = await client.get(
+            "/api/v1/games?size_bytes_gte=100000&size_bytes_lte=1&limit=500",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["games"] == []
+        assert body["meta"]["total"] == 0
+
 
 # ---------------------------------------------------------------------------
 # Filter: platform
