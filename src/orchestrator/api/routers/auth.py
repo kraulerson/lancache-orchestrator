@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -27,9 +27,31 @@ if TYPE_CHECKING:
 CHALLENGE_TTL_SEC = 300  # 5-min TTL per F1 D11
 _log = structlog.get_logger(__name__)
 
-# In-memory challenge state: challenge_id -> expires_at_monotonic
+
+class _ChallengeState(TypedDict):
+    """In-memory state for an in-flight 2FA challenge.
+
+    Issue #94: stores `username` alongside the expiry so `auth_complete`
+    can write the correct platforms.config without reading back from the
+    DB (which fails silently to empty-string on first-ever auth).
+    """
+
+    expires_at_mono: float
+    username: str
+
+
+# In-memory challenge state: challenge_id -> _ChallengeState
 # Per F1 D11: 5-min TTL; server restart invalidates (acceptable).
-_challenge_expiries: dict[str, float] = {}
+_challenges: dict[str, _ChallengeState] = {}
+
+
+def _sweep_expired_challenges() -> None:
+    """Issue #95 item 3: evict expired challenges. Called from auth_begin
+    so abandoned 2FA flows don't leak memory indefinitely."""
+    now = time.monotonic()
+    expired = [cid for cid, st in _challenges.items() if now > st["expires_at_mono"]]
+    for cid in expired:
+        _challenges.pop(cid, None)
 
 
 # ---------- request/response models ----------
@@ -162,9 +184,15 @@ async def auth_begin(
             content=AuthSuccessResponse(steam_id=int(result["steam_id"])).model_dump(),
         )
 
-    # 2FA challenge
+    # 2FA challenge — evict expired entries first (#95 item 3), then store
+    # both the expiry and the username so auth_complete doesn't have to
+    # recover it from the DB (#94).
+    _sweep_expired_challenges()
     challenge_id = result["challenge_id"]
-    _challenge_expiries[challenge_id] = time.monotonic() + CHALLENGE_TTL_SEC
+    _challenges[challenge_id] = _ChallengeState(
+        expires_at_mono=time.monotonic() + CHALLENGE_TTL_SEC,
+        username=body.username,
+    )
     expires_at_iso = time.strftime(
         "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + CHALLENGE_TTL_SEC)
     )
@@ -185,18 +213,23 @@ async def auth_complete(
     steam: SteamWorkerClient = Depends(get_steam_client_dep),  # noqa: B008
     pool: Pool = Depends(get_pool_dep),  # noqa: B008
 ) -> JSONResponse:
-    expires_at_mono = _challenge_expiries.get(challenge_id)
-    if expires_at_mono is None:
+    challenge = _challenges.get(challenge_id)
+    if challenge is None:
         raise HTTPException(status_code=404, detail="unknown challenge_id")
-    if time.monotonic() > expires_at_mono:
-        _challenge_expiries.pop(challenge_id, None)
+    if time.monotonic() > challenge["expires_at_mono"]:
+        _challenges.pop(challenge_id, None)
         raise HTTPException(status_code=404, detail="challenge expired")
 
     try:
         result = await steam.auth_complete(challenge_id, body.code)
     except SteamWorkerError as e:
-        _challenge_expiries.pop(challenge_id, None)
-        await _update_platform_row_failure(pool, error=e.kind)
+        _challenges.pop(challenge_id, None)
+        try:
+            await _update_platform_row_failure(pool, error=e.kind)
+        except PoolError as db_e:
+            # #93: don't let a DB failure during the failure-log mask the
+            # original auth failure. Log + still return 401 for the auth.
+            _log.error("platform.auth.db_unavailable", reason=str(db_e))
         return JSONResponse(
             status_code=401,
             content={"detail": f"authentication failed: {e.kind}"},
@@ -204,18 +237,22 @@ async def auth_complete(
     except (IPCTimeoutError, WorkerDiedError, WorkerDisabledError):
         return JSONResponse(status_code=503, content={"detail": "steam worker unavailable"})
 
-    _challenge_expiries.pop(challenge_id, None)
-    # Read the previous row's config to recover the username
-    prev_config_row = await pool.read_one("SELECT config FROM platforms WHERE name='steam'")
-    prev_username = ""
-    if prev_config_row and prev_config_row["config"]:
-        try:
-            prev_username = (json.loads(prev_config_row["config"]) or {}).get("username", "")
-        except (json.JSONDecodeError, TypeError):
-            prev_username = ""
-    await _update_platform_row_success(
-        pool, steam_id=int(result["steam_id"]), username=prev_username
-    )
+    # Successful 2FA — recover the username from the in-memory challenge
+    # state (#94 fix; was incorrectly read-from-DB which silently lost it
+    # on first-ever auth) before clearing the entry.
+    username = challenge["username"]
+    _challenges.pop(challenge_id, None)
+    try:
+        await _update_platform_row_success(
+            pool, steam_id=int(result["steam_id"]), username=username
+        )
+    except PoolError as e:
+        # #93: mirror auth_begin's 503-on-DB-error contract.
+        _log.error("platform.auth.db_unavailable", reason=str(e))
+        return JSONResponse(status_code=503, content={"detail": "database unavailable"})
+    # #95 item 5: log the 2FA-success path (parallel to auth_begin's
+    # `platform.auth.completed` log on the no-2FA path).
+    _log.info("platform.auth.completed_2fa", steam_id=result["steam_id"])
     return JSONResponse(
         status_code=200,
         content=AuthSuccessResponse(steam_id=int(result["steam_id"])).model_dump(),

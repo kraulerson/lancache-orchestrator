@@ -319,6 +319,20 @@ class _StubSteamWorkerClient:
             from orchestrator.platform.steam.client import SteamWorkerError
 
             raise SteamWorkerError("InvalidCredentials", "bad password")
+        # Issue #95 item 1: 503-path scenarios exercise the router's
+        # IPCTimeoutError / WorkerDiedError / WorkerDisabledError handling.
+        if self.scenario == "ipc_timeout":
+            from orchestrator.platform.steam.client import IPCTimeoutError
+
+            raise IPCTimeoutError("simulated timeout")
+        if self.scenario == "worker_died":
+            from orchestrator.platform.steam.client import WorkerDiedError
+
+            raise WorkerDiedError("simulated worker crash")
+        if self.scenario == "worker_disabled":
+            from orchestrator.platform.steam.client import WorkerDisabledError
+
+            raise WorkerDisabledError("restart-storm guard fired")
         raise AssertionError(f"unknown scenario: {self.scenario}")
 
     async def auth_complete(self, challenge_id: str, code: str) -> dict:
@@ -329,6 +343,19 @@ class _StubSteamWorkerClient:
             from orchestrator.platform.steam.client import SteamWorkerError
 
             raise SteamWorkerError("TwoFactorCodeMismatch", "code did not match")
+        # Issue #95 item 1: 503-path scenarios for auth_complete.
+        if self.scenario == "ipc_timeout":
+            from orchestrator.platform.steam.client import IPCTimeoutError
+
+            raise IPCTimeoutError("simulated timeout")
+        if self.scenario == "worker_died":
+            from orchestrator.platform.steam.client import WorkerDiedError
+
+            raise WorkerDiedError("simulated worker crash")
+        if self.scenario == "worker_disabled":
+            from orchestrator.platform.steam.client import WorkerDisabledError
+
+            raise WorkerDisabledError("restart-storm guard fired")
         raise AssertionError(f"unexpected scenario for auth_complete: {self.scenario}")
 
     async def auth_status(self) -> dict:
