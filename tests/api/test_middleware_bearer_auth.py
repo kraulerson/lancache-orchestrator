@@ -172,3 +172,31 @@ class TestBearerAuthLogging:
         if e.get("reason") == "bad_token":
             assert "rejection_fingerprint" in e
             assert len(e["rejection_fingerprint"]) == 8
+
+
+class TestBL10AuthLoopbackPatterns:
+    """Per F1 spec §4.3 — both `/auth` and `/auth/{challenge_id}` are
+    loopback-only. UAT-3 already covered the bare `/auth` form; this
+    extends to the subpath."""
+
+    async def test_loopback_pattern_matches_auth_subpath(self):
+        from orchestrator.api.dependencies import LOOPBACK_ONLY_PATTERNS
+
+        path = "/api/v1/platforms/steam/auth/550e8400-e29b-41d4-a716-446655440000"
+        assert any(p.match(path) for p in LOOPBACK_ONLY_PATTERNS), (
+            f"{path} not matched by any LOOPBACK_ONLY_PATTERNS"
+        )
+
+    async def test_loopback_pattern_still_matches_bare_auth(self):
+        from orchestrator.api.dependencies import LOOPBACK_ONLY_PATTERNS
+
+        path = "/api/v1/platforms/steam/auth"
+        assert any(p.match(path) for p in LOOPBACK_ONLY_PATTERNS)
+
+    async def test_auth_status_endpoint_not_loopback_only(self):
+        from orchestrator.api.dependencies import LOOPBACK_ONLY_PATTERNS
+
+        path = "/api/v1/platforms/steam/auth/status"
+        assert not any(p.match(path) for p in LOOPBACK_ONLY_PATTERNS), (
+            f"{path} should NOT be loopback-restricted (Game_shelf reads it)"
+        )

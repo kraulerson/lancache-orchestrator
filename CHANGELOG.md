@@ -55,6 +55,39 @@ for handoff clarity. Categories are ordered by impact severity.
   consolidated findings + 4 individual + 2 umbrella issues filed (#78-#87).
 
 ### Added
+- **BL10 — Steam authentication substrate** (F1 milestone, BL10/3). First
+  real data-ingestion feature substrate. Subprocess-isolated steam-next
+  worker (gevent-patched, separate venv) communicates with the asyncio
+  orchestrator via newline-delimited JSON over stdin/stdout pipes.
+  New endpoints:
+  - `POST /api/v1/platforms/steam/auth` (loopback-only) — initiates
+    Steam login; returns `200` (no 2FA) or `202 + challenge_id` (2FA
+    required).
+  - `POST /api/v1/platforms/steam/auth/{challenge_id}` (loopback-only) —
+    completes 2FA with a code; 5-min TTL on challenges.
+  - `GET /api/v1/platforms/steam/auth/status` (bearer; NOT loopback-only;
+    Game_shelf reads it).
+
+  Session persistence: steam-next manages its own credential dir at
+  `/var/lib/orchestrator/steam_session/` (mode 0700); the orchestrator
+  writes a metadata JSON at `/var/lib/orchestrator/steam_session.json`
+  (mode 0600) — NEVER contains tokens, only `{steam_id, username,
+  last_refreshed_at, sha256_prefix, auth_method_version}`. Atomic write
+  via `os.replace` from a tempfile.
+
+  `platforms` table updates: `auth_status` transitions `never → ok` or
+  `→ error`; `last_sync_at` updated on success; `last_error` populated
+  on failure (truncated to 200 chars); `config` JSON has `{steam_id,
+  username, last_refreshed_at}` — NEVER tokens (D12).
+
+  Settings additions: `steam_worker_python_path`,
+  `steam_worker_ipc_timeout_sec` (default 30), `steam_worker_max_restart_attempts`
+  (default 3), `steam_session_dir`, `jobs_worker_poll_interval_sec`
+  (used in BL11; pinned here for venv-shape stability).
+
+  See [F1 spec](docs/superpowers/specs/2026-05-24-f1-steam-credentials-fetcher-design.md)
+  and [ADR-0013](docs/ADR%20documentation/0013-steam-subprocess-isolation.md)
+  for full architecture.
 - **`GET /api/v1/manifests`** (BL9 / Feature 9 partial) — third paginated F9
   read endpoint, introduces the **`?include=` opt-in expansion convention**.
   Default sort `fetched_at:desc` (matches `idx_manifests_game_fetched`).

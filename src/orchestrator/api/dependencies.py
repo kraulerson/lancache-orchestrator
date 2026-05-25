@@ -54,6 +54,10 @@ AUTH_EXEMPT_PREFIXES: tuple[str, ...] = tuple(p for p, _ in AUTH_EXEMPT_PATHS)
 # at boot via a non-loopback bind log line (see api/main.py lifespan).
 LOOPBACK_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/api/v1/platforms/[^/]+/auth$"),
+    # BL10 F1: `/auth/{challenge_id}` (2FA submit) is loopback-only.
+    # `/auth/status` is NOT (Game_shelf reads it) — exempted via
+    # negative-lookahead.
+    re.compile(r"^/api/v1/platforms/[^/]+/auth/(?!status$)[^/]+$"),
     re.compile(r"^/api/v1/openapi\.json$"),
     re.compile(r"^/api/v1/docs/?$"),
     re.compile(r"^/api/v1/docs/oauth2-redirect/?$"),

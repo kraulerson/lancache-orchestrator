@@ -428,3 +428,40 @@ class TestSingleton:
         second = reload_settings()
         assert first is not second
         assert second.api_port == 9000
+
+
+# ----------------------------------------------------------------------
+# 9. BL10 Steam worker settings
+# ----------------------------------------------------------------------
+
+
+class TestBL10SteamWorkerSettings:
+    def test_steam_worker_settings_defaults(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        s = Settings()
+        assert s.steam_worker_python_path == Path("/opt/orchestrator/venv-steam-worker/bin/python")
+        assert s.steam_worker_ipc_timeout_sec == 30
+        assert s.steam_worker_max_restart_attempts == 3
+        assert s.steam_session_dir == Path("/var/lib/orchestrator/steam_session")
+        assert s.jobs_worker_poll_interval_sec == 1.0
+
+    def test_steam_worker_ipc_timeout_rejects_zero(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        monkeypatch.setenv("ORCH_STEAM_WORKER_IPC_TIMEOUT_SEC", "0")
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match=r"steam_worker_ipc_timeout_sec"):
+            Settings()
+
+    def test_steam_worker_max_restart_attempts_rejects_negative(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        monkeypatch.setenv("ORCH_STEAM_WORKER_MAX_RESTART_ATTEMPTS", "-1")
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match=r"steam_worker_max_restart_attempts"):
+            Settings()

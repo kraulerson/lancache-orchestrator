@@ -14,13 +14,21 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
 from orchestrator.api.middleware import (
     BearerAuthMiddleware,
     BodySizeCapMiddleware,
     CorrelationIdMiddleware,
+)
+from orchestrator.api.routers.auth import (
+    router as auth_router,
+)
+from orchestrator.api.routers.auth import (
+    set_steam_client_singleton,
 )
 from orchestrator.api.routers.games import router as games_router
 from orchestrator.api.routers.health import router as health_router
@@ -36,6 +44,7 @@ from orchestrator.db.pool import (
     close_pool,
     init_pool,
 )
+from orchestrator.platform.steam.client import SteamWorkerClient
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -96,12 +105,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     pool_initialized = True
 
+    # 3. Steam worker startup
+    steam_client = SteamWorkerClient()
     try:
-        # 3. Boot metadata
+        await steam_client.start()
+        log.info("api.boot.steam_worker_started")
+    except Exception as e:
+        log.warning("api.boot.steam_worker_start_failed", reason=str(e))
+        # Continue booting — endpoints that need the worker will return 503
+        # if the DI singleton is still None. We set it anyway so tests that
+        # override the dep still work (they don't call start()).
+    set_steam_client_singleton(steam_client)
+
+    try:
+        # 4. Boot metadata
         app.state.boot_time = time.monotonic()
         app.state.git_sha = os.environ.get("GIT_SHA", "unknown")
 
-        # 4. Deployment-hardening warning: surface non-loopback bind at boot.
+        # 5. Deployment-hardening warning: surface non-loopback bind at boot.
         # UAT-3 S2-D: detect non-loopback from any of three signals so an
         # operator running `uvicorn --host 0.0.0.0` from the CLI gets the
         # warning even without ORCH_API_HOST set.
@@ -122,6 +143,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         log.info("api.shutdown.starting")
+        try:
+            await steam_client.stop()
+        except Exception as e:
+            log.error("api.shutdown.steam_worker_stop_failed", reason=str(e))
+        set_steam_client_singleton(None)
         if pool_initialized:
             try:
                 await close_pool()
@@ -200,7 +226,21 @@ def create_app() -> FastAPI:
 
     app.openapi = custom_openapi  # type: ignore[method-assign]
 
+    # Convert FastAPI's default 422 Unprocessable Entity → 400 Bad Request
+    # for request body and query-parameter validation errors.  This is
+    # consistent with the project's established error-surface contract
+    # (spec §3 "4xx errors use detail strings", plan BL10 Task 10).
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": exc.errors()},
+        )
+
     # Routers
+    app.include_router(auth_router)
     app.include_router(health_router)
     app.include_router(platforms_router)
     app.include_router(games_router)

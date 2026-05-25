@@ -419,4 +419,56 @@ the new `parse_includes` + `IncludeAllowList` primitives. Plus
 
 ---
 
+## Feature 10: BL10 — Steam authentication substrate (F1 milestone 1/3)
+
+**Phase Built:** 2 (Milestone B, Build Loop 10)
+**Status:** Complete (2026-05-24)
+
+**Summary:** First BL of the F1 (Steam credentials + fetcher) milestone.
+Subprocess-isolated steam-next worker + IPC contract + two-step auth
+API + session persistence + `platforms` table integration. Operator can
+authenticate to Steam (including 2FA) via the orchestrator's HTTP API;
+session persists across container restarts.
+
+**Key Interfaces:**
+  - `src/orchestrator/platform/steam/client.py` — `SteamWorkerClient`
+    (asyncio-side lifecycle + IPC + correlation)
+  - `src/orchestrator/platform/steam/worker.py` — subprocess entrypoint
+    (gevent-patched; runs steam-next)
+  - `src/orchestrator/platform/steam/protocol.py` — typed message envelopes
+  - `src/orchestrator/platform/steam/session.py` — atomic metadata file
+  - `src/orchestrator/api/routers/auth.py` — 3 endpoints
+
+**Locked decisions (D1-D20 of F1 spec; BL10-relevant subset):**
+  - D1 subprocess worker · D2 newline-delimited JSON · D3 two-step auth
+    with challenge_id · D4 steam-next dir + orchestrator metadata file
+  - D11 5-min in-memory challenge TTL · D12 NO tokens in platforms.config
+  - D13 dual-venv container · D17 max 3 restart attempts · D20 10 MiB IPC
+    line cap
+
+**Test Coverage:** 43 new tests across:
+  - `tests/platform/steam/test_protocol.py` (8) — envelope encode/decode
+  - `tests/platform/steam/test_client_unit.py` (5) — msg_id correlation,
+    error paths, restart-storm guard
+  - `tests/integration/test_steam_client_subprocess.py` (5) — real
+    subprocess IPC plumbing against mock worker
+  - `tests/platform/steam/test_session.py` (5) — atomic write, 0600,
+    sha256 prefix correctness
+  - `tests/api/test_auth_router.py` (14) — endpoint contracts +
+    loopback enforcement + DB updates + no-secret-in-logs
+  - `tests/core/test_settings.py` (+3) — new Settings field validation
+  - `tests/api/test_middleware_bearer_auth.py` (+3) — loopback regex
+    extension
+
+**Related Audit:** `docs/security-audits/bl10-f1-steam-auth-substrate-security-audit.md` — 0 findings.
+
+**Known Limitations:**
+  - Live Steam-side validation deferred to UAT-6 (manual session,
+    operator's real account).
+  - Library enumeration + manifest fetching land in BL11 / BL12.
+  - No CLI subcommand (`orchestrator-cli auth steam`) — F11 is post-MVP;
+    operator uses curl + bearer.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->
