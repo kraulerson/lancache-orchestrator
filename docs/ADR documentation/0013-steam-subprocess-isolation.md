@@ -22,8 +22,17 @@ exists in our deployment.
    First line of worker.py is `from steam import monkey; monkey.patch_minimal()`.
 3. **Orchestrator process:** uses `SteamWorkerClient` (asyncio) — NEVER
    imports `steam`, `gevent`, or any monkey-patched stdlib variant.
-4. **IPC protocol:** newline-delimited JSON, 10 MiB line cap, msg_id
-   correlation, 30s per-request timeout.
+4. **IPC protocol:** newline-delimited JSON, 10 MiB line cap (response
+   direction only — stdin is trusted), msg_id correlation, 30s per-request
+   timeout.
+5. **Restart-storm guard:** `Settings.steam_worker_max_restart_attempts`
+   is a **budget**, not a deaths-allowed count. The guard fires when
+   `_restart_attempts > max` — i.e. with default budget `3`, deaths
+   1/2/3 produce warnings + allow respawn, **death 4 fires the guard**.
+   This off-by-one vs. the plain reading "max 3 attempts" is intentional
+   and tested (see `test_max_restart_attempts_exhausted_marks_disabled`).
+   Future-rename candidate: `steam_worker_restart_budget` (deferred —
+   would require coordinating the env-var migration across deployment).
 
 ## Consequences
 

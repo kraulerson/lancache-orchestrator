@@ -24,12 +24,8 @@ from orchestrator.api.middleware import (
     BodySizeCapMiddleware,
     CorrelationIdMiddleware,
 )
-from orchestrator.api.routers.auth import (
-    router as auth_router,
-)
-from orchestrator.api.routers.auth import (
-    set_steam_client_singleton,
-)
+from orchestrator.api.routers.auth import router as auth_router
+from orchestrator.api.routers.auth import set_steam_client_singleton
 from orchestrator.api.routers.games import router as games_router
 from orchestrator.api.routers.health import router as health_router
 from orchestrator.api.routers.jobs import router as jobs_router
