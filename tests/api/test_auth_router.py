@@ -9,16 +9,16 @@ VALID_TOKEN = "a" * 32
 
 @pytest.fixture(autouse=True)
 def _clear_challenge_state():
-    """Clear module-level _challenge_expiries before and after each test.
+    """Clear module-level _challenges before and after each test.
 
     Prevents state leakage between tests that store challenge IDs in the
     router's module-level dict.
     """
-    from orchestrator.api.routers.auth import _challenge_expiries
+    from orchestrator.api.routers.auth import _challenges
 
-    _challenge_expiries.clear()
+    _challenges.clear()
     yield
-    _challenge_expiries.clear()
+    _challenges.clear()
 
 
 class TestAuthBegin:
@@ -234,3 +234,181 @@ class TestPlatformsRowUpdates:
         assert row["auth_status"] == "error"
         assert row["last_error"] is not None
         assert "InvalidCredentials" in row["last_error"]
+
+
+# Issue #95 item 1: 503-path tests for worker-unavailable scenarios
+# Issue #95 item 6: external-client 403 for auth_complete loopback enforcement
+
+
+class TestAuthWorkerUnavailable503Paths:
+    """auth_begin + auth_complete should both return 503 when the steam
+    worker raises IPCTimeoutError / WorkerDiedError / WorkerDisabledError.
+    """
+
+    async def _wire_stub(self, client, stub):
+        from orchestrator.api.routers.auth import get_steam_client_dep
+
+        client._transport.app.dependency_overrides[get_steam_client_dep] = lambda: stub
+
+    @pytest.mark.parametrize("scenario", ["ipc_timeout", "worker_died", "worker_disabled"])
+    async def test_auth_begin_returns_503_on_worker_failure(
+        self, client, stub_steam_client, scenario
+    ):
+        stub_steam_client.scenario = scenario
+        await self._wire_stub(client, stub_steam_client)
+        r = await client.post(
+            "/api/v1/platforms/steam/auth",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"username": "alice", "password": "secret"},
+        )
+        assert r.status_code == 503
+        assert r.json() == {"detail": "steam worker unavailable"}
+
+    @pytest.mark.parametrize("scenario", ["ipc_timeout", "worker_died", "worker_disabled"])
+    async def test_auth_complete_returns_503_on_worker_failure(
+        self, client, stub_steam_client, scenario
+    ):
+        # First create a challenge so auth_complete has something to look up
+        stub_steam_client.scenario = "needs_2fa"
+        await self._wire_stub(client, stub_steam_client)
+        await client.post(
+            "/api/v1/platforms/steam/auth",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"username": "alice", "password": "secret"},
+        )
+        # Now flip the scenario for the complete call
+        stub_steam_client.scenario = scenario
+        r = await client.post(
+            "/api/v1/platforms/steam/auth/stub-challenge-id",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"code": "12345"},
+        )
+        assert r.status_code == 503
+        assert r.json() == {"detail": "steam worker unavailable"}
+
+
+class TestAuthCompleteLoopbackEnforcement:
+    """Issue #95 item 6: HTTP-level external-client 403 test for
+    auth_complete — `TestBL10AuthLoopbackPatterns` validates the regex
+    in isolation; this validates the full middleware integration."""
+
+    async def test_external_client_to_auth_complete_returns_403(
+        self, external_client, stub_steam_client
+    ):
+        from orchestrator.api.routers.auth import get_steam_client_dep
+
+        external_client._transport.app.dependency_overrides[get_steam_client_dep] = lambda: (
+            stub_steam_client
+        )
+        # Use an arbitrary challenge_id — the middleware enforces 403
+        # BEFORE the router even sees the request, so the challenge_id
+        # doesn't need to exist.
+        r = await external_client.post(
+            "/api/v1/platforms/steam/auth/any-challenge-id",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"code": "12345"},
+        )
+        assert r.status_code == 403
+
+
+class TestAuthChallengeUsernamePreservation:
+    """Issue #94: auth_complete must preserve username from in-memory
+    challenge state, NOT read it back from platforms.config (which fails
+    silently to empty-string on first-ever auth)."""
+
+    async def test_first_ever_2fa_writes_correct_username(
+        self, client, stub_steam_client, populated_pool
+    ):
+        from orchestrator.api.routers.auth import get_steam_client_dep
+
+        # Reset platforms.config to NULL to simulate a first-ever auth
+        async with populated_pool.write_transaction() as tx:
+            await tx.execute("UPDATE platforms SET config=NULL WHERE name='steam'")
+
+        stub_steam_client.scenario = "needs_2fa"
+        client._transport.app.dependency_overrides[get_steam_client_dep] = lambda: stub_steam_client
+        await client.post(
+            "/api/v1/platforms/steam/auth",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"username": "first_ever_user", "password": "secret"},
+        )
+        r = await client.post(
+            "/api/v1/platforms/steam/auth/stub-challenge-id",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"code": "12345"},
+        )
+        assert r.status_code == 200
+        row = await populated_pool.read_one("SELECT config FROM platforms WHERE name='steam'")
+        import json as _json
+
+        config = _json.loads(row["config"])
+        # Before #94 fix: username would be "" because the DB lookup
+        # found NULL config and silently fell back to empty.
+        assert config["username"] == "first_ever_user"
+        assert config["steam_id"] == 76561198000000000
+
+
+class TestChallengeSweep:
+    """Issue #95 item 3: auth_begin should evict expired _challenges
+    entries to prevent unbounded memory growth from abandoned 2FA flows."""
+
+    async def test_expired_challenges_evicted_on_next_auth_begin(self, client, stub_steam_client):
+        from orchestrator.api.routers.auth import _challenges, get_steam_client_dep
+
+        # Seed an expired challenge directly into the module state
+        _challenges["stale-challenge"] = {
+            "expires_at_mono": 0.0,  # epoch — definitely expired
+            "username": "ghost_user",
+        }
+        assert "stale-challenge" in _challenges
+
+        stub_steam_client.scenario = "no_2fa"
+        client._transport.app.dependency_overrides[get_steam_client_dep] = lambda: stub_steam_client
+        # Trigger a successful (no-2FA) auth — the sweep should run even
+        # though this code path doesn't store a new challenge.
+        # ...wait, no-2FA path returns before reaching the sweep call.
+        # Use needs_2fa instead so the sweep IS reached:
+        stub_steam_client.scenario = "needs_2fa"
+        await client.post(
+            "/api/v1/platforms/steam/auth",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"username": "fresh", "password": "secret"},
+        )
+        # The stale entry should be gone; the fresh one should be present
+        assert "stale-challenge" not in _challenges
+        assert "stub-challenge-id" in _challenges
+
+
+class TestAuthCompletedTwoFactorLogEvent:
+    """Issue #95 item 5: auth_complete success path should emit
+    `platform.auth.completed_2fa` (parallel to auth_begin's
+    `platform.auth.completed` on the no-2FA path)."""
+
+    async def test_successful_2fa_emits_completed_log_event(
+        self, client, stub_steam_client, capsys
+    ):
+        from orchestrator.api.routers.auth import get_steam_client_dep
+        from orchestrator.core.logging import configure_logging
+
+        configure_logging()
+        stub_steam_client.scenario = "needs_2fa"
+        client._transport.app.dependency_overrides[get_steam_client_dep] = lambda: stub_steam_client
+        await client.post(
+            "/api/v1/platforms/steam/auth",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"username": "alice", "password": "secret"},
+        )
+        # Drain pre-complete logs
+        capsys.readouterr()
+        r = await client.post(
+            "/api/v1/platforms/steam/auth/stub-challenge-id",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"code": "12345"},
+        )
+        assert r.status_code == 200
+        out = capsys.readouterr().out
+        import json as _json
+
+        events = [_json.loads(line) for line in out.splitlines() if line.strip()]
+        ev_names = [e.get("event") for e in events]
+        assert "platform.auth.completed_2fa" in ev_names

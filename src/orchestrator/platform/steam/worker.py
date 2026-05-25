@@ -175,6 +175,15 @@ _HANDLERS = {
 
 
 def main() -> int:
+    # Issue #95 item 7: stdin (worker reading from orchestrator) is NOT
+    # length-capped here. The 10 MiB `MAX_IPC_LINE_BYTES` cap in
+    # protocol.py is enforced on the response direction only — what the
+    # client reads from the worker's stdout. The asymmetry is
+    # intentional: stdin is a trusted channel from the orchestrator
+    # process we ourselves spawned (see ADR-0013). Adding a cap here
+    # would have to balance "longer requests may be legitimate"
+    # (e.g., a manifest BLOB round-trip in BL12) against "no realistic
+    # caller sends 100 MiB". Deferred until a concrete need exists.
     for line in sys.stdin:
         try:
             req = json.loads(line)

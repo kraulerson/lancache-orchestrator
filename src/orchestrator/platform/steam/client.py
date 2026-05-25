@@ -118,10 +118,18 @@ class SteamWorkerClient:
         _log.info("steam_worker.spawned", pid=self._process.pid)
 
     async def stop(self) -> None:
-        """Graceful shutdown: send `shutdown` IPC, then SIGTERM, then SIGKILL."""
+        """Graceful shutdown: send `shutdown` IPC, then SIGTERM, then SIGKILL.
+
+        Issue #95 item 4: also suppresses `RuntimeError` (closed transport)
+        and `OSError` (broken pipe). If the worker crashed mid-write, the
+        underlying `_writer.write()` raises one of these — production
+        shutdown should never fail because the process is already dead.
+        """
         if self._process is None or self._process.returncode is not None:
             return
-        with contextlib.suppress(TimeoutError, IPCTimeoutError, WorkerDiedError):
+        with contextlib.suppress(
+            TimeoutError, IPCTimeoutError, WorkerDiedError, RuntimeError, OSError
+        ):
             await asyncio.wait_for(self._send_and_await("shutdown", {}), timeout=5.0)
         # SIGTERM, wait 5s, SIGKILL
         if self._process.returncode is None:
@@ -210,6 +218,16 @@ class SteamWorkerClient:
             fut.set_exception(SteamWorkerError(err["kind"], err.get("message", "")))
 
     def _on_worker_died(self, *, reason: str) -> None:
+        """Issue #95 item 2: `_max_restart_attempts` is the **budget**, not
+        a deaths-allowed count. The guard fires when `_restart_attempts`
+        EXCEEDS the budget — i.e. with default budget=3, deaths 1/2/3
+        produce warnings + allow respawn, death 4 fires the guard.
+
+        This off-by-one vs. the plain reading "max 3 attempts" is
+        intentional and tested (see test_max_restart_attempts_exhausted).
+        Operator-facing setting `steam_worker_max_restart_attempts` is
+        documented in Settings + ADR-0013 with this semantics.
+        """
         self._restart_attempts += 1
         if self._restart_attempts > self._max_restart_attempts:
             self._disabled = True
