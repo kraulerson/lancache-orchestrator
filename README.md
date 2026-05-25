@@ -61,6 +61,24 @@ The bearer token (`orchestrator_token`) is the only required field. Every other 
 
 Full descriptions, validators, and design rationale: [`FEATURES.md` — Feature 3](FEATURES.md). Sensitive values (the bearer token specifically) are redacted across all serialization paths (`repr`, `model_dump`, `model_dump(mode="json")`, JSON schema) and pickling is explicitly blocked — see ADR-0010 §D4 for the three-layer redaction defense.
 
+### CORS for browser clients
+
+`ORCH_CORS_ORIGINS` defaults to `[]` (no origins allowed). This is correct for production deployments where the API is consumed only by server-side clients (Game_shelf backend proxy, CLI, scripts) — the bearer auth + loopback enforcement provide the security boundary.
+
+**If a browser client must call the API directly** (e.g., a Game_shelf frontend issuing fetch requests from a non-same-origin page), the deployment MUST set `ORCH_CORS_ORIGINS` to a JSON list of the consuming origins:
+
+```bash
+# Single origin
+ORCH_CORS_ORIGINS='["https://game-shelf.lan"]'
+
+# Multiple origins
+ORCH_CORS_ORIGINS='["https://game-shelf.lan","http://localhost:3000"]'
+```
+
+Without an entry in this list, browser preflight (`OPTIONS`) requests will return `400 Disallowed CORS origin` from Starlette's CORS middleware — by design — and the browser will fail the actual request. This is not a bug in the API; it's the default-deny posture.
+
+The `"*"` wildcard is **accepted but warned** at boot (`config.cors_wildcard` log event) — it disables CORS as a control entirely; only use in development.
+
 ### Production secret handling
 
 The bearer token should be deployed as a **Docker secret** mounted at `/run/secrets/orchestrator_token`, not as an env var. The settings module also supports `ORCH_TOKEN` as an env var for development; if both are set in production, a `config.secret_shadowed_by_env` warning is logged so you can diagnose.

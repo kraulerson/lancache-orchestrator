@@ -242,12 +242,26 @@ class FilterAllowList:
         object.__setattr__(self, "by_field", dict(by_field))
 
 
+# Issue #87.P5: strict integer literal (digits with optional leading minus
+# only). Rejects `+1`, `1_000`, `0x10`, `0o10`, etc. — Python's `int()` is
+# lenient and accepts forms that no operator would actually type, blurring
+# the wire contract and turning malformed input into "valid" parsed values.
+_STRICT_INT_RE = re.compile(r"^-?\d+$")
+
+
 def _coerce_value(raw: str, value_type: ValueTypeSpec, field_name: str, op: str) -> Any:
     """Coerce a string query-param value to the spec'd Python type, then
     apply per-type validation (UAT-4 S2-D int range, S3-a timestamp format).
+
+    Issue #87.P5: integer parsing uses a strict regex (digits with optional
+    leading minus) before `int()`; Python's parser accepts `+1`, `1_000`,
+    and similar non-canonical forms that should never appear in a wire
+    contract.
     """
     try:
         if value_type is int:
+            if not _STRICT_INT_RE.match(raw):
+                raise ValueError(f"invalid integer literal: {raw!r} (expected ^-?\\d+$)")
             coerced = int(raw)
             if not (INT64_MIN <= coerced <= INT64_MAX):
                 raise ValueError(f"value out of range (signed 64-bit): {coerced}")

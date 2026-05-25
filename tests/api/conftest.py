@@ -231,7 +231,9 @@ async def jobs_pool_seeded(populated_pool):  # noqa: F811
 
 @pytest_asyncio.fixture
 async def manifests_pool_seeded(populated_pool):  # noqa: F811
-    """populated_pool seeded with ~21 manifests across the 5 baseline games.
+    """populated_pool seeded with 21 ADDITIONAL manifests across 5 baseline
+    games. Total manifest count visible to tests: **24** (21 here + 3 from
+    populated_pool, one each for game_id 1/2/3 with version='1.0').
 
     Mix designed for BL9 filter+sort+pagination+include tests:
     - 5 games (ids 1-5) each get 3-5 manifests (history)
