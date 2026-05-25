@@ -146,6 +146,35 @@ class TestParseFilters:
         assert result == {"owned": {"eq": 1}}
         assert isinstance(result["owned"]["eq"], int)
 
+    # Issue #87.P5: Python's int() is lenient and accepts forms that no
+    # operator would actually type: `+1` (positive sign), `1_000`
+    # (PEP 515 underscores), leading/trailing whitespace, hex (`0x10`).
+    # The wire contract should reject these so malformed values don't
+    # silently parse to "valid" integers.
+    def test_int_rejects_positive_sign_prefix(self):
+        from orchestrator.api._query_helpers import QueryParamError, parse_filters
+
+        with pytest.raises(QueryParamError, match=r"invalid integer literal"):
+            parse_filters(QueryParams("owned=+1"), allow_list=_games_allow_list())
+
+    def test_int_rejects_underscore_separator(self):
+        from orchestrator.api._query_helpers import QueryParamError, parse_filters
+
+        with pytest.raises(QueryParamError, match=r"invalid integer literal"):
+            parse_filters(QueryParams("size_bytes_gte=1_000"), allow_list=_games_allow_list())
+
+    def test_int_rejects_hex_prefix(self):
+        from orchestrator.api._query_helpers import QueryParamError, parse_filters
+
+        with pytest.raises(QueryParamError, match=r"invalid integer literal"):
+            parse_filters(QueryParams("size_bytes_gte=0x10"), allow_list=_games_allow_list())
+
+    def test_int_accepts_negative(self):
+        from orchestrator.api._query_helpers import parse_filters
+
+        result = parse_filters(QueryParams("size_bytes_gte=-5"), allow_list=_games_allow_list())
+        assert result == {"size_bytes": {"gte": -5}}
+
     def test_unknown_field_raises(self):
         from orchestrator.api._query_helpers import QueryParamError, parse_filters
 

@@ -201,11 +201,23 @@ def create_app() -> FastAPI:
     # OpenAPI security scheme — middleware does the actual enforcement.
     # This block surfaces the bearer scheme in /api/v1/openapi.json so
     # Swagger UI's Authorize button works.
+    # Issue #52: operator-facing description for the bearer scheme so
+    # Swagger UI's Authorize dialog explains where to get the token and
+    # the rotation pointer. Full rotation procedure lives in HANDOFF.md.
     _security_schemes: dict[str, Any] = {
         "bearerAuth": {
             "type": "http",
             "scheme": "bearer",
             "bearerFormat": "opaque",
+            "description": (
+                "API bearer token. Production: deploy as a Docker secret "
+                "mounted at `/run/secrets/orchestrator_token` (32+ ASCII "
+                "chars, whitespace stripped). Development: pass via "
+                "`ORCH_TOKEN` env var. Sent as `Authorization: Bearer "
+                "<token>`. Rotation: see HANDOFF.md (Phase 4). TL;DR — "
+                "generate with `openssl rand -hex 32`, update the Docker "
+                "secret, restart this service AND the Game_shelf consumer."
+            ),
         }
     }
 
