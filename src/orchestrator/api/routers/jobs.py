@@ -11,11 +11,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from orchestrator.api._query_helpers import (
+    ERROR_TRUNCATE_BYTES,
     FilterAllowList,
     FilterFieldSpec,
     IncludeAllowList,
     QueryParamError,
     SortAllowList,
+    SortFieldResponse,
     build_order_by_clause,
     build_where_clause,
     parse_filters,
@@ -34,7 +36,6 @@ if TYPE_CHECKING:
 # Spec D1, D5 constants
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 500
-ERROR_TRUNCATE = 200
 PAYLOAD_MAX_BYTES = 65536  # 64 KiB (UAT-4 S3-e parity)
 
 # Default sort per spec D1: id:desc. User explicit "id" in either direction
@@ -90,12 +91,6 @@ class JobResponse(BaseModel):
     finished_at: str | None
     error: str | None
     payload: dict[str, Any] | None
-
-
-class SortFieldResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    field: str
-    direction: Literal["asc", "desc"]
 
 
 class JobsMeta(BaseModel):
@@ -217,7 +212,7 @@ async def list_jobs(
                 payload = None
 
         raw_err = row["error"]
-        err = raw_err[:ERROR_TRUNCATE] if raw_err else None
+        err = raw_err[:ERROR_TRUNCATE_BYTES] if raw_err else None
 
         # UAT-5 U5-2: wrap per-row response construction. Pydantic Literal[]
         # fields (kind, platform, state, source) raise ValidationError if the

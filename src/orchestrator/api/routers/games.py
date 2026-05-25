@@ -8,14 +8,16 @@ from typing import TYPE_CHECKING, Any, Literal
 import structlog
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from orchestrator.api._query_helpers import (
+    ERROR_TRUNCATE_BYTES,
     FilterAllowList,
     FilterFieldSpec,
     IncludeAllowList,
     QueryParamError,
     SortAllowList,
+    SortFieldResponse,
     build_order_by_clause,
     build_where_clause,
     parse_filters,
@@ -36,7 +38,6 @@ if TYPE_CHECKING:
 # Endpoint constants (spec §3.1, §3.4)
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 500
-LAST_ERROR_TRUNCATE = 200
 DEFAULT_SORT = (_SortField(field="title", direction="asc"),)
 TIE_BREAKER = _SortField(field="id", direction="asc")
 
@@ -109,36 +110,14 @@ class GameResponse(BaseModel):
     metadata: dict[str, Any] | None
 
 
-class FilterCriterion(BaseModel):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-    # Full operator surface declared on the model so future endpoints
-    # may use any of them; in BL7 only eq/in/gte/lte are permitted by
-    # any field's allow-list (see GAMES_FILTER_ALLOW_LIST above).
-    eq: Any | None = None
-    in_: list[Any] | None = Field(default=None, alias="in")
-    gte: Any | None = None
-    lte: Any | None = None
-    gt: Any | None = None
-    lt: Any | None = None
-    ne: Any | None = None
-
-
-class SortFieldResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    field: str
-    direction: Literal["asc", "desc"]
-
-
 class GamesMeta(BaseModel):
     model_config = ConfigDict(extra="forbid")
     total: int
     limit: int
     offset: int
     has_more: bool
-    # UAT-4 S2-A: plain dict shape — `{field: {op: value}}` — to avoid the
-    # all-7-op-keys-with-6-nulls FilterCriterion serialization. The
-    # FilterCriterion model is kept above only so OpenAPI schema generation
-    # documents the valid `op` keys; runtime uses this dict directly.
+    # UAT-4 S2-A: plain dict shape — `{field: {op: value}}` — runtime-built
+    # from parsed filters directly; no Pydantic wrapper.
     applied_filters: dict[str, dict[str, Any]]
     applied_sort: list[SortFieldResponse]
 
@@ -263,7 +242,7 @@ async def list_games(
                 metadata = None
 
         raw_err = row["last_error"]
-        last_error = raw_err[:LAST_ERROR_TRUNCATE] if raw_err else None
+        last_error = raw_err[:ERROR_TRUNCATE_BYTES] if raw_err else None
 
         # UAT-5 U5-2: wrap per-row response-model construction in try/except.
         # Pydantic Literal[] columns (platform, status) raise ValidationError
