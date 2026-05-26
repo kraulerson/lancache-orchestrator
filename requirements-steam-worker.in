@@ -2,6 +2,6 @@
 # Installed into /opt/orchestrator/venv-steam-worker/ via Dockerfile (Phase 4).
 # Pin exact versions; Spike A validated against steam-next 1.4.4.
 steam[client]==1.4.4
-gevent==24.10.3
+gevent==26.5.0
 zstandard==0.23.0
 httpx==0.28.1
