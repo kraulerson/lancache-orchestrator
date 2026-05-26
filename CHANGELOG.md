@@ -19,6 +19,40 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — BL11 Steam Library Sync (F1 milestone 2/3) — 2026-05-25
+- `src/orchestrator/jobs/` package — generic asyncio job dispatcher
+  (`worker.py`, `handlers/__init__.py` registry). Single-loop topology
+  (spec D10) with atomic SELECT-then-UPDATE claim under `BEGIN IMMEDIATE`
+  so concurrent claims serialize.
+- `library_sync` handler (`src/orchestrator/jobs/handlers/library_sync.py`)
+  calls `library.enumerate` on the steam worker subprocess and upserts the
+  `games` table via `INSERT ... ON CONFLICT(platform, app_id) DO UPDATE` —
+  re-sync is idempotent; downstream lifecycle columns (status,
+  cached_version, last_validated_at) are preserved.
+- `POST /api/v1/platforms/steam/library/sync` — manual sync trigger with
+  handler-side dedup of queued/running jobs (existing in-flight job_id
+  returned instead of creating a duplicate).
+- `library.enumerate` IPC op on the steam worker subprocess. Walks
+  `_client.licenses` → `get_product_info(packages=...)` → `get_product_info(apps=...)`
+  to assemble owned-app metadata; live Steam validation deferred to UAT-6.
+- `SteamWorkerClient.library_enumerate()` async method.
+- Auto-queue `library_sync` job after BOTH Steam auth-success paths
+  (no-2FA and 2FA), best-effort — DB failure during enqueue is logged
+  but does NOT fail the auth response.
+
+### Changed — BL11
+- FastAPI lifespan now spawns the jobs worker asyncio task at startup
+  and cleanly stops it (5 s shutdown timeout, then cancel) ahead of
+  steam-client + pool shutdown.
+
+### Infrastructure — BL11
+- Settings field `jobs_worker_poll_interval_sec` (range 0.05–60.0,
+  default 1.0) governs the empty-queue poll cadence.
+
+### Documentation — BL11
+- New BL11 feature entry in `FEATURES.md`.
+- Plan: `docs/superpowers/plans/2026-05-25-bl11-library-sync.md`.
+
 ### Security
 - **UAT-5 remediation (7 findings)** hardening the BL5-BL9 API surface:
   - **U5-1 [SEV-2]** (`middleware.py`) — bearer-auth Authorization header now

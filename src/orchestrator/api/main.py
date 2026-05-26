@@ -7,6 +7,7 @@ Use:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
 import time
@@ -31,6 +32,7 @@ from orchestrator.api.routers.health import router as health_router
 from orchestrator.api.routers.jobs import router as jobs_router
 from orchestrator.api.routers.manifests import router as manifests_router
 from orchestrator.api.routers.platforms import router as platforms_router
+from orchestrator.api.routers.sync import router as sync_router
 from orchestrator.core.settings import get_settings
 from orchestrator.db import migrate
 from orchestrator.db.pool import (
@@ -38,8 +40,11 @@ from orchestrator.db.pool import (
     SchemaNotMigratedError,
     SchemaUnknownMigrationError,
     close_pool,
+    get_pool,
     init_pool,
 )
+from orchestrator.jobs.worker import Deps as JobsDeps
+from orchestrator.jobs.worker import worker_loop as jobs_worker_loop
 from orchestrator.platform.steam.client import SteamWorkerClient
 
 if TYPE_CHECKING:
@@ -113,12 +118,30 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # override the dep still work (they don't call start()).
     set_steam_client_singleton(steam_client)
 
+    # 4. Jobs worker — spawn the background asyncio task (BL11)
+    jobs_shutdown: asyncio.Event = asyncio.Event()
+    jobs_deps = JobsDeps(pool=get_pool(), steam_client=steam_client)
+    jobs_worker_task = asyncio.create_task(
+        jobs_worker_loop(
+            jobs_deps,
+            shutdown=jobs_shutdown,
+            poll_interval_sec=settings.jobs_worker_poll_interval_sec,
+        ),
+        name="jobs_worker",
+    )
+    app.state.jobs_shutdown = jobs_shutdown
+    app.state.jobs_worker_task = jobs_worker_task
+    log.info(
+        "api.boot.jobs_worker_started",
+        poll_interval_sec=settings.jobs_worker_poll_interval_sec,
+    )
+
     try:
-        # 4. Boot metadata
+        # 5. Boot metadata
         app.state.boot_time = time.monotonic()
         app.state.git_sha = os.environ.get("GIT_SHA", "unknown")
 
-        # 5. Deployment-hardening warning: surface non-loopback bind at boot.
+        # 6. Deployment-hardening warning: surface non-loopback bind at boot.
         # UAT-3 S2-D: detect non-loopback from any of three signals so an
         # operator running `uvicorn --host 0.0.0.0` from the CLI gets the
         # warning even without ORCH_API_HOST set.
@@ -139,6 +162,19 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         log.info("api.shutdown.starting")
+
+        # Stop the jobs worker FIRST so it isn't still holding pool /
+        # steam-client refs when those resources unwind.
+        log.info("api.shutdown.jobs_worker_stopping")
+        jobs_shutdown.set()
+        try:
+            await asyncio.wait_for(jobs_worker_task, timeout=5.0)
+        except TimeoutError:
+            log.warning("api.shutdown.jobs_worker_join_timeout")
+            jobs_worker_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await jobs_worker_task
+
         try:
             await steam_client.stop()
         except Exception as e:
@@ -254,6 +290,7 @@ def create_app() -> FastAPI:
     app.include_router(games_router)
     app.include_router(jobs_router)
     app.include_router(manifests_router)
+    app.include_router(sync_router)
 
     return app
 

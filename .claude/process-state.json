@@ -1,9 +1,9 @@
 {
   "build_loop": {
-    "feature": "BL11-library-sync",
+    "feature": null,
     "step": 0,
     "steps_completed": [],
-    "started_at": "2026-05-26T00:01:19Z"
+    "started_at": null
   },
   "uat_session": {
     "session_id": 5,

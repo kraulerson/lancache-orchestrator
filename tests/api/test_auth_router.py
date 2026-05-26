@@ -412,3 +412,138 @@ class TestAuthCompletedTwoFactorLogEvent:
         events = [_json.loads(line) for line in out.splitlines() if line.strip()]
         ev_names = [e.get("event") for e in events]
         assert "platform.auth.completed_2fa" in ev_names
+
+
+class TestAutoQueueLibrarySync:
+    """BL11: both auth-success paths queue a `library_sync` job."""
+
+    async def test_auth_success_no_2fa_queues_library_sync(
+        self, client, stub_steam_client, populated_pool
+    ):
+        from orchestrator.api.routers.auth import get_steam_client_dep
+
+        # populated_pool seeds a 'succeeded' library_sync job (id=2). We're
+        # asserting on the QUEUED state only; the dedup check ignores
+        # terminal states.
+        stub_steam_client.scenario = "no_2fa"
+        client._transport.app.dependency_overrides[get_steam_client_dep] = lambda: stub_steam_client
+
+        r = await client.post(
+            "/api/v1/platforms/steam/auth",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"username": "u", "password": "p"},
+        )
+        assert r.status_code == 200
+
+        rows = await populated_pool.read_all(
+            "SELECT kind, platform, state, source FROM jobs "
+            "WHERE kind='library_sync' AND state='queued'"
+        )
+        assert len(rows) == 1
+        assert rows[0] == {
+            "kind": "library_sync",
+            "platform": "steam",
+            "state": "queued",
+            "source": "api",
+        }
+
+    async def test_auth_complete_2fa_queues_library_sync(
+        self, client, stub_steam_client, populated_pool
+    ):
+        from orchestrator.api.routers.auth import get_steam_client_dep
+
+        stub_steam_client.scenario = "needs_2fa"
+        client._transport.app.dependency_overrides[get_steam_client_dep] = lambda: stub_steam_client
+
+        begin = await client.post(
+            "/api/v1/platforms/steam/auth",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"username": "u", "password": "p"},
+        )
+        assert begin.status_code == 202
+        challenge_id = begin.json()["challenge_id"]
+
+        r = await client.post(
+            f"/api/v1/platforms/steam/auth/{challenge_id}",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"code": "12345"},
+        )
+        assert r.status_code == 200
+
+        rows = await populated_pool.read_all(
+            "SELECT kind FROM jobs WHERE kind='library_sync' AND state='queued'"
+        )
+        assert len(rows) == 1
+
+    async def test_auth_success_skips_queue_when_in_flight_job_exists(
+        self, client, stub_steam_client, populated_pool
+    ):
+        from orchestrator.api.routers.auth import get_steam_client_dep
+
+        # Seed an existing queued library_sync job.
+        await populated_pool.execute_write(
+            "INSERT INTO jobs (kind, platform, state, source) VALUES (?, ?, 'queued', 'api')",
+            ("library_sync", "steam"),
+        )
+        before = await populated_pool.read_all(
+            "SELECT id FROM jobs WHERE kind='library_sync' AND state='queued'"
+        )
+        assert len(before) == 1
+
+        stub_steam_client.scenario = "no_2fa"
+        client._transport.app.dependency_overrides[get_steam_client_dep] = lambda: stub_steam_client
+        r = await client.post(
+            "/api/v1/platforms/steam/auth",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"username": "u", "password": "p"},
+        )
+        assert r.status_code == 200
+
+        after = await populated_pool.read_all(
+            "SELECT id FROM jobs WHERE kind='library_sync' AND state='queued'"
+        )
+        assert len(after) == 1  # no second queued row created
+
+    async def test_production_queue_failure_swallowed_internally(
+        self, client, stub_steam_client, unit_app
+    ):
+        """The real contract: when the pool itself fails on the queue
+        INSERT, `_queue_library_sync_job_best_effort` catches PoolError,
+        logs warning, returns silently — auth still 200."""
+        from orchestrator.api.dependencies import get_pool_dep
+        from orchestrator.api.routers.auth import get_steam_client_dep
+        from orchestrator.db.pool import PoolError
+
+        write_count = [0]
+
+        class _PartiallyBrokenPool:
+            """Pool that succeeds on the platforms UPDATE but fails on
+            the jobs INSERT — simulates a partial outage where the
+            primary write is durable but the auto-trigger write fails.
+            """
+
+            async def execute_write(self, sql, params=()):
+                write_count[0] += 1
+                if "INSERT INTO jobs" in sql:
+                    raise PoolError("simulated outage on jobs insert")
+                # Pretend the platforms UPDATE succeeds.
+                return 1
+
+            async def read_one(self, sql, params=()):
+                # Dedup-check query returns "no existing job".
+                return None
+
+            async def read_all(self, sql, params=()):
+                return []
+
+        unit_app.dependency_overrides[get_pool_dep] = lambda: _PartiallyBrokenPool()
+        stub_steam_client.scenario = "no_2fa"
+        unit_app.dependency_overrides[get_steam_client_dep] = lambda: stub_steam_client
+
+        r = await client.post(
+            "/api/v1/platforms/steam/auth",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"username": "u", "password": "p"},
+        )
+        assert r.status_code == 200  # auth succeeded despite queue failure
+        assert write_count[0] >= 1  # the platforms UPDATE did run
