@@ -173,6 +173,140 @@ class TestLibraryEnumerate:
         assert exc_info.value.kind == "NotAuthenticated"
 
 
+class TestReadLoopLargeResponse:
+    """F-UAT6-1: the asyncio StreamReader default limit is 64 KiB. A real
+    Steam library_enumerate response exceeds this for any operator with
+    more than ~600 owned apps. The orchestrator MUST configure the
+    subprocess streams with a limit at least as large as the 10 MiB
+    MAX_IPC_LINE_BYTES protocol cap, and MUST handle the overflow case
+    gracefully (worker dies / restart-storm guard fires) rather than the
+    reader task crashing on a raw ValueError.
+    """
+
+    async def test_create_subprocess_exec_uses_protocol_cap_as_limit(self, monkeypatch):
+        """SteamWorkerClient.start() must pass limit= to create_subprocess_exec
+        sized at >= MAX_IPC_LINE_BYTES, otherwise asyncio's default 64 KiB
+        limit silently breaks any meaningful library_enumerate response."""
+        from unittest.mock import AsyncMock, patch
+
+        from orchestrator.platform.steam.client import SteamWorkerClient
+        from orchestrator.platform.steam.protocol import MAX_IPC_LINE_BYTES
+
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        from orchestrator.core.settings import get_settings
+
+        get_settings.cache_clear()
+
+        client = SteamWorkerClient()
+        # We don't actually want to spawn — capture the call args.
+        captured_kwargs: dict = {}
+
+        async def _fake_create(*_args, **kwargs):
+            captured_kwargs.update(kwargs)
+            raise FileNotFoundError("intercepted")  # short-circuit start()
+
+        with patch(
+            "orchestrator.platform.steam.client.asyncio.create_subprocess_exec",
+            new=AsyncMock(side_effect=_fake_create),
+        ):
+            from orchestrator.platform.steam.client import WorkerDiedError
+
+            with pytest.raises(WorkerDiedError):
+                await client.start()
+
+        assert "limit" in captured_kwargs, (
+            "start() must pass limit= so asyncio.StreamReader can handle large lines"
+        )
+        assert captured_kwargs["limit"] >= MAX_IPC_LINE_BYTES, (
+            f"limit must be >= MAX_IPC_LINE_BYTES ({MAX_IPC_LINE_BYTES}); "
+            f"got {captured_kwargs['limit']}"
+        )
+
+    async def test_read_loop_handles_limit_overrun_gracefully(self):
+        """If a response line somehow exceeds the configured limit, the
+        reader must mark the worker dead (not crash silently)."""
+        from orchestrator.platform.steam.client import (
+            SteamWorkerClient,
+        )
+
+        client = SteamWorkerClient.__new__(SteamWorkerClient)
+        client._writer = _StubWriter()
+        client._pending = {"test-id": __import__("asyncio").get_event_loop().create_future()}
+        client._restart_attempts = 0
+        client._max_restart_attempts = 3
+        client._disabled = False
+        client._reader_task = None
+
+        # Simulate a process whose stdout is a real StreamReader with tiny
+        # limit; feed it a line that overflows.
+        loop = __import__("asyncio").get_event_loop()
+        small_reader = __import__("asyncio").StreamReader(limit=128, loop=loop)
+        small_reader.feed_data(b"x" * 500 + b"\n")
+        small_reader.feed_eof()
+
+        class _FakeProcess:
+            stdout = small_reader
+            returncode = None
+
+        client._process = _FakeProcess()
+
+        # Run the read loop — it should set _disabled=False after one
+        # death + the pending future should be failed with WorkerDiedError.
+        await client._read_loop()
+
+        # The pending future must be resolved (with WorkerDiedError) and
+        # _restart_attempts incremented so awaiters don't hang silently —
+        # this is the contract that F-UAT6-1 was missing.
+        assert client._restart_attempts >= 1, "read loop must signal worker-died on overflow"
+
+
+class TestWorkerEnvForSessionDir:
+    """F-UAT6-2: the steam-next library writes refresh tokens to its
+    credential_location directory; the worker MUST read the path from
+    ORCH_STEAM_SESSION_DIR (env-passed because the worker is a separate
+    venv and can't import orchestrator's Settings). The orchestrator
+    client.start() must include this env var in the subprocess env.
+    """
+
+    async def test_start_passes_steam_session_dir_to_subprocess_env(self, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        from orchestrator.platform.steam.client import (
+            SteamWorkerClient,
+            WorkerDiedError,
+        )
+
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        # Use a non-default path so we can verify it actually got passed.
+        monkeypatch.setenv("ORCH_STEAM_SESSION_DIR", "/data/orchestrator/steam_session_custom")
+        # Need to clear the settings cache so the new env var is picked up.
+        from orchestrator.core.settings import get_settings
+
+        get_settings.cache_clear()
+
+        client = SteamWorkerClient()
+        captured_kwargs: dict = {}
+
+        async def _fake_create(*_args, **kwargs):
+            captured_kwargs.update(kwargs)
+            raise FileNotFoundError("intercepted")
+
+        with (
+            patch(
+                "orchestrator.platform.steam.client.asyncio.create_subprocess_exec",
+                new=AsyncMock(side_effect=_fake_create),
+            ),
+            pytest.raises(WorkerDiedError),
+        ):
+            await client.start()
+
+        env = captured_kwargs.get("env") or {}
+        assert "ORCH_STEAM_SESSION_DIR" in env, (
+            "worker subprocess env must include ORCH_STEAM_SESSION_DIR"
+        )
+        assert env["ORCH_STEAM_SESSION_DIR"] == "/data/orchestrator/steam_session_custom"
+
+
 class TestRestartStormGuard:
     async def test_max_restart_attempts_exhausted_marks_disabled(self):
         from orchestrator.platform.steam.client import SteamWorkerClient

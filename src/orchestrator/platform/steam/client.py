@@ -21,10 +21,19 @@ import structlog
 
 from orchestrator.core.settings import get_settings
 from orchestrator.platform.steam.protocol import (
+    MAX_IPC_LINE_BYTES,
     ProtocolError,
     RequestEnvelope,
     ResponseEnvelope,
 )
+
+# StreamReader limit for the subprocess's stdout. asyncio's default is
+# 64 KiB (streams._DEFAULT_LIMIT) — far too small for `library.enumerate`
+# responses, which exceed 64 KiB for any operator with more than ~600
+# owned Steam apps. Set to MAX_IPC_LINE_BYTES + 1 KiB headroom so the
+# 10 MiB protocol-level cap (protocol.py) is what enforces, not asyncio's
+# arbitrary internal default. F-UAT6-1.
+_STDOUT_READ_LIMIT = MAX_IPC_LINE_BYTES + 1024
 
 _log = structlog.get_logger(__name__)
 
@@ -96,10 +105,20 @@ class SteamWorkerClient:
             )
 
         # Filter env: only PATH + LANG (no creds; worker reads stdin only).
+        # F-UAT6-2: also forward ORCH_STEAM_SESSION_DIR so the worker writes
+        # steam-next's credential dir to the operator-configured path
+        # instead of the hardcoded default. The worker is a separate venv
+        # and can't import orchestrator's Settings, so env-pass is the
+        # contract.
+        settings = get_settings()
         env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL") if k in os.environ}
+        env["ORCH_STEAM_SESSION_DIR"] = str(settings.steam_session_dir)
         cmd = [str(self._python_path), "-u", "-m", self._worker_module]
 
         try:
+            # limit= sizes the StreamReader's internal buffer so large
+            # `library.enumerate` responses don't trip asyncio's default
+            # 64 KiB safeguard (F-UAT6-1).
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
@@ -107,6 +126,7 @@ class SteamWorkerClient:
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 start_new_session=True,
+                limit=_STDOUT_READ_LIMIT,
             )
         except FileNotFoundError as e:
             self._on_worker_died(reason="worker_binary_missing")
@@ -196,7 +216,20 @@ class SteamWorkerClient:
             raise WorkerDiedError("_read_loop called with no stdout")
         try:
             while True:
-                line = await self._process.stdout.readline()
+                try:
+                    line = await self._process.stdout.readline()
+                except (ValueError, asyncio.LimitOverrunError) as e:
+                    # F-UAT6-1: response line exceeded the configured
+                    # StreamReader limit. Without this catch the reader
+                    # task would die silently and the subprocess would
+                    # leak — the restart-storm guard would never trip.
+                    _log.error(
+                        "steam_worker.ipc_response_overflow",
+                        reason=str(e)[:200],
+                        limit=_STDOUT_READ_LIMIT,
+                    )
+                    self._on_worker_died(reason="response_too_large")
+                    return
                 if not line:
                     self._on_worker_died(reason="stdout_closed")
                     return

@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Security — UAT-6 SEV-2 remediation — 2026-05-26
+
+Three production-blocking findings from the UAT-6 agent sweep, all fixed test-first:
+
+- **F-UAT6-1 [SEV-2]** (`src/orchestrator/platform/steam/client.py`) — `SteamWorkerClient.start()` now passes `limit=MAX_IPC_LINE_BYTES + 1 KiB` to `asyncio.create_subprocess_exec`, sizing the StreamReader's internal buffer above asyncio's default 64 KiB. Pre-fix, any Steam library response > 64 KiB (true for any account with ~600+ apps) would have crashed the reader task on a raw `ValueError` from `readline()`, leaked the worker subprocess, and prevented the restart-storm guard from firing. The `_read_loop` now also catches `ValueError` and `LimitOverrunError`, emitting `steam_worker.ipc_response_overflow` and calling `_on_worker_died(reason='response_too_large')`.
+- **F-UAT6-2 [SEV-2]** (`src/orchestrator/platform/steam/{client,worker}.py`) — Worker now reads its credential-location directory from `os.environ["ORCH_STEAM_SESSION_DIR"]` (falling back to the historical default) instead of the hardcoded `/var/lib/orchestrator/steam_session`. `SteamWorkerClient.start()` forwards `Settings.steam_session_dir` into the subprocess env. Pre-fix, operators with a customized volume mount silently lost refresh-token persistence across restarts.
+- **F-UAT6-3 [SEV-2]** (`src/orchestrator/jobs/handlers/library_sync.py`) — `library_sync_handler` now catches `SteamWorkerError(kind='NotAuthenticated')`, updates `platforms.auth_status='expired'` and `last_error`, then re-raises so the job is still marked failed. Other `SteamWorkerError` kinds (e.g. `SteamAPIError`) leave `auth_status` unchanged — those represent transient failures, not session expiry. Pre-fix, `GET /platforms` would show `auth_status='ok'` while `GET /platforms/steam/auth/status` simultaneously returned `authenticated=false`.
+
 ### Added — BL11 Steam Library Sync (F1 milestone 2/3) — 2026-05-25
 - `src/orchestrator/jobs/` package — generic asyncio job dispatcher
   (`worker.py`, `handlers/__init__.py` registry). Single-loop topology

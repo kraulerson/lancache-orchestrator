@@ -186,10 +186,51 @@ class TestErrorPropagation:
         from orchestrator.platform.steam.client import SteamWorkerError
 
         stub = _StubSteam(raises=SteamWorkerError("NotAuthenticated", "no session"))
+        # Migration seeds platforms(name='steam', auth_status='never'); set to 'ok'
+        # so we can verify the handler flips it.
+        await pool.execute_write("UPDATE platforms SET auth_status='ok' WHERE name='steam'")
         with pytest.raises(SteamWorkerError):
             await library_sync_handler(_job(), Deps(pool=pool, steam_client=stub))
         rows = await pool.read_all("SELECT id FROM games")
         assert rows == []  # no partial writes
+
+    async def test_not_authenticated_flips_platform_auth_status_to_expired(self, pool):
+        """F-UAT6-3: when the steam worker reports NotAuthenticated, the
+        handler MUST update platforms.auth_status='expired' so the
+        operator surfaces (`GET /platforms` and `GET /auth/status`) don't
+        disagree. The SteamWorkerError still propagates so the job is
+        marked failed."""
+        from orchestrator.platform.steam.client import SteamWorkerError
+
+        # Pre-seed the platforms row in 'ok' state (simulating a prior
+        # successful auth that has now lapsed Steam-side).
+        await pool.execute_write("UPDATE platforms SET auth_status='ok' WHERE name='steam'")
+        stub = _StubSteam(raises=SteamWorkerError("NotAuthenticated", "lapsed"))
+
+        with pytest.raises(SteamWorkerError):
+            await library_sync_handler(_job(), Deps(pool=pool, steam_client=stub))
+
+        row = await pool.read_one(
+            "SELECT auth_status, last_error FROM platforms WHERE name='steam'"
+        )
+        assert row["auth_status"] == "expired", (
+            f"expected platforms.auth_status='expired'; got {row['auth_status']!r}"
+        )
+
+    async def test_non_notauth_steam_error_does_not_flip_auth_status(self, pool):
+        """Other SteamWorkerError kinds (e.g. SteamAPIError) must NOT
+        flip auth_status — those represent transient API failures, not
+        session expiry."""
+        from orchestrator.platform.steam.client import SteamWorkerError
+
+        await pool.execute_write("UPDATE platforms SET auth_status='ok' WHERE name='steam'")
+        stub = _StubSteam(raises=SteamWorkerError("SteamAPIError", "transient blip"))
+
+        with pytest.raises(SteamWorkerError):
+            await library_sync_handler(_job(), Deps(pool=pool, steam_client=stub))
+
+        row = await pool.read_one("SELECT auth_status FROM platforms WHERE name='steam'")
+        assert row["auth_status"] == "ok"
 
     async def test_ipc_timeout_propagates_no_partial_writes(self, pool):
         from orchestrator.platform.steam.client import IPCTimeoutError
