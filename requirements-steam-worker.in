@@ -3,5 +3,5 @@
 # Pin exact versions; Spike A validated against steam-next 1.4.4.
 steam[client]==1.4.4
 gevent==26.5.0
-zstandard==0.23.0
+zstandard==0.25.0
 httpx==0.28.1
