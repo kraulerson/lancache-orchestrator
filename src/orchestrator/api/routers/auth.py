@@ -140,6 +140,32 @@ async def _update_platform_row_failure(pool: Pool, *, error: str) -> None:
     )
 
 
+async def _queue_library_sync_job_best_effort(pool: Pool) -> None:
+    """Best-effort enqueue of a `library_sync` job after Steam auth success
+    (BL11). Plan P9: failures are logged but do NOT cause the auth response
+    to fail — auth succeeded; the operator can manually re-sync.
+
+    Skips if a queued/running `library_sync` job already exists to avoid
+    duplicate work. (Concurrent auth + manual POST can still race; the
+    second handler call is idempotent via UPSERT.)
+    """
+    try:
+        existing = await pool.read_one(
+            "SELECT id FROM jobs WHERE kind='library_sync' AND platform='steam' "
+            "AND state IN ('queued','running') ORDER BY id LIMIT 1"
+        )
+        if existing is not None:
+            _log.info("auth.auto_sync.dedup_skip", existing_job_id=existing["id"])
+            return
+        await pool.execute_write(
+            "INSERT INTO jobs (kind, platform, state, source) VALUES (?, ?, 'queued', 'api')",
+            ("library_sync", "steam"),
+        )
+        _log.info("auth.auto_sync.queued")
+    except PoolError as e:
+        _log.warning("auth.auto_sync.queue_failed", reason=str(e)[:200])
+
+
 @router.post(
     "/auth",
     responses={
@@ -178,6 +204,7 @@ async def auth_begin(
         await _update_platform_row_success(
             pool, steam_id=int(result["steam_id"]), username=body.username
         )
+        await _queue_library_sync_job_best_effort(pool)
         _log.info("platform.auth.completed", steam_id=result["steam_id"])
         return JSONResponse(
             status_code=200,
@@ -250,6 +277,7 @@ async def auth_complete(
         # #93: mirror auth_begin's 503-on-DB-error contract.
         _log.error("platform.auth.db_unavailable", reason=str(e))
         return JSONResponse(status_code=503, content={"detail": "database unavailable"})
+    await _queue_library_sync_job_best_effort(pool)
     # #95 item 5: log the 2FA-success path (parallel to auth_begin's
     # `platform.auth.completed` log on the no-2FA path).
     _log.info("platform.auth.completed_2fa", steam_id=result["steam_id"])

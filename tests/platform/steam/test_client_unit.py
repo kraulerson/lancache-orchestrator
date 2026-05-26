@@ -122,6 +122,57 @@ class TestSteamWorkerClientErrorPath:
             await client._await_response(msg_id)
 
 
+class TestLibraryEnumerate:
+    """BL11: SteamWorkerClient.library_enumerate() round-trips the IPC op."""
+
+    async def test_returns_apps_list(self):
+        from orchestrator.platform.steam.client import SteamWorkerClient
+
+        client = SteamWorkerClient.__new__(SteamWorkerClient)
+        client._writer = _StubWriter()
+        client._pending = {}
+        client._timeout = 5.0
+
+        async def round_trip():
+            # Spy on `_send` so we can synthesize the response with the
+            # auto-generated msg_id.
+            msg_id = await client._send("library.enumerate", {})
+            line = (
+                b'{"msg_id":"'
+                + msg_id.encode()
+                + b'","ok":true,"result":{"apps":['
+                + b'{"app_id":730,"name":"CS2","depots":[731]}'
+                + b"]}}\n"
+            )
+            await client._on_response_line(line)
+            return await client._await_response(msg_id)
+
+        result = await round_trip()
+        assert result == {"apps": [{"app_id": 730, "name": "CS2", "depots": [731]}]}
+
+    async def test_not_authenticated_raises_steam_worker_error(self):
+        from orchestrator.platform.steam.client import (
+            SteamWorkerClient,
+            SteamWorkerError,
+        )
+
+        client = SteamWorkerClient.__new__(SteamWorkerClient)
+        client._writer = _StubWriter()
+        client._pending = {}
+        client._timeout = 5.0
+
+        msg_id = await client._send("library.enumerate", {})
+        line = (
+            b'{"msg_id":"'
+            + msg_id.encode()
+            + b'","ok":false,"error":{"kind":"NotAuthenticated","message":"no session"}}\n'
+        )
+        await client._on_response_line(line)
+        with pytest.raises(SteamWorkerError) as exc_info:
+            await client._await_response(msg_id)
+        assert exc_info.value.kind == "NotAuthenticated"
+
+
 class TestRestartStormGuard:
     async def test_max_restart_attempts_exhausted_marks_disabled(self):
         from orchestrator.platform.steam.client import SteamWorkerClient

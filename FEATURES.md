@@ -471,4 +471,73 @@ session persists across container restarts.
 
 ---
 
+## Feature 11: BL11 — Steam Library Sync (F1 milestone 2/3)
+
+**Phase Built:** 2 (Milestone B, Build Loop 11)
+**Status:** Complete (2026-05-25)
+
+**Summary:** Second BL of the F1 milestone. Operationalizes Steam library
+enumeration end-to-end: a generic single-loop asyncio jobs dispatcher in
+the orchestrator process, a `library_sync` handler that calls the
+steam-worker subprocess's new `library.enumerate` IPC op and upserts the
+operator's owned Steam apps into the `games` table. A
+`POST /api/v1/platforms/steam/library/sync` endpoint provides manual
+operator-driven re-sync with handler-side dedup of in-flight jobs; both
+Steam auth-success paths auto-queue a `library_sync` job (best-effort).
+
+**Key Interfaces:**
+  - `src/orchestrator/jobs/__init__.py` — package marker
+  - `src/orchestrator/jobs/worker.py` — `Deps` dataclass, `claim_next_job`,
+    `mark_succeeded`, `mark_failed`, `worker_loop` (single-loop dispatcher)
+  - `src/orchestrator/jobs/handlers/__init__.py` — `HANDLERS` registry
+    with auto-registered built-ins
+  - `src/orchestrator/jobs/handlers/library_sync.py` — `library_sync_handler`
+  - `src/orchestrator/api/routers/sync.py` — manual sync endpoint
+  - `src/orchestrator/platform/steam/worker.py` — `_handle_library_enumerate`
+  - `src/orchestrator/platform/steam/client.py` — `library_enumerate()` method
+  - `src/orchestrator/api/main.py` — lifespan now spawns + cleanly stops
+    the jobs worker asyncio task (5 s shutdown timeout)
+
+**Locked decisions (spec §5 + plan):**
+  - D6 jobs-based async manifest fetching (jobs dispatcher landed here,
+    used by BL12) · D7 auto-trigger on auth + manual endpoint
+  - D10 single-worker job loop · P2 SELECT-then-UPDATE inside
+    `write_transaction()` for atomic claim · P8 handler-side dedup
+    (race-tolerant: idempotent UPSERT) · P9 auth auto-trigger is
+    best-effort · P11 single-row UPSERT (not bulk executemany)
+  - P12 `metadata` JSON shape: `{"depots": [int, ...], "steam_packages": []}`
+
+**Test Coverage:** ~39 new tests:
+  - `tests/jobs/test_worker.py` (16) — claim atomicity, mark helpers,
+    dispatch, unknown-kind handling, handler-crash isolation, prompt
+    shutdown
+  - `tests/jobs/test_library_sync_handler.py` (13) — upsert happy paths,
+    idempotency, preservation of downstream lifecycle columns, error
+    propagation (non-steam platform, missing steam_client, IPCTimeout,
+    SteamWorkerError)
+  - `tests/api/test_sync_router.py` (7) — queue + dedup + auth + 503 path
+  - `tests/api/test_auth_router.py` (+3) — auto-trigger on no-2FA and
+    2FA paths; queue failure is swallowed without failing auth
+  - `tests/platform/steam/test_client_unit.py` (+2) — `library_enumerate`
+    IPC round-trip + NotAuthenticated error mapping
+
+**Related ADRs:**
+  - ADR-0013 — Steam-next subprocess isolation (inherited; no new ADR for
+    BL11 — single-loop jobs design and SELECT-then-UPDATE claim are
+    routine FastAPI/SQLite patterns)
+
+**Known Limitations:**
+  - Live Steam-side enumeration (real `get_product_info` interaction)
+    deferred to UAT-6 — assistant cannot drive interactive Steam login.
+  - Concurrent multi-job dispatch deferred per D10 — single asyncio
+    loop processes one job at a time. Adequate for F1's manual + auth-
+    triggered cadence; revisit when F12 ships scheduled sync.
+  - Race window between dedup SELECT and INSERT can produce one extra
+    `queued` library_sync row on concurrent auth + manual POST. Accepted
+    per P8 — the handler is idempotent, so the second worker pass
+    no-ops at the UPSERT layer.
+  - Manifest fetching (BL12) is the F1 milestone 3/3 and lands after UAT-6.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->

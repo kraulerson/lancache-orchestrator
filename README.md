@@ -56,6 +56,7 @@ The bearer token (`orchestrator_token`) is the only required field. Every other 
 | `ORCH_DB_CACHE_SIZE_KIB` | int (1024..1048576) | `16384` | Per-connection page cache, KiB (BL4) |
 | `ORCH_DB_MMAP_SIZE_BYTES` | int (0..16 GiB) | `268435456` (256 MiB) | mmap window, bytes (BL4) |
 | `ORCH_DB_JOURNAL_SIZE_LIMIT_BYTES` | int (1 MiB..1 GiB) | `67108864` (64 MiB) | WAL truncate threshold (BL4) |
+| `ORCH_JOBS_WORKER_POLL_INTERVAL_SEC` | float (0.05..60.0) | `1.0` | Empty-queue poll cadence for the jobs worker (BL11) |
 
 **DB pool memory baseline:** `(pool_readers + 1) × db_cache_size_kib + db_mmap_size_bytes`. Default config = `9 × 16 MiB + 256 MiB ≈ 400 MiB` resident. On memory-constrained hardware (e.g. DXP4800 NAS at 4 GB total), halve `ORCH_POOL_READERS` and `ORCH_DB_CACHE_SIZE_KIB` together — yields a `5 × 8 MiB + 256 MiB ≈ 296 MiB` profile. See [`FEATURES.md` — Feature 4](FEATURES.md) and [ADR-0011](docs/ADR%20documentation/0011-db-pool-architecture.md).
 

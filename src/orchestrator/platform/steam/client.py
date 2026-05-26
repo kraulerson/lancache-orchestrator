@@ -155,6 +155,14 @@ class SteamWorkerClient:
     async def auth_status(self) -> dict[str, Any]:
         return await self._send_and_await("auth.status", {})
 
+    async def library_enumerate(self) -> dict[str, Any]:
+        """Ask the worker to enumerate the operator's owned Steam apps (BL11).
+
+        Returns `{"apps": [{"app_id": int, "name": str, "depots": [int, ...]}, ...]}`.
+        Raises `SteamWorkerError(kind='NotAuthenticated')` if no Steam session.
+        """
+        return await self._send_and_await("library.enumerate", {})
+
     # --- internals -----------------------------------------------------
 
     async def _send(self, op: str, params: dict[str, Any]) -> str:
