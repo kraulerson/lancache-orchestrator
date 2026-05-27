@@ -58,13 +58,22 @@ async def get_health(
     cache_path = Path(settings.lancache_nginx_cache_path)
     cache_volume_mounted = cache_path.is_dir()
 
+    # ID2 lancache reachability probe. `app.state.lancache_probe` is built
+    # in lifespan startup; `probe()` is cache-fast (no IO most of the time)
+    # and concurrency-safe. Tests that use the no-lifespan `unit_app`
+    # fixture omit this state — fall back to False rather than crashing.
+    probe = getattr(request.app.state, "lancache_probe", None)
+    lancache_reachable = False
+    if probe is not None:
+        lancache_reachable = await probe.probe()
+
     body = HealthResponse(
         status="ok" if pool_ok else "degraded",
         version=__version__,
         uptime_sec=int(time.monotonic() - request.app.state.boot_time),
-        # BL5 stubs — real in BL6+ as features land
+        # Remaining BL5 stubs — real when scheduler + validator subsystems ship.
         scheduler_running=False,
-        lancache_reachable=False,
+        lancache_reachable=lancache_reachable,
         cache_volume_mounted=cache_volume_mounted,
         validator_healthy=False,
         # UAT-3 S2-B: /api/v1/health is unauthenticated, so the git_sha

@@ -221,6 +221,39 @@ class TestFieldValidators:
         with pytest.raises(ValidationError):
             Settings(orchestrator_token=VALID_TOKEN, cors_origins=[""])
 
+    def test_lancache_heartbeat_url_default(self):
+        s = Settings(orchestrator_token=VALID_TOKEN)
+        assert s.lancache_heartbeat_url == "http://lancache/lancache-heartbeat"
+
+    def test_lancache_heartbeat_url_rejects_empty(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, lancache_heartbeat_url="")
+
+    def test_lancache_probe_timeout_default(self):
+        s = Settings(orchestrator_token=VALID_TOKEN)
+        assert s.lancache_probe_timeout_sec == 5.0
+
+    def test_lancache_probe_timeout_rejects_zero(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, lancache_probe_timeout_sec=0)
+
+    def test_lancache_probe_timeout_rejects_above_max(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, lancache_probe_timeout_sec=120.0)
+
+    def test_lancache_probe_cache_ttl_default(self):
+        s = Settings(orchestrator_token=VALID_TOKEN)
+        assert s.lancache_probe_cache_ttl_sec == 30.0
+
+    def test_lancache_probe_cache_ttl_accepts_zero(self):
+        """TTL=0 disables caching — useful for diagnostic deployments."""
+        s = Settings(orchestrator_token=VALID_TOKEN, lancache_probe_cache_ttl_sec=0.0)
+        assert s.lancache_probe_cache_ttl_sec == 0.0
+
+    def test_lancache_probe_cache_ttl_rejects_negative(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, lancache_probe_cache_ttl_sec=-1.0)
+
     def test_pool_readers_zero_rejects(self):
         with pytest.raises(ValidationError):
             Settings(orchestrator_token=VALID_TOKEN, pool_readers=0)
