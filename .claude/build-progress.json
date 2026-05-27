@@ -11,10 +11,11 @@
     "BL8-F9-jobs-readonly",
     "BL9-F9-manifests-readonly",
     "BL10-F1-steam-auth-substrate",
-    "BL11-library-sync"
+    "BL11-library-sync",
+    "ID2-lancache-self-test"
   ],
-  "features_since_last_test": 0,
-  "features_since_last_health_check": 1,
+  "features_since_last_test": 1,
+  "features_since_last_health_check": 2,
   "test_interval": 2,
   "last_test_session": "2026-05-27",
   "testing_required": false,
