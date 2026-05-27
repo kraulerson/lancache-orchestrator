@@ -457,6 +457,33 @@ class TestBL10SteamWorkerSettings:
         with pytest.raises(ValueError, match=r"steam_worker_ipc_timeout_sec"):
             Settings()
 
+    def test_steam_worker_library_enumerate_timeout_default(self, monkeypatch):
+        """Issue #109: 5-minute default budget for library_enumerate."""
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        s = Settings()
+        assert s.steam_worker_library_enumerate_timeout_sec == 300
+
+    def test_steam_worker_library_enumerate_timeout_rejects_too_low(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        monkeypatch.setenv("ORCH_STEAM_WORKER_LIBRARY_ENUMERATE_TIMEOUT_SEC", "10")
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="steam_worker_library_enumerate_timeout_sec"):
+            Settings()
+
+    def test_steam_worker_library_enumerate_timeout_rejects_too_high(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        monkeypatch.setenv("ORCH_STEAM_WORKER_LIBRARY_ENUMERATE_TIMEOUT_SEC", "7200")
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="steam_worker_library_enumerate_timeout_sec"):
+            Settings()
+
     def test_steam_worker_max_restart_attempts_rejects_negative(self, monkeypatch):
         monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
         monkeypatch.setenv("ORCH_STEAM_WORKER_MAX_RESTART_ATTEMPTS", "-1")

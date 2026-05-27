@@ -34,6 +34,9 @@ _DEFAULT_SESSION_DIR = "/var/lib/orchestrator/steam_session"
 from steam.client import SteamClient  # type: ignore[import-not-found]  # noqa: E402
 from steam.enums import EResult  # type: ignore[import-not-found]  # noqa: E402
 
+# Pure-Python enumeration helpers (testable without gevent monkey-patch).
+from orchestrator.platform.steam import enumerate as enumerate_module  # noqa: E402
+
 # In-memory state for the worker's lifetime.
 _client: SteamClient | None = None
 
@@ -178,14 +181,13 @@ def _handle_auth_status(msg_id: str, _params: dict[str, str]) -> None:
 
 
 def _handle_library_enumerate(msg_id: str, _params: dict[str, str]) -> None:
-    """Enumerate the operator's owned Steam apps (BL11).
+    """Enumerate the operator's owned Steam apps (BL11, post-spike-a2).
 
-    Pattern follows Spike A: walk `_client.licenses` → resolve packages
-    via `get_product_info(packages=...)` → for each app_id in those
-    packages, resolve app details via `get_product_info(apps=...)`.
-
-    Live steam-next interaction is validated during UAT-6; unit tests
-    exercise the IPC contract via a stub.
+    Delegates to `enumerate.enumerate_apps` (pure, unit-testable). Waits
+    up to 10s for `client.licenses` to populate after login — Steam
+    sends `EMsg.ClientLicenseList` asynchronously and the dict is empty
+    in the moments after `login()` returns. See spike_a2_steam_modern.md
+    for the API mapping that UAT-6 surfaced.
     """
     global _client
     if _client is None or not _client.connected or not _client.logged_on:
@@ -193,57 +195,9 @@ def _handle_library_enumerate(msg_id: str, _params: dict[str, str]) -> None:
         return
 
     try:
-        apps: list[dict[str, object]] = []
-        seen_app_ids: set[int] = set()
-        licenses = getattr(_client, "licenses", None) or []
-
-        package_ids: list[int] = []
-        for license_obj in licenses:
-            pkg_id = getattr(license_obj, "package_id", None)
-            if pkg_id is not None:
-                package_ids.append(int(pkg_id))
-
-        if not package_ids:
-            _ok(msg_id, {"apps": []})
-            return
-
-        # Batch-resolve packages to apps.
-        pkg_info_response = _client.get_product_info(packages=package_ids) or {}
-        packages_info = pkg_info_response.get("packages", {}) or {}
-        candidate_app_ids: list[int] = []
-        for _pkg_id_str, pkg_info in packages_info.items():
-            appid_map = (pkg_info or {}).get("appids", {}) or {}
-            for app_id_val in appid_map.values():
-                try:
-                    candidate_app_ids.append(int(app_id_val))
-                except (TypeError, ValueError):
-                    continue
-
-        if not candidate_app_ids:
-            _ok(msg_id, {"apps": []})
-            return
-
-        # Batch-resolve apps to product info. steam-next returns a dict
-        # keyed by app_id (string or int — defensively coerce).
-        app_info_response = _client.get_product_info(apps=candidate_app_ids) or {}
-        apps_info = app_info_response.get("apps", {}) or {}
-
-        for app_id in candidate_app_ids:
-            if app_id in seen_app_ids:
-                continue
-            seen_app_ids.add(app_id)
-            # Look up by both int and str keys (steam-next inconsistency).
-            info = apps_info.get(app_id) or apps_info.get(str(app_id)) or {}
-            common = info.get("common", {}) or {}
-            name = common.get("name") or f"app_{app_id}"
-            depots_dict = info.get("depots", {}) or {}
-            depot_ids: list[int] = []
-            for depot_key in depots_dict:
-                key_str = str(depot_key)
-                if key_str.isdigit():
-                    depot_ids.append(int(key_str))
-            apps.append({"app_id": int(app_id), "name": str(name), "depots": depot_ids})
-
+        # Wait for the asynchronous license list to arrive before enumerating.
+        enumerate_module.wait_for_licenses(_client, timeout=10.0)
+        apps = enumerate_module.enumerate_apps(_client)
         _ok(msg_id, {"apps": apps})
     except Exception as e:
         _err(msg_id, "SteamAPIError", str(e)[:200])
