@@ -43,6 +43,7 @@ from orchestrator.db.pool import (
     get_pool,
     init_pool,
 )
+from orchestrator.jobs.reaper import reap_running_jobs
 from orchestrator.jobs.worker import Deps as JobsDeps
 from orchestrator.jobs.worker import worker_loop as jobs_worker_loop
 from orchestrator.platform.steam.client import SteamWorkerClient
@@ -105,6 +106,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise SystemExit(1) from None
 
     pool_initialized = True
+
+    # 2b. Startup job reaper (ID6) — mark all `state='running'` jobs as
+    # `failed` before the jobs worker starts polling. The previous worker
+    # process died with the previous orchestrator container; those rows
+    # are orphaned. Reap before the worker spawns so we don't race a
+    # newly-claimed job into the failed bucket.
+    try:
+        reaped = await reap_running_jobs(get_pool())
+        if reaped > 0:
+            log.warning("api.boot.reaped_orphan_jobs", count=reaped)
+    except Exception as e:
+        # Defensive: a failed reap shouldn't abort boot — the job rows are
+        # still recoverable manually, and the jobs worker won't claim
+        # `running` rows anyway (it filters `state='queued'`).
+        log.error("api.boot.reaper_failed", reason=str(e)[:200])
 
     # 3. Steam worker startup
     steam_client = SteamWorkerClient()
