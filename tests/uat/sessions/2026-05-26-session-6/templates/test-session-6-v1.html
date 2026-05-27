@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- AGENT: Replace UAT Session 6 — BL10 + BL11 (Steam auth + library sync) with the session title, e.g., "UAT Session 4" -->
+<title>UAT Session 6 — BL10 + BL11 (Steam auth + library sync)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0f0f17; color: #cdd6f4; line-height: 1.5; padding: 24px; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin-bottom: 4px; }
+  .meta { color: #a6adc8; font-size: 0.9rem; margin-bottom: 24px; }
+  .progress-bar { background: #1e1e2e; border-radius: 8px; height: 8px; margin-bottom: 24px; overflow: hidden; }
+  .progress-fill { background: #a6e3a1; height: 100%; width: 0%; transition: width 0.3s; }
+  .progress-text { text-align: center; color: #a6adc8; font-size: 0.85rem; margin-bottom: 24px; }
+  h2 { font-size: 1.2rem; color: #89b4fa; margin: 32px 0 16px; padding-bottom: 8px; border-bottom: 1px solid #313244; }
+  .fixture-ref { background: #11111b; border: 1px solid #313244; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 0.85rem; color: #a6adc8; }
+  .fixture-ref strong { color: #cdd6f4; }
+  .fixture-ref code { background: #313244; padding: 2px 6px; border-radius: 3px; color: #f9e2af; }
+  .scenario { background: #1e1e2e; border-radius: 8px; margin-bottom: 12px; overflow: hidden; border-left: 4px solid #45475a; transition: border-color 0.2s; }
+  .scenario.pass { border-left-color: #a6e3a1; }
+  .scenario.fail { border-left-color: #f38ba8; }
+  .scenario-header { padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+  .scenario-num { background: #313244; color: #a6adc8; font-size: 0.8rem; font-weight: 600; padding: 2px 8px; border-radius: 4px; min-width: 28px; text-align: center; }
+  .scenario-title { flex: 1; font-weight: 500; }
+  .btn-group { display: flex; gap: 4px; }
+  .btn { padding: 6px 14px; border: 1px solid #45475a; border-radius: 4px; background: transparent; color: #cdd6f4; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
+  .btn:hover { background: #313244; }
+  .btn.pass-btn.active { background: #a6e3a1; color: #1e1e2e; border-color: #a6e3a1; font-weight: 600; }
+  .btn.fail-btn.active { background: #f38ba8; color: #1e1e2e; border-color: #f38ba8; font-weight: 600; }
+  .btn.skip-btn.active { background: #f9e2af; color: #1e1e2e; border-color: #f9e2af; font-weight: 600; }
+  .scenario-details { padding: 0 16px 8px 16px; display: none; }
+  .scenario-details.open { display: block; }
+  .steps { background: #11111b; padding: 10px 14px; border-radius: 4px; font-size: 0.85rem; color: #a6adc8; margin-bottom: 8px; }
+  .steps strong { color: #cdd6f4; }
+  .scenario-notes { padding: 4px 16px 12px 16px; }
+  .notes-input { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; resize: vertical; min-height: 36px; }
+  .notes-input:focus { outline: none; border-color: #89b4fa; }
+  .toggle-details { background: none; border: none; color: #6c7086; cursor: pointer; font-size: 0.75rem; padding: 4px 8px; }
+  .toggle-details:hover { color: #89b4fa; }
+  .bugs-section { margin-top: 40px; }
+  .bug-entry { background: #1e1e2e; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #f38ba8; }
+  .bug-row { display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .bug-field { flex: 1; min-width: 200px; }
+  .bug-field label { display: block; color: #a6adc8; font-size: 0.8rem; margin-bottom: 4px; }
+  .bug-field input, .bug-field select, .bug-field textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; }
+  .bug-field textarea { resize: vertical; min-height: 60px; }
+  .bug-field input:focus, .bug-field select:focus, .bug-field textarea:focus { outline: none; border-color: #89b4fa; }
+  .bug-field select { appearance: auto; }
+  .add-bug-btn { background: #313244; border: 1px dashed #45475a; color: #a6adc8; padding: 10px; border-radius: 8px; width: 100%; cursor: pointer; font-size: 0.85rem; margin-bottom: 12px; }
+  .add-bug-btn:hover { border-color: #f38ba8; color: #f38ba8; }
+  .remove-bug { background: none; border: none; color: #f38ba8; cursor: pointer; font-size: 0.8rem; float: right; }
+  .overall-notes { margin-top: 32px; }
+  .overall-notes textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 12px; border-radius: 8px; font-size: 0.9rem; font-family: inherit; resize: vertical; min-height: 100px; }
+  .overall-notes textarea:focus { outline: none; border-color: #89b4fa; }
+  .export-section { margin-top: 32px; text-align: center; padding: 24px; }
+  .export-btn { background: #89b4fa; color: #1e1e2e; border: none; padding: 12px 32px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; }
+  .export-btn:hover { background: #74c7ec; }
+  .export-btn:active { transform: scale(0.98); }
+  .copy-msg { color: #a6e3a1; margin-top: 8px; font-size: 0.85rem; display: none; }
+</style>
+</head>
+<body>
+
+<!-- AGENT: Replace UAT Session 6 — BL10 + BL11 (Steam auth + library sync) with the session title, e.g., "UAT Session 4" -->
+<h1>UAT Session 6 — BL10 + BL11 (Steam auth + library sync)</h1>
+<!-- AGENT: Replace 2026-05-26 with the date in YYYY-MM-DD format -->
+<!-- AGENT: Replace BL10 Steam auth, BL11 library sync with comma-separated feature names being tested -->
+<div class="meta">Date: 2026-05-26 | Features: BL10 Steam auth, BL11 library sync | Tester: <input id="tester-name" type="text" placeholder="Your name" style="background:#1e1e2e;border:1px solid #45475a;color:#cdd6f4;padding:4px 8px;border-radius:4px;font-size:0.85rem;width:140px;"></div>
+
+<div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+<div class="progress-text" id="progress-text">0 / 0 completed</div>
+
+<!--
+  AGENT: Replace __FEATURE_SECTIONS__ with one block per feature being tested.
+  Each block must follow this exact structure:
+
+  <h2>Feature N: [Feature Name]</h2>
+  <div class="fixture-ref">
+    <strong>Test files</strong> (optional — include only if test fixtures exist):<br>
+    <code>filename.ext</code> — description of the test file<br>
+  </div>
+  <div id="featureN"></div>
+
+  RULES:
+  - The fixture-ref div is OPTIONAL. Omit it if there are no test fixture files.
+  - The div id MUST be "feature" + the feature number (e.g., id="feature7").
+  - The feature number in the div id MUST match the "feature" field in __SCENARIOS_JSON__.
+  - The renderScenarios() function routes scenarios to these divs by feature number.
+-->
+<div class="fixture-ref">
+  <strong>Pre-session setup</strong> (do once before starting):<br>
+  1. Deploy the orchestrator image at HEAD of <code>uat/session-6</code> to the lancache host (or run locally if you prefer).<br>
+  2. Confirm <code>ORCH_TOKEN</code>, <code>ORCH_DATABASE_PATH</code>, and <code>ORCH_STEAM_SESSION_DIR</code> are set per your deployment.<br>
+  3. Start the service: <code>uvicorn orchestrator.api.main:app --host 127.0.0.1 --port 8765</code>.<br>
+  4. Wait for <code>api.boot.complete</code> in the logs before running any scenario.<br>
+  <strong>Token shorthand:</strong> all curl examples assume <code>$TOK</code> holds your bearer (<code>export TOK="$ORCH_TOKEN"</code>).
+</div>
+
+<h2>Feature 10: BL10 — Steam authentication substrate</h2>
+<div class="fixture-ref">
+  <strong>Endpoints under test:</strong><br>
+  <code>POST /api/v1/platforms/steam/auth</code> — initial auth, returns 200 (no 2FA) or 202 + challenge_id<br>
+  <code>POST /api/v1/platforms/steam/auth/{challenge_id}</code> — 2FA completion<br>
+  <code>GET /api/v1/platforms/steam/auth/status</code> — current session state<br>
+  <code>GET /api/v1/platforms</code> — read-only platforms row including auth_status<br>
+  <strong>SEV-2 fix under validation:</strong> F-UAT6-2 (worker reads <code>ORCH_STEAM_SESSION_DIR</code> env var instead of hardcoded path).
+</div>
+<div id="feature10"></div>
+
+<h2>Feature 11: BL11 — Steam library sync</h2>
+<div class="fixture-ref">
+  <strong>Endpoints under test:</strong><br>
+  <code>POST /api/v1/platforms/steam/library/sync</code> — manual trigger, returns 202 + job_id<br>
+  <code>GET /api/v1/jobs?kind=library_sync</code> — see queued/running/completed sync jobs<br>
+  <code>GET /api/v1/games?platform=steam</code> — verify games table populated<br>
+  <strong>SEV-2 fixes under validation:</strong><br>
+  &nbsp;&nbsp;F-UAT6-1 (large-library response no longer hits asyncio's 64 KiB readline cap)<br>
+  &nbsp;&nbsp;F-UAT6-3 (session-expiry mid-sync flips <code>platforms.auth_status='expired'</code>).
+</div>
+<div id="feature11"></div>
+
+<div class="bugs-section">
+  <h2>Bugs Found</h2>
+  <div id="bugs-list"></div>
+  <button class="add-bug-btn" onclick="addBug()">+ Add Bug</button>
+</div>
+
+<div class="overall-notes">
+  <h2>Overall Notes</h2>
+  <textarea id="overall-notes" placeholder="Free-form observations, UX concerns, suggestions, things that felt wrong even if they technically worked..."></textarea>
+</div>
+
+<div class="export-section">
+  <button class="export-btn" onclick="exportResults()">Copy Results to Clipboard</button>
+  <div class="copy-msg" id="copy-msg">Copied! Paste into terminal or save to submissions folder.</div>
+</div>
+
+<script>
+// AGENT INSTRUCTIONS: Replace __SCENARIOS_JSON__ with a JavaScript array.
+// Each element MUST be an object with ALL of the following fields.
+// Do not omit any field. Do not add fields not listed here.
+// Do not modify any code outside the __PLACEHOLDER__ tokens.
+//
+// SCHEMA:
+// [
+//   {
+//     "id": number,        // Sequential integer starting at 1, unique across all features
+//     "feature": number,   // Feature number this scenario tests (must match a __FEATURE_SECTIONS__ div id)
+//     "title": string,     // Short imperative description, e.g., "Repair fills holes on open mesh"
+//     "steps": string,     // Numbered steps separated by \\n, e.g., "1. Open file\\n2. Click Analyze"
+//     "expected": string   // What should happen if the feature works correctly
+//   }
+// ]
+//
+// EXAMPLE (do not copy verbatim — write scenarios specific to the features under test):
+// [
+//   {
+//     "id": 1,
+//     "feature": 7,
+//     "title": "Repair disabled after clean analysis",
+//     "steps": "1. Open cube.stl\\n2. Click Analyze (A)\\n3. Check Repair button",
+//     "expected": "Repair button stays disabled. Analysis shows 0 holes, 0 degenerate faces."
+//   }
+// ]
+const scenarios = [
+  {
+    "id": 1,
+    "feature": 10,
+    "title": "Fresh boot: platforms row shows auth_status=never",
+    "steps": "1. Start service against a fresh DB (no prior steam_session.json)\n2. curl -s -H \"Authorization: Bearer $TOK\" http://127.0.0.1:8765/api/v1/platforms | jq .",
+    "expected": "Response contains a steam row with auth_status='never'. No errors at boot. The api.boot.steam_worker_started log line is present even though no session file exists (worker spawns unconditionally per current code; this matches main.py but diverges from ADR-0013 — note in bug section if you care)."
+  },
+  {
+    "id": 2,
+    "feature": 10,
+    "title": "Happy path auth (no 2FA needed)",
+    "steps": "1. If your account does NOT use 2FA, run: curl -s -H \"Authorization: Bearer $TOK\" -H \"Content-Type: application/json\" -d '{\"username\":\"YOUR_USER\",\"password\":\"YOUR_PASS\"}' http://127.0.0.1:8765/api/v1/platforms/steam/auth\n2. Check /api/v1/platforms — auth_status should be 'ok'\n3. Skip this if your account uses 2FA",
+    "expected": "HTTP 200 with {status:'authenticated', steam_id:N}. /platforms shows auth_status='ok', last_sync_at=now, config={steam_id, username, last_refreshed_at}, NO token-like field in config. Logs show platform.auth.began + platform.auth.completed."
+  },
+  {
+    "id": 3,
+    "feature": 10,
+    "title": "2FA flow — initial POST returns 202 + challenge_id",
+    "steps": "1. curl -s -i -H \"Authorization: Bearer $TOK\" -H \"Content-Type: application/json\" -d '{\"username\":\"YOUR_USER\",\"password\":\"YOUR_PASS\"}' http://127.0.0.1:8765/api/v1/platforms/steam/auth\n2. Note the challenge_id and challenge_type from the JSON body",
+    "expected": "HTTP 202. Body has challenge_id (uuid), challenge_type ('mobile_authenticator' or 'email_code'), expires_at (~5 min from now). No password or token in response or logs."
+  },
+  {
+    "id": 4,
+    "feature": 10,
+    "title": "2FA flow — complete with valid code",
+    "steps": "1. Open Steam Mobile Authenticator (or check email for code)\n2. curl -s -i -H \"Authorization: Bearer $TOK\" -H \"Content-Type: application/json\" -d '{\"code\":\"CODE_FROM_AUTHENTICATOR\"}' http://127.0.0.1:8765/api/v1/platforms/steam/auth/CHALLENGE_ID_FROM_STEP_3",
+    "expected": "HTTP 200 with {status:'authenticated', steam_id:N}. /platforms shows auth_status='ok'. Logs show platform.auth.completed_2fa. The challenge_id is consumed (re-POST returns 404)."
+  },
+  {
+    "id": 5,
+    "feature": 10,
+    "title": "Bad password returns 401",
+    "steps": "1. curl -s -i -H \"Authorization: Bearer $TOK\" -H \"Content-Type: application/json\" -d '{\"username\":\"YOUR_USER\",\"password\":\"definitely-wrong\"}' http://127.0.0.1:8765/api/v1/platforms/steam/auth\n2. Check /platforms after",
+    "expected": "HTTP 401 with {detail:'authentication failed: InvalidCredentials'}. /platforms shows auth_status='error' and last_error populated. No password text in logs (check with grep)."
+  },
+  {
+    "id": 6,
+    "feature": 10,
+    "title": "Bad 2FA code returns 401",
+    "steps": "1. Re-run scenario 3 to get a new challenge_id\n2. POST /auth/{challenge_id} with code='000000' (or a known-bad value)",
+    "expected": "HTTP 401 with detail containing 'TwoFactorCodeMismatch' or 'authentication failed'. Challenge is consumed (re-POST returns 404)."
+  },
+  {
+    "id": 7,
+    "feature": 10,
+    "title": "Expired challenge returns 404",
+    "steps": "1. Re-run scenario 3 to issue a challenge\n2. Wait 6 minutes (challenges have a 5-min TTL)\n3. POST /auth/{challenge_id} with any code",
+    "expected": "HTTP 404 with detail='challenge expired'. (You can skip the 6-min wait if you trust the TTL based on scenario 4's challenge being consumed.)"
+  },
+  {
+    "id": 8,
+    "feature": 10,
+    "title": "Auth status endpoint reflects worker state",
+    "steps": "1. After successful auth: curl -s -H \"Authorization: Bearer $TOK\" http://127.0.0.1:8765/api/v1/platforms/steam/auth/status\n2. Compare with /api/v1/platforms",
+    "expected": "auth_status endpoint returns authenticated=true + steam_id + last_check_at. Matches the /platforms surface (no skew). If you can force a session expiry server-side, expect authenticated=false."
+  },
+  {
+    "id": 9,
+    "feature": 10,
+    "title": "[F-UAT6-2] Custom ORCH_STEAM_SESSION_DIR persists session",
+    "steps": "1. Stop the service\n2. Set ORCH_STEAM_SESSION_DIR=/data/orchestrator/steam_session_uat6_test (a non-default path that does NOT yet exist)\n3. Start the service\n4. Auth (use scenario 2 or 3+4)\n5. Verify the new directory exists and contains steam-next credential files (e.g., 76561198xxxxxxxxx.dat or similar)\n6. Verify NOTHING was written to the default /var/lib/orchestrator/steam_session path",
+    "expected": "steam-next files appear under the custom path. Default path is untouched. This validates the F-UAT6-2 fix — pre-fix, the worker would have written to the hardcoded default regardless of the env var."
+  },
+  {
+    "id": 10,
+    "feature": 10,
+    "title": "Session persistence across container restart",
+    "steps": "1. After successful auth (scenario 2 or 4), stop the orchestrator container/process\n2. Restart it (same ORCH_STEAM_SESSION_DIR)\n3. Without re-auth: curl /api/v1/platforms/steam/auth/status",
+    "expected": "authenticated=true on first poll after restart. /platforms config has steam_id, username, last_refreshed_at populated from before. NO re-auth required. Logs show steam_worker.spawned at startup."
+  },
+  {
+    "id": 11,
+    "feature": 11,
+    "title": "Auth success auto-queues a library_sync job",
+    "steps": "1. After a successful auth (scenario 2 or 4), within ~2 seconds: curl -s -H \"Authorization: Bearer $TOK\" 'http://127.0.0.1:8765/api/v1/jobs?kind=library_sync&sort=-id&limit=1' | jq .\n2. Note the job_id and state",
+    "expected": "At least one library_sync job exists with platform='steam', source='api', state in {queued, running, succeeded}. Logs show auth.auto_sync.queued."
+  },
+  {
+    "id": 12,
+    "feature": 11,
+    "title": "[F-UAT6-1] Library enumeration completes for real Steam library",
+    "steps": "1. Wait for the auto-triggered library_sync job to finish: poll GET /api/v1/jobs?kind=library_sync&sort=-id&limit=1\n2. Once state=succeeded: curl -s -H \"Authorization: Bearer $TOK\" 'http://127.0.0.1:8765/api/v1/games?platform=steam&limit=5' | jq .\n3. Also check the count: 'http://127.0.0.1:8765/api/v1/games?platform=steam&limit=1' returns metadata.total",
+    "expected": "Job reaches state=succeeded (NOT failed). /games returns rows with platform='steam', titles look correct (Counter-Strike 2, Half-Life, etc.), depots in metadata.depots are non-empty for most games. Total count roughly matches your actual Steam library size. NO timeout, NO worker died log, NO IPC overflow log. This validates the F-UAT6-1 fix — pre-fix, libraries > ~600 apps would have crashed the read loop."
+  },
+  {
+    "id": 13,
+    "feature": 11,
+    "title": "Manual sync endpoint queues a new job",
+    "steps": "1. After the auto-triggered job completes, run: curl -s -i -H \"Authorization: Bearer $TOK\" -X POST http://127.0.0.1:8765/api/v1/platforms/steam/library/sync\n2. Note the returned job_id",
+    "expected": "HTTP 202 with {job_id:N}. The job_id is NEW (different from the auto-triggered one). /jobs shows it transitioning queued → running → succeeded."
+  },
+  {
+    "id": 14,
+    "feature": 11,
+    "title": "Manual sync dedup: two rapid POSTs return same job_id",
+    "steps": "1. In two terminal tabs, run the scenario-13 POST simultaneously (or run it twice fast: curl ... ; curl ...)\n2. Compare the returned job_ids",
+    "expected": "Both calls return HTTP 202. Both return the SAME job_id (handler-side dedup). Only one new row appears in /jobs. Logs show sync.library.dedup_hit on the second call."
+  },
+  {
+    "id": 15,
+    "feature": 11,
+    "title": "Idempotent re-sync: titles/depots update without duplicates",
+    "steps": "1. After at least one library_sync has succeeded, trigger another via scenario 13 and wait for it to finish\n2. Compare game count before and after\n3. Spot-check one well-known game: curl -s -H \"Authorization: Bearer $TOK\" 'http://127.0.0.1:8765/api/v1/games?platform=steam&app_id=730' | jq .",
+    "expected": "Game count is unchanged (no duplicate rows). The app_id=730 (CS2) row exists exactly once. metadata.depots is the current depot list. status / cached_version columns (if previously populated by other features) are UNCHANGED — re-sync should not clobber lifecycle state."
+  },
+  {
+    "id": 16,
+    "feature": 11,
+    "title": "[F-UAT6-3] Session expiry mid-sync flips auth_status to expired (optional)",
+    "steps": "1. This requires a way to force Steam-side session expiry — easiest path: log out via the Steam mobile app (Settings → Sign out of all sessions), which invalidates the orchestrator's session\n2. Wait ~30 seconds for Steam-side propagation\n3. Trigger a manual library_sync (scenario 13)\n4. Watch the job: GET /api/v1/jobs?kind=library_sync&sort=-id&limit=1\n5. After it fails: GET /api/v1/platforms",
+    "expected": "Job state=failed with error containing 'NotAuthenticated'. CRUCIALLY, /platforms now shows auth_status='expired' (NOT 'ok'). last_error mentions NotAuthenticated. Logs show library_sync.session_expired_marked. This validates F-UAT6-3 — pre-fix, /platforms would still say 'ok' while /auth/status said authenticated=false."
+  },
+  {
+    "id": 17,
+    "feature": 11,
+    "title": "Manual sync requires bearer (no anonymous access)",
+    "steps": "1. curl -s -i -X POST http://127.0.0.1:8765/api/v1/platforms/steam/library/sync\n2. BAD_TOK=$(printf 'z%.0s' $(seq 1 32)) ; curl -s -i -X POST -H \"Authorization: Bearer $BAD_TOK\" http://127.0.0.1:8765/api/v1/platforms/steam/library/sync",
+    "expected": "Both return HTTP 401. No job is created in either case. /jobs row count unchanged."
+  },
+  {
+    "id": 18,
+    "feature": 11,
+    "title": "End-to-end observability check",
+    "steps": "1. Tail the orchestrator logs while running a full auth → auto-sync → manual sync cycle (scenarios 2/3+4, 11, 13)\n2. Look for these structured events in order: api.request.received, platform.auth.began, platform.auth.completed (or .completed_2fa), auth.auto_sync.queued, jobs.worker.claimed_job, jobs.handler.started, library_sync.enumerate.started, library_sync.enumerate.returned, library_sync.upserted, jobs.handler.completed",
+    "expected": "All events present in expected order. No 'unknown' / 'no handler' / 'mark_failed_failed' / 'ipc_response_overflow' events. correlation_id is consistent within a request flow. No password, no token, no PII visible in any log line."
+  }
+];
+
+function renderScenarios() {
+  scenarios.forEach(s => {
+    const container = document.getElementById('feature' + s.feature);
+    if (!container) return;
+    container.innerHTML += '<div class="scenario" id="scenario-' + s.id + '">' +
+      '<div class="scenario-header">' +
+        '<span class="scenario-num">' + s.id + '</span>' +
+        '<span class="scenario-title">' + s.title + '</span>' +
+        '<button class="toggle-details" onclick="toggleDetails(' + s.id + ')">details</button>' +
+        '<div class="btn-group">' +
+          '<button class="btn pass-btn" onclick="setResult(' + s.id + ',\'pass\',this)">Pass</button>' +
+          '<button class="btn fail-btn" onclick="setResult(' + s.id + ',\'fail\',this)">Fail</button>' +
+          '<button class="btn skip-btn" onclick="setResult(' + s.id + ',\'skip\',this)">Skip</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="scenario-details" id="details-' + s.id + '">' +
+        '<div class="steps"><strong>Steps:</strong><br>' + s.steps.replace(/\n/g,'<br>') + '</div>' +
+        '<div class="steps"><strong>Expected:</strong><br>' + s.expected + '</div>' +
+      '</div>' +
+      '<div class="scenario-notes">' +
+        '<textarea class="notes-input" id="notes-' + s.id + '" placeholder="Notes — observations, issues, anything worth recording"></textarea>' +
+      '</div>' +
+    '</div>';
+  });
+}
+
+const results = {};
+
+function setResult(id, result, btn) {
+  results[id] = result;
+  const sc = document.getElementById('scenario-' + id);
+  sc.className = 'scenario ' + (result === 'skip' ? '' : result);
+  sc.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  updateProgress();
+}
+
+function toggleDetails(id) {
+  document.getElementById('details-' + id).classList.toggle('open');
+}
+
+function updateProgress() {
+  const done = Object.keys(results).length;
+  const pct = (done / scenarios.length * 100).toFixed(0);
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent = done + ' / ' + scenarios.length + ' completed';
+}
+
+var bugCount = 0;
+// AGENT: Replace __FEATURE_OPTIONS__ (inside the addBug function below) with one
+// JS string fragment per feature being tested, concatenated into the select's innerHTML.
+// Example:
+//   '<option>7 - Mesh Repair</option><option>8 - Scale/Rotate/Mirror</option>'
+// The number must match the feature numbers used in __SCENARIOS_JSON__ and __FEATURE_SECTIONS__.
+function addBug() {
+  bugCount++;
+  var n = bugCount;
+  document.getElementById('bugs-list').innerHTML +=
+    '<div class="bug-entry" id="bug-' + n + '">' +
+      '<button class="remove-bug" onclick="document.getElementById(\'bug-' + n + '\').remove()">remove</button>' +
+      '<div class="bug-row">' +
+        '<div class="bug-field"><label>Severity</label><select id="bug-sev-' + n + '">' +
+          '<option>SEV-1 (crash/data loss)</option><option>SEV-2 (broken, workaround exists)</option>' +
+          '<option selected>SEV-3 (minor UX)</option><option>SEV-4 (polish/enhancement)</option>' +
+        '</select></div>' +
+        '<div class="bug-field"><label>Feature</label><select id="bug-feat-' + n + '">' +
+          '<option>10 - BL10 Steam auth</option><option>11 - BL11 library sync</option>' +
+        '</select></div>' +
+      '</div>' +
+      '<div class="bug-field"><label>Description</label><input id="bug-desc-' + n + '" placeholder="What went wrong?"></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Steps to Reproduce</label><textarea id="bug-steps-' + n + '" placeholder="1. ...\n2. ...\n3. ..."></textarea></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Expected vs Actual</label><textarea id="bug-exp-' + n + '" placeholder="Expected: ...\nActual: ..."></textarea></div>' +
+    '</div>';
+}
+
+function exportResults() {
+  var tester = document.getElementById('tester-name').value || 'Unknown';
+  var md = '# ' + document.querySelector('h1').textContent + ' Results\n\n';
+  md += '**Date:** 2026-05-26\n';
+  md += '**Tester:** ' + tester + '\n';
+  md += '**Features:** BL10 Steam auth, BL11 library sync\n\n';
+
+  var pass = 0, fail = 0, skip = 0;
+  for (var k in results) {
+    if (results[k] === 'pass') pass++;
+    else if (results[k] === 'fail') fail++;
+    else if (results[k] === 'skip') skip++;
+  }
+  var untested = scenarios.length - Object.keys(results).length;
+  md += '**Summary:** ' + pass + ' passed, ' + fail + ' failed, ' + skip + ' skipped, ' + untested + ' not tested\n\n---\n\n';
+
+  md += '## Scenarios\n\n';
+  md += '| # | Scenario | Result | Notes |\n';
+  md += '|---|---|---|---|\n';
+  scenarios.forEach(function(s) {
+    var r = results[s.id] || 'not tested';
+    var icon = r === 'pass' ? 'PASS' : r === 'fail' ? 'FAIL' : r === 'skip' ? 'SKIP' : '-';
+    var el = document.getElementById('notes-' + s.id);
+    var notes = el ? el.value.replace(/\|/g, '/').replace(/\n/g, ' ').replace(/`/g, "'").replace(/\[/g, '(').replace(/\]/g, ')').replace(/\*/g, '-') : '';
+    md += '| ' + s.id + ' | ' + s.title + ' | ' + icon + ' | ' + notes + ' |\n';
+  });
+
+  var bugEntries = document.querySelectorAll('.bug-entry');
+  if (bugEntries.length > 0) {
+    md += '\n---\n\n## Bugs Found\n\n';
+    var i = 0;
+    bugEntries.forEach(function(el) {
+      i++;
+      var id = el.id.split('-')[1];
+      var sev = document.getElementById('bug-sev-' + id);
+      var feat = document.getElementById('bug-feat-' + id);
+      var desc = document.getElementById('bug-desc-' + id);
+      var steps = document.getElementById('bug-steps-' + id);
+      var exp = document.getElementById('bug-exp-' + id);
+      md += '### Bug ' + i + '\n';
+      md += '- **Severity:** ' + (sev ? sev.value : '') + '\n';
+      md += '- **Feature:** ' + (feat ? feat.value : '') + '\n';
+      md += '- **Description:** ' + (desc ? desc.value : '') + '\n';
+      md += '- **Steps:** ' + (steps ? steps.value.replace(/\n/g, '; ') : '') + '\n';
+      md += '- **Expected vs Actual:** ' + (exp ? exp.value.replace(/\n/g, '; ') : '') + '\n\n';
+    });
+  }
+
+  var overall = document.getElementById('overall-notes').value;
+  if (overall) {
+    md += '\n---\n\n## Overall Notes\n\n' + overall + '\n';
+  }
+
+  navigator.clipboard.writeText(md).then(function() {
+    var msg = document.getElementById('copy-msg');
+    msg.style.display = 'block';
+    setTimeout(function() { msg.style.display = 'none'; }, 3000);
+  });
+}
+
+renderScenarios();
+</script>
+</body>
+</html>

@@ -16,17 +16,23 @@ from steam import monkey  # type: ignore[import-not-found]
 
 monkey.patch_minimal()
 
-import json  # noqa: E402,I001
+import json  # noqa: E402
+import os  # noqa: E402
 import sys  # noqa: E402
 import time  # noqa: E402
 import uuid  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any, TypedDict  # noqa: E402
 
+# F-UAT6-2: worker reads the credential dir from env (set by orchestrator
+# client.start()). Falls back to the BL10 default. The orchestrator's
+# Settings.steam_session_dir authoritatively configures this; this
+# constant exists only as the safety net if the env var isn't forwarded.
+_DEFAULT_SESSION_DIR = "/var/lib/orchestrator/steam_session"
+
 # Steam-next imports (post-monkey-patch).
 from steam.client import SteamClient  # type: ignore[import-not-found]  # noqa: E402
 from steam.enums import EResult  # type: ignore[import-not-found]  # noqa: E402
-
 
 # In-memory state for the worker's lifetime.
 _client: SteamClient | None = None
@@ -55,12 +61,16 @@ def _err(msg_id: str, kind: str, message: str = "") -> None:
     _send({"msg_id": msg_id, "ok": False, "error": {"kind": kind, "message": message}})
 
 
-def _ensure_client(credential_dir: str = "/var/lib/orchestrator/steam_session") -> SteamClient:
+def _ensure_client(credential_dir: str | None = None) -> SteamClient:
     global _client
     if _client is None:
+        # F-UAT6-2: pull from env (set by orchestrator client.start()) so
+        # operator-customized ORCH_STEAM_SESSION_DIR actually wires through.
+        # Argument override is for tests that want to inject a tmp_path.
+        path = credential_dir or os.environ.get("ORCH_STEAM_SESSION_DIR", _DEFAULT_SESSION_DIR)
         _client = SteamClient()
-        Path(credential_dir).mkdir(parents=True, exist_ok=True)
-        _client.set_credential_location(credential_dir)
+        Path(path).mkdir(parents=True, exist_ok=True)
+        _client.set_credential_location(path)
     return _client
 
 
