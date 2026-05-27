@@ -307,6 +307,66 @@ class TestWorkerEnvForSessionDir:
         assert env["ORCH_STEAM_SESSION_DIR"] == "/data/orchestrator/steam_session_custom"
 
 
+class TestPerOpTimeoutOverride:
+    """Issue #109: library.enumerate must use the long-running timeout
+    (steam_worker_library_enumerate_timeout_sec) instead of the default
+    30 s IPC budget. Other ops still use the default."""
+
+    async def test_library_enumerate_uses_long_timeout(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        monkeypatch.setenv("ORCH_STEAM_WORKER_IPC_TIMEOUT_SEC", "5")
+        monkeypatch.setenv("ORCH_STEAM_WORKER_LIBRARY_ENUMERATE_TIMEOUT_SEC", "120")
+        from orchestrator.core.settings import get_settings
+
+        get_settings.cache_clear()
+
+        from orchestrator.platform.steam.client import SteamWorkerClient
+
+        client = SteamWorkerClient()
+        assert client._timeout == 5.0
+        assert client._op_timeout_overrides.get("library.enumerate") == 120.0
+        # Non-overridden op stays on the default
+        assert client._op_timeout_overrides.get("auth.begin") is None
+
+    async def test_default_timeout_used_for_non_overridden_op(self):
+        from orchestrator.platform.steam.client import (
+            IPCTimeoutError,
+            SteamWorkerClient,
+        )
+
+        client = SteamWorkerClient.__new__(SteamWorkerClient)
+        client._writer = _StubWriter()
+        client._pending = {}
+        client._timeout = 0.05  # 50 ms default
+        client._op_timeout_overrides = {"library.enumerate": 1.0}
+
+        # auth.status has no override → 50 ms default fires fast
+        msg_id = await client._send("auth.status", {})
+        with pytest.raises(IPCTimeoutError) as exc:
+            await client._await_response(
+                msg_id, timeout=client._op_timeout_overrides.get("auth.status")
+            )
+        assert "0.05" in str(exc.value)
+
+    async def test_override_timeout_governs_long_op(self):
+        from orchestrator.platform.steam.client import (
+            IPCTimeoutError,
+            SteamWorkerClient,
+        )
+
+        client = SteamWorkerClient.__new__(SteamWorkerClient)
+        client._writer = _StubWriter()
+        client._pending = {}
+        client._timeout = 30.0  # would-be default
+        client._op_timeout_overrides = {"library.enumerate": 0.05}
+
+        msg_id = await client._send("library.enumerate", {})
+        with pytest.raises(IPCTimeoutError) as exc:
+            await client._await_response(msg_id, timeout=0.05)
+        # The error message reflects the override, not the default
+        assert "0.05" in str(exc.value)
+
+
 class TestRestartStormGuard:
     async def test_max_restart_attempts_exhausted_marks_disabled(self):
         from orchestrator.platform.steam.client import SteamWorkerClient

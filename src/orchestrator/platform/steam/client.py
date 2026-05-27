@@ -86,6 +86,14 @@ class SteamWorkerClient:
         self._python_path = settings.steam_worker_python_path
         self._worker_module = "orchestrator.platform.steam.worker"
         self._timeout = float(settings.steam_worker_ipc_timeout_sec)
+        # Per-op long-running timeout (issue #109): library_enumerate +
+        # manifest_fetch traffic Steam's CM for hundreds of round-trips
+        # via batched get_product_info; the default 30 s IPC budget is
+        # too small for real libraries. Operations not in this map fall
+        # back to `self._timeout`.
+        self._op_timeout_overrides: dict[str, float] = {
+            "library.enumerate": float(settings.steam_worker_library_enumerate_timeout_sec),
+        }
         self._max_restart_attempts = settings.steam_worker_max_restart_attempts
         self._restart_attempts = 0
         self._disabled = False
@@ -196,18 +204,20 @@ class SteamWorkerClient:
         await self._writer.drain()
         return msg_id
 
-    async def _await_response(self, msg_id: str) -> dict[str, Any]:
+    async def _await_response(self, msg_id: str, timeout: float | None = None) -> dict[str, Any]:
         fut = self._pending[msg_id]
+        effective_timeout = timeout if timeout is not None else self._timeout
         try:
-            return await asyncio.wait_for(fut, timeout=self._timeout)
+            return await asyncio.wait_for(fut, timeout=effective_timeout)
         except TimeoutError as e:
-            raise IPCTimeoutError(f"no response for {msg_id} within {self._timeout}s") from e
+            raise IPCTimeoutError(f"no response for {msg_id} within {effective_timeout}s") from e
         finally:
             self._pending.pop(msg_id, None)
 
     async def _send_and_await(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
         msg_id = await self._send(op, params)
-        return await self._await_response(msg_id)
+        timeout = self._op_timeout_overrides.get(op)
+        return await self._await_response(msg_id, timeout=timeout)
 
     async def _read_loop(self) -> None:
         if self._process is None:

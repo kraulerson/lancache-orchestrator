@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     # --- Steam worker (BL10 / F1) ---
     steam_worker_python_path: Path = Path("/opt/orchestrator/venv-steam-worker/bin/python")
     steam_worker_ipc_timeout_sec: int = Field(default=30, ge=1, le=600)
+    # Issue #109: library.enumerate + (future) manifest.fetch handle real
+    # Steam libraries that take minutes to enumerate. Default budgets a
+    # 5-minute ceiling — well above the empirical worst case for hundreds
+    # of batched get_product_info calls, but bounded so a wedged worker
+    # still surfaces an error eventually.
+    steam_worker_library_enumerate_timeout_sec: int = Field(default=300, ge=30, le=3600)
     steam_worker_max_restart_attempts: int = Field(default=3, ge=0, le=10)
     steam_session_dir: Path = Path("/var/lib/orchestrator/steam_session")
     jobs_worker_poll_interval_sec: float = Field(default=1.0, gt=0.0, le=60.0)

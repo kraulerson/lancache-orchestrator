@@ -19,6 +19,24 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Post-UAT-6 SEV-2 batch — 2026-05-27
+
+Closes #107 (licenses enumeration) and #109 (`get_product_info` timeout) — both surfaced by the UAT-6 live operator session against a real Steam account.
+
+- **#107** — Worker library enumeration extracted from `worker.py` into a pure, unit-testable `enumerate.py` module:
+  - `wait_for_licenses(client, timeout=10s)` polls `client.licenses` (which is `dict[int, License]`, populated asynchronously by `EMsg.ClientLicenseList`) until non-empty or deadline
+  - `enumerate_apps(client, batch_size=50)` iterates `licenses.values()` (the previous code iterated the dict yielding keys, then `getattr(int, "package_id")` returned None — explaining the "0 apps for every real account" symptom)
+  - Skips `auto_access_tokens=True` for the package call — `licenses[pid].access_token` is already known, saving one Steam round-trip per batch
+- **#109** — Chunks `get_product_info(packages=...)` and `get_product_info(apps=...)` into batches of 50. New `Settings.steam_worker_library_enumerate_timeout_sec` (default 300, range 30–3600) drives a per-op timeout override in `SteamWorkerClient._send_and_await` so library_enumerate gets a 5-minute budget while other ops keep the 30s default.
+
+Test coverage: 30 new tests in `tests/platform/steam/test_enumerate.py` covering the chunking, wait, build-package-request, extract-app-ids, extract-app-metadata, and end-to-end enumeration paths; 3 new tests in `tests/platform/steam/test_client_unit.py` for the per-op timeout override. Full suite: 760 tests pass.
+
+### Documentation
+
+- New `spikes/spike_a2_steam_modern.md` — full steam-next 1.4.4 API investigation documenting the actual licenses/get_product_info/login surfaces that BL10/BL11 had wrong.
+- New `docs/known-limitations.md` — operator-facing note explaining the steam-next-driven container-restart re-auth requirement.
+- Closed #108 (session persistence) with detailed won't-fix-at-current-scope rationale referencing the spike doc. Opened strategic follow-up #111 for future Steam-library evaluation.
+
 ### Security — UAT-6 SEV-2 remediation — 2026-05-26
 
 Three production-blocking findings from the UAT-6 agent sweep, all fixed test-first:
