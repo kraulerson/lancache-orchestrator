@@ -126,6 +126,11 @@ class Settings(BaseSettings):
     # of batched get_product_info calls, but bounded so a wedged worker
     # still surfaces an error eventually.
     steam_worker_library_enumerate_timeout_sec: int = Field(default=300, ge=30, le=3600)
+    # BL12 manifest fetcher: each fetch can issue multiple
+    # ContentServerDirectory.GetManifestRequestCode + manifest downloads
+    # against Steam's CDN. Big games with 50+ depots can take 1-3 min
+    # serially; budget 5 min by default.
+    steam_worker_manifest_fetch_timeout_sec: int = Field(default=300, ge=30, le=3600)
     steam_worker_max_restart_attempts: int = Field(default=3, ge=0, le=10)
     steam_session_dir: Path = Path("/var/lib/orchestrator/steam_session")
     jobs_worker_poll_interval_sec: float = Field(default=1.0, gt=0.0, le=60.0)

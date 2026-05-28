@@ -39,6 +39,11 @@ from orchestrator.platform.steam import enumerate as enumerate_module  # noqa: E
 
 # In-memory state for the worker's lifetime.
 _client: SteamClient | None = None
+# BL12: CDNClient instance, constructed lazily on first manifest.fetch.
+# Holds a reference to _client + a content-server list, a thread pool,
+# and a requests session — non-trivial init, so we don't create it
+# eagerly. None until first use; reused across subsequent calls.
+_cdn_client: Any = None
 
 
 class _Challenge(TypedDict):
@@ -203,11 +208,86 @@ def _handle_library_enumerate(msg_id: str, _params: dict[str, str]) -> None:
         _err(msg_id, "SteamAPIError", str(e)[:200])
 
 
+def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
+    """Fetch ALL depot manifests for a Steam app (BL12, post-spike-a3).
+
+    Constructs a CDNClient lazily, calls `cdn.get_manifests(app_id)`,
+    extracts {depot_id, manifest_gid, name, total_bytes, chunk_count,
+    raw_b64} per manifest, returns the list.
+
+    Per spike-a3:
+    - `CDNDepotManifest.cdn_client` back-reference prevents pickle —
+      use `.serialize()` to get raw protobuf bytes instead.
+    - zstd-level-3 compresses the protobuf; base64 over JSON IPC.
+
+    Live steam-next interaction is validated during UAT-9; unit tests
+    exercise the orchestrator-side handler via a stub.
+    """
+    global _client, _cdn_client
+    if _client is None or not _client.connected or not _client.logged_on:
+        _err(msg_id, "NotAuthenticated", "no logged-in steam session")
+        return
+
+    app_id_raw = params.get("app_id")
+    if app_id_raw is None:
+        _err(msg_id, "InvalidArgument", "manifest.fetch requires app_id")
+        return
+    try:
+        app_id = int(app_id_raw)
+    except (TypeError, ValueError):
+        _err(msg_id, "InvalidArgument", f"app_id {app_id_raw!r} is not an integer")
+        return
+
+    try:
+        # Steam-next imports inside the handler so module-import time
+        # doesn't trigger any CDN-related network calls or thread-pool
+        # allocation — they happen only when manifest.fetch is invoked.
+        import base64 as _base64
+
+        import zstandard as _zstd  # type: ignore[import-not-found]
+        from steam.client.cdn import CDNClient  # type: ignore[import-not-found]
+
+        if _cdn_client is None:
+            _cdn_client = CDNClient(_client)
+
+        manifests = _cdn_client.get_manifests(app_id, branch="public")
+        compressor = _zstd.ZstdCompressor(level=3)
+
+        payload: list[dict[str, Any]] = []
+        for mfst in manifests:
+            data = mfst.serialize()  # raw protobuf bytes
+            compressed = compressor.compress(data)
+            raw_b64 = _base64.b64encode(compressed).decode("ascii")
+
+            # Sum chunk counts across all file mappings.
+            chunk_count = 0
+            for mapping in mfst.payload.mappings:
+                chunk_count += len(mapping.chunks)
+
+            total_bytes = int(mfst.metadata.cb_disk_original or 0)
+
+            payload.append(
+                {
+                    "depot_id": int(mfst.depot_id),
+                    "manifest_gid": int(mfst.gid),
+                    "name": str(mfst.name or ""),
+                    "total_bytes": total_bytes,
+                    "chunk_count": chunk_count,
+                    "raw_b64": raw_b64,
+                }
+            )
+
+        _ok(msg_id, {"manifests": payload})
+    except Exception as e:
+        _err(msg_id, "SteamAPIError", str(e)[:200])
+
+
 _HANDLERS = {
     "auth.begin": _handle_auth_begin,
     "auth.complete": _handle_auth_complete,
     "auth.status": _handle_auth_status,
     "library.enumerate": _handle_library_enumerate,
+    "manifest.fetch": _handle_manifest_fetch,
 }
 
 

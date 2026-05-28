@@ -30,6 +30,7 @@ from orchestrator.api.routers.auth import set_steam_client_singleton
 from orchestrator.api.routers.games import router as games_router
 from orchestrator.api.routers.health import router as health_router
 from orchestrator.api.routers.jobs import router as jobs_router
+from orchestrator.api.routers.manifest_trigger import router as manifest_trigger_router
 from orchestrator.api.routers.manifests import router as manifests_router
 from orchestrator.api.routers.platforms import router as platforms_router
 from orchestrator.api.routers.status import router as status_router
@@ -355,6 +356,7 @@ def create_app() -> FastAPI:
     app.include_router(games_router)
     app.include_router(jobs_router)
     app.include_router(manifests_router)
+    app.include_router(manifest_trigger_router)
     app.include_router(sync_router)
     app.include_router(status_router)
 
