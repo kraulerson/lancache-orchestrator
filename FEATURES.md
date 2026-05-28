@@ -654,4 +654,72 @@ abort startup.
 
 ---
 
+## Feature 14: F12 — Scheduler subsystem
+
+**Phase Built:** 2 (Milestone B, Build Loop 14)
+**Status:** Complete (2026-05-28)
+
+**Summary:** Periodically enqueues `library_sync` jobs via APScheduler
+3.11.2 `AsyncIOScheduler` integrated into FastAPI lifespan. Replaces
+the BL5 stub-false `/health.scheduler_running` with a real boolean.
+Decoupled architecture: the scheduler only stamps queued `jobs` rows
+(via thin async callbacks) — the BL11 jobs worker actually executes
+handlers. Means a slow library_sync can never block the scheduler.
+
+**Key Interfaces:**
+  - `src/orchestrator/scheduler/manager.py` — `SchedulerManager` facade
+    with idempotent `.start()` / `.shutdown()` and a `.running` property
+  - `src/orchestrator/scheduler/jobs.py` — `enqueue_library_sync(pool)`
+    cron callback (dedup-aware; never raises)
+  - `src/orchestrator/api/main.py` lifespan step 4b — boots the manager
+    after the jobs worker spawns; shuts it down FIRST so no new work
+    is enqueued during teardown
+  - `src/orchestrator/api/routers/health.py` — `getattr(app.state,
+    "scheduler_manager", None)` + `.running` drives the bool
+  - Settings: `scheduler_enabled`, `scheduler_library_sync_interval_sec`
+
+**Locked design decisions** (see
+[`docs/superpowers/specs/2026-05-28-f12-scheduler-design.md`](superpowers/specs/2026-05-28-f12-scheduler-design.md)):
+  - **D1 AsyncIOScheduler** (v3.11.2 pinned, matches asyncio loop)
+  - **D2 In-memory MemoryJobStore** (cron config re-renders on boot;
+    no persistence contention with the BL4 pool)
+  - **D4 max_instances=1** per scheduled job (no pile-up)
+  - **D5 misfire_grace_time=None** (always fire on next opportunity)
+  - **D6 Scheduler enqueues, jobs worker executes** (decoupled; slow
+    handler can't block scheduler ticks)
+  - **D7 Dedup at enqueue time** (mirrors the manual sync endpoint)
+  - **D11 Scheduler start failure does NOT crash boot** (logged at
+    CRITICAL; `/health` returns 503 via JQ3)
+
+**Test Coverage:** 25 new tests across 5 files:
+  - `tests/scheduler/test_jobs.py` (7): enqueue happy path, queued/
+    running dedup, terminal-states ignored, kind+platform isolation,
+    pool error swallow
+  - `tests/scheduler/test_manager.py` (7): enabled/disabled boot,
+    job registration, interval pass-through, idempotent start/stop
+  - `tests/api/test_lifespan_scheduler.py` (3): integration —
+    scheduler starts in lifespan, disabled-via-settings, /health
+    reflects running=True
+  - `tests/api/test_health_endpoint.py` (+3): probe-absent fallback,
+    running-true, running-false wiring
+  - `tests/core/test_settings.py` (+5): defaults + boundaries for
+    the 2 new fields
+
+**Related ADRs:** None new (APScheduler choice locked in PROJECT_BIBLE §3.1).
+
+**Known Limitations:**
+  - The scheduled library_sync fails with `NotAuthenticated` after a
+    container restart (per documented limitation #108 / `docs/known-
+    limitations.md`) until the operator re-auths. F13 will need its
+    own auth check, or this will be revisited when Steam library
+    evaluation (#111) ships an alternative session-persistence path.
+  - /health still returns 503 because `validator_healthy` remains
+    stub-false until F7 validator ships. F12 alone doesn't flip
+    /health to 200 — but it's one of the three required.
+  - No persistent job store. If the orchestrator is down for >6h,
+    the next library_sync fires at boot+interval, not at boot. F12
+    `coalesce=True` ensures multiple missed fires collapse to one.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->

@@ -82,6 +82,37 @@ class TestHealthShipState:
         finally:
             del client._transport.app.state.lancache_probe
 
+    async def test_scheduler_running_false_when_manager_absent(self, client):
+        """No-lifespan unit_app omits app.state.scheduler_manager.
+        /health must fall back to False rather than crashing."""
+        r = await client.get("/api/v1/health")
+        body = r.json()
+        assert body["scheduler_running"] is False
+
+    async def test_scheduler_running_true_when_manager_reports_running(self, client):
+        class _StubManager:
+            running = True
+
+        client._transport.app.state.scheduler_manager = _StubManager()
+        try:
+            r = await client.get("/api/v1/health")
+            body = r.json()
+            assert body["scheduler_running"] is True
+        finally:
+            del client._transport.app.state.scheduler_manager
+
+    async def test_scheduler_running_false_when_manager_reports_stopped(self, client):
+        class _StubManager:
+            running = False
+
+        client._transport.app.state.scheduler_manager = _StubManager()
+        try:
+            r = await client.get("/api/v1/health")
+            body = r.json()
+            assert body["scheduler_running"] is False
+        finally:
+            del client._transport.app.state.scheduler_manager
+
 
 class TestHealthDynamicFields:
     async def test_uptime_sec_increases_monotonically(self, client):
