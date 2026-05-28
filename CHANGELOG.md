@@ -19,6 +19,18 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — F10 Status Page — 2026-05-28
+
+Implements F10 from PROJECT_BIBLE §1.2 + §9.3. Single-file HTML status dashboard at `GET /`. Operator-facing summary of system state — Health, Platforms, Active Jobs, Library Stats, Recent Errors — polled from the existing `/api/v1/*` endpoints.
+
+- New [`src/orchestrator/api/routers/status.py`](src/orchestrator/api/routers/status.py) — embeds a single-file HTML+CSS+vanilla-JS page. Self-contained: no external dependencies (works offline on LAN-only deployments).
+- `GET /` is auth-exempt at the page-fetch level (Bible §9.3) — the embedded JS prompts the operator for the bearer token at first load and persists it in `sessionStorage` for subsequent `/api/v1/*` calls. The data endpoints themselves remain auth-gated by `BearerAuthMiddleware`.
+- Accessibility (Intake §9 colorblind constraint): every status indicator combines **color + ASCII icon + text label**. Text label is the hard constraint — survives even with color stripped.
+- Polling: `/health`, `/platforms`, `/jobs` (queued + running) every 2 s; `/games`, `/manifests`, `/jobs?state=failed` every 10 s. Backs off to 10 s on 5xx until success.
+- Security headers: `Cache-Control: no-store`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. `<meta name="robots" content="noindex,nofollow">`.
+- Bundle size: ~14 KB raw, ~5.8 KB gzipped — well under the Bible §9.3 < 20 KB ceiling.
+- 18 new tests: route returns 200 + text/html, security headers, auth exemption, panel/pill IDs present, accessibility text labels, size invariants, no-external-deps regex check, endpoint references for drift detection.
+
 ### Fixed — ID2 lancache probe: real lancache returns 204 with header identifier — 2026-05-28
 
 Surfaced by post-PR-#113 deployment testing against the running `lancachenet/monolithic` image: lancache's `/lancache-heartbeat` endpoint returns **HTTP 204 No Content** (not 200) and identifies itself via the **`X-LanCache-Processed-By`** response header. PR #113's `LancacheProbe._refresh()` strictly checked for 200 → would have reported `lancache_reachable: false` even against a healthy lancache.

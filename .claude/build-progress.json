@@ -13,10 +13,11 @@
     "BL10-F1-steam-auth-substrate",
     "BL11-library-sync",
     "ID2-lancache-self-test",
-    "ID6-startup-job-reaper"
+    "ID6-startup-job-reaper",
+    "F10-status-page"
   ],
-  "features_since_last_test": 2,
-  "features_since_last_health_check": 2,
+  "features_since_last_test": 3,
+  "features_since_last_health_check": 3,
   "test_interval": 2,
   "last_test_session": "2026-05-27",
   "testing_required": true,
