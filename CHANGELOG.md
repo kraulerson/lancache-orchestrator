@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — ID6 Startup Job Reaper — 2026-05-27
+
+Implements `docs/phase-0/frd.md:649` ID6 — the "startup reaper for abandoned jobs" requirement. Closes the SEV-3 deployment-shape finding F-UAT6-8 (stale `library_sync` jobs surviving container restarts forever).
+
+- New `src/orchestrator/jobs/reaper.py` with `reap_running_jobs(pool) -> int`. Single atomic `UPDATE jobs SET state='failed', error=..., finished_at=CURRENT_TIMESTAMP WHERE state='running'`.
+- FastAPI lifespan calls the reaper after pool init but before the jobs worker task spawns — orphans get cleaned before the new worker could conceivably mis-claim them. Defensive try/except around the call so a failed reap doesn't abort boot.
+- Tests: 7 unit tests in `tests/jobs/test_reaper.py` (empty table, no-running, single, multiple, mixed-states, idempotency, error-message length contract). 3 integration tests in `tests/api/test_lifespan_reaper.py` driving the real lifespan via `asgi_lifespan.LifespanManager` — seeds an orphaned `running` job pre-boot, verifies it's flipped to `failed` post-boot.
+
 ### Added — ID2 Lancache self-test — 2026-05-27
 
 Implements the ID2 implicit-dependency feature from `docs/phase-0/frd.md:645` and `docs/phase-1/architecture-proposal.md` — the operator-facing `/api/v1/health` endpoint now surfaces a real `lancache_reachable` boolean derived from an HTTP probe to `<lancache>/lancache-heartbeat`, replacing the BL5 stub-false.

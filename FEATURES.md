@@ -602,4 +602,56 @@ boundaries. Full suite: 790 pass.
 
 ---
 
+## Feature 13: ID6 — Startup Job Reaper
+
+**Phase Built:** 2 (Milestone B, Build Loop 13)
+**Status:** Complete (2026-05-27)
+
+**Summary:** FastAPI lifespan startup now marks every job in
+`state='running'` as `failed` BEFORE the BL11 jobs worker spawns. The
+previous worker (in the prior orchestrator process) died with its
+container; those rows are orphaned and would otherwise sit `running`
+forever, blocking the manual-sync dedup check and confusing
+operators. Atomic single-`UPDATE` reap; idempotent; defensive
+try/except around the call so a database hiccup at boot doesn't
+abort startup.
+
+**Key Interfaces:**
+  - `src/orchestrator/jobs/reaper.py` — `reap_running_jobs(pool) -> int`
+  - `src/orchestrator/api/main.py` lifespan step 2b — invokes the reaper
+    after `init_pool()` and before the steam worker / jobs worker spawn
+
+**Design decisions:**
+  - **Reap-all-on-boot** (not "reap stale by started_at age"). The
+    orchestrator owns the worker process; if the orchestrator process
+    is starting, no other process can be holding a legitimate
+    `running` job. Single-orchestrator deployment is locked per
+    PROJECT_BIBLE §3.1 / Intake §6.4 — multi-orchestrator concurrency
+    is explicitly out of scope.
+  - **Boot continues on reaper failure.** A database hiccup during
+    the reap shouldn't prevent the orchestrator from serving /health
+    or accepting auth requests. The error is logged at ERROR; orphans
+    remain `running` until the next successful boot.
+
+**Test Coverage:** 10 new tests:
+  - 7 unit (empty, no-running, single, multiple, mixed-states,
+    idempotency, error-message-length-contract)
+  - 3 integration via `asgi_lifespan.LifespanManager` (orphan reaped
+    on boot, terminal states untouched, empty table boots cleanly)
+
+**Related ADRs:**
+  - None new — design follows FRD §5 ID6 directly.
+
+**Known Limitations:**
+  - The reaper marks ALL `running` jobs failed, even if a developer
+    is intentionally testing a long-running flow that survives a
+    re-create. Use `--reload`-aware development setups or temporarily
+    move the job to a non-running state before restart.
+  - No "reaped-at" timestamp — failed jobs from the reaper are
+    indistinguishable from failed jobs from handler exceptions
+    except via the `error` column substring match. Acceptable for
+    MVP; revisit when telemetry needs grow.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->
