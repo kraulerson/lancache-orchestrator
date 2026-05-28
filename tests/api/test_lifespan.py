@@ -54,11 +54,17 @@ class TestLifespanFailures:
 
     async def test_lifespan_returns_503_through_handler_when_unhealthy(self, lifespan_app):
         """Once lifespan is up, a request to /health hits the handler.
-        BL5 ship state: 503 because three subsystems are stub-false."""
+        Post-F12 ship state: 503 still expected because validator_healthy
+        remains stub-false until F7 validator subsystem ships, AND the
+        test app's lancache_heartbeat_url is unreachable in the test
+        environment, AND cache_volume_mounted depends on a path that
+        doesn't exist in test fixtures. scheduler_running is now True
+        (F12 shipped); validator_healthy is the remaining holdout."""
         transport = httpx.ASGITransport(app=lifespan_app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
             r = await c.get("/api/v1/health")
-        assert r.status_code == 503  # BL5 ship state per spec §6.4
+        assert r.status_code == 503  # validator + lancache + cache_volume still stub-false
         body = r.json()
         assert body["status"] in ("ok", "degraded")
-        assert body["scheduler_running"] is False  # stub
+        assert body["scheduler_running"] is True  # F12 ships the real subsystem
+        assert body["validator_healthy"] is False  # F7 not yet built

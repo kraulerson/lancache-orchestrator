@@ -31,6 +31,20 @@ Implements F10 from PROJECT_BIBLE §1.2 + §9.3. Single-file HTML status dashboa
 - Bundle size: ~14 KB raw, ~5.8 KB gzipped — well under the Bible §9.3 < 20 KB ceiling.
 - 18 new tests: route returns 200 + text/html, security headers, auth exemption, panel/pill IDs present, accessibility text labels, size invariants, no-external-deps regex check, endpoint references for drift detection.
 
+### Added — F12 Scheduler subsystem — 2026-05-28
+
+Implements F12 from PROJECT_BIBLE §1.2 MVP cutline and JQ3 (`/health.scheduler_running` is now real). APScheduler 3.11.2 `AsyncIOScheduler` integrated into FastAPI lifespan; periodically enqueues `library_sync` jobs for the BL11 jobs worker to execute.
+
+- New `src/orchestrator/scheduler/` package with `SchedulerManager` (wraps `AsyncIOScheduler`) + `enqueue_library_sync` cron callback. `replace_existing=True` jobs registered at boot; in-memory `MemoryJobStore` (default) means cron config re-renders on every restart.
+- Settings:
+  - `scheduler_enabled: bool = True` — diagnostic / dev escape hatch
+  - `scheduler_library_sync_interval_sec: int = 21600` (6h, range 60..86400)
+- Lifespan ordering: scheduler starts at step 4b (between jobs worker spawn and lancache probe init); shuts down FIRST in teardown so it can't enqueue work during shutdown.
+- `/health.scheduler_running` reads `app.state.scheduler_manager.running`. No-lifespan test fixtures fall back to `False` via `getattr(..., None)` guard.
+- Cron callbacks include dedup against existing queued/running library_sync rows (mirrors the manual sync endpoint) so cron + operator triggers don't race onto duplicate rows.
+- 25 new tests: 7 in `tests/scheduler/test_jobs.py` (enqueue + dedup + error swallow), 7 in `tests/scheduler/test_manager.py` (start/stop/running/jobs), 3 in `tests/api/test_lifespan_scheduler.py` (integration), 5 in `tests/core/test_settings.py` (defaults + bounds), 3 in `tests/api/test_health_endpoint.py` (probe wiring). Full suite: 830 pass.
+- Updated `tests/api/test_lifespan.py::test_lifespan_returns_503_through_handler_when_unhealthy` — `scheduler_running` is now `True` post-F12; `validator_healthy` is the remaining stub-false subsystem keeping /health at 503.
+
 ### Fixed — ID2 lancache probe: real lancache returns 204 with header identifier — 2026-05-28
 
 Surfaced by post-PR-#113 deployment testing against the running `lancachenet/monolithic` image: lancache's `/lancache-heartbeat` endpoint returns **HTTP 204 No Content** (not 200) and identifies itself via the **`X-LanCache-Processed-By`** response header. PR #113's `LancacheProbe._refresh()` strictly checked for 200 → would have reported `lancache_reachable: false` even against a healthy lancache.

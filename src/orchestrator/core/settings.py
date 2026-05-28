@@ -87,6 +87,16 @@ class Settings(BaseSettings):
     lancache_probe_timeout_sec: float = Field(default=5.0, gt=0.0, le=60.0)
     lancache_probe_cache_ttl_sec: float = Field(default=30.0, ge=0.0, le=600.0)
 
+    # --- Scheduler (F12) --------------------------------------------
+    # APScheduler AsyncIOScheduler integration. Disable for diagnostic
+    # / dev: /health.scheduler_running surfaces False and the endpoint
+    # returns 503 per JQ3.
+    scheduler_enabled: bool = Field(default=True)
+    # Interval between library_sync schedule fires; FRD says 6h default.
+    # Bounded [60 s, 86400 s] so operators can tune for testing without
+    # accidentally setting a pathological value.
+    scheduler_library_sync_interval_sec: int = Field(default=21600, ge=60, le=86400)
+
     # --- Misc --------------------------------------------------------
     manifest_size_cap_bytes: int = Field(default=134_217_728, gt=0)
     epic_refresh_buffer_sec: int = Field(default=600, ge=0)
