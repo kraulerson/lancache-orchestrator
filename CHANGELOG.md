@@ -27,6 +27,18 @@ Implements `docs/phase-0/frd.md:649` ID6 — the "startup reaper for abandoned j
 - FastAPI lifespan calls the reaper after pool init but before the jobs worker task spawns — orphans get cleaned before the new worker could conceivably mis-claim them. Defensive try/except around the call so a failed reap doesn't abort boot.
 - Tests: 7 unit tests in `tests/jobs/test_reaper.py` (empty table, no-running, single, multiple, mixed-states, idempotency, error-message length contract). 3 integration tests in `tests/api/test_lifespan_reaper.py` driving the real lifespan via `asgi_lifespan.LifespanManager` — seeds an orphaned `running` job pre-boot, verifies it's flipped to `failed` post-boot.
 
+### Added — ID2 Lancache self-test — 2026-05-27
+
+Implements the ID2 implicit-dependency feature from `docs/phase-0/frd.md:645` and `docs/phase-1/architecture-proposal.md` — the operator-facing `/api/v1/health` endpoint now surfaces a real `lancache_reachable` boolean derived from an HTTP probe to `<lancache>/lancache-heartbeat`, replacing the BL5 stub-false.
+
+- New `src/orchestrator/lancache/` package with `LancacheProbe` (async, cache-TTL'd, concurrency-safe via `asyncio.Lock`). 16 tests cover happy path, every documented httpx failure mode, TTL cache hit/miss/refresh, concurrent-probe collapse, and URL validation.
+- New Settings fields:
+  - `lancache_heartbeat_url` (default `http://lancache/lancache-heartbeat`)
+  - `lancache_probe_timeout_sec` (default 5.0, range 0–60)
+  - `lancache_probe_cache_ttl_sec` (default 30.0, range 0–600)
+- FastAPI lifespan startup constructs the singleton probe and stashes it on `app.state.lancache_probe`. The `/health` router calls `await probe.probe()` per request (cache-fast — usually no IO).
+- Tests in `tests/api/test_health_endpoint.py` verify the wiring through stub probes; the no-lifespan `unit_app` fixture falls back to `False` instead of crashing.
+
 ### Fixed — Post-UAT-6 SEV-2 batch — 2026-05-27
 
 Closes #107 (licenses enumeration) and #109 (`get_product_info` timeout) — both surfaced by the UAT-6 live operator session against a real Steam account.

@@ -540,6 +540,68 @@ Steam auth-success paths auto-queue a `library_sync` job (best-effort).
 
 ---
 
+## Feature 12: ID2 — Lancache Self-Test
+
+**Phase Built:** 2 (Milestone B, Build Loop 12)
+**Status:** Complete (2026-05-27)
+
+**Summary:** Implements the ID2 implicit-dependency: a self-test that
+exposes `lancache_reachable` on `/api/v1/health` derived from a real
+HTTP probe of the lancache `lancache-heartbeat` endpoint. Replaces the
+BL5 hardcoded `False`. Probe is async, time-bounded (5s timeout
+default), cache-TTL'd (30s default) so /health requests don't hammer
+lancache, and concurrency-safe (asyncio.Lock collapses parallel
+callers onto a single in-flight HTTP request).
+
+**Key Interfaces:**
+  - `src/orchestrator/lancache/__init__.py` — new package marker
+  - `src/orchestrator/lancache/heartbeat.py` — `LancacheProbe` class
+    (`.probe()`, `.last_result()`, `.last_checked_at_mono()`, `.invalidate()`)
+  - `src/orchestrator/api/main.py` lifespan — constructs the probe on
+    boot, stashes on `app.state.lancache_probe`
+  - `src/orchestrator/api/routers/health.py` — `await probe.probe()`
+    per `/health` request; falls back to `False` if probe is absent
+    (e.g., no-lifespan test fixtures)
+  - Settings: `lancache_heartbeat_url`, `lancache_probe_timeout_sec`,
+    `lancache_probe_cache_ttl_sec`
+
+**Locked design decisions:**
+  - **Cache TTL pattern, not polling.** /health is a low-volume endpoint
+    (operator-driven + container HEALTHCHECK every 30s); avoid a
+    background polling task whose lifecycle has to track FastAPI's.
+  - **All failure modes → False.** Connect timeout, read timeout,
+    connect error, non-200, even unexpected exceptions — they all
+    surface as `lancache_reachable: false`. /health only needs the
+    boolean, and the structured log emits the failure cause.
+  - **No DI override of `app.state.lancache_probe` in tests.** The
+    no-lifespan `unit_app` fixture relies on the `getattr(..., None)`
+    fallback in the router; explicit overrides happen via direct
+    `app.state.lancache_probe = stub` assignment (4 tests in
+    `test_health_endpoint.py`).
+
+**Test Coverage:** 16 new tests in `tests/lancache/test_heartbeat.py`
+(initial state, success path, every documented httpx error, TTL cache
+hit/miss/refresh/invalidate, concurrent-probe collapse,
+last_checked_at advancement, URL validation). 4 new tests in
+`tests/api/test_health_endpoint.py` (probe-absent fallback,
+probe-up wiring, probe-down wiring, removal of the now-stale
+"3 stubbed subsystems" assertion). 7 new tests in
+`tests/core/test_settings.py` for the 3 new fields' defaults +
+boundaries. Full suite: 790 pass.
+
+**Related ADRs:**
+  - None new — design lives in FRD ID2 + `docs/phase-1/architecture-proposal.md`
+
+**Known Limitations:**
+  - `/health` still returns 503 because scheduler_running + validator_healthy
+    remain stub-false until those subsystems ship. ID2 alone doesn't flip
+    /health to 200; it makes one of the three "real" instead of stubbed.
+  - The probe's TTL means lancache-down detection latency is up to 30s
+    after the failure starts. Operators who want faster detection can
+    set `ORCH_LANCACHE_PROBE_CACHE_TTL_SEC=5` (or 0 for no caching).
+
+---
+
 ## Feature 13: ID6 — Startup Job Reaper
 
 **Phase Built:** 2 (Milestone B, Build Loop 13)

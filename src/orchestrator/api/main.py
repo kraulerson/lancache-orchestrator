@@ -46,6 +46,7 @@ from orchestrator.db.pool import (
 from orchestrator.jobs.reaper import reap_running_jobs
 from orchestrator.jobs.worker import Deps as JobsDeps
 from orchestrator.jobs.worker import worker_loop as jobs_worker_loop
+from orchestrator.lancache.heartbeat import LancacheProbe
 from orchestrator.platform.steam.client import SteamWorkerClient
 
 if TYPE_CHECKING:
@@ -152,12 +153,26 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         poll_interval_sec=settings.jobs_worker_poll_interval_sec,
     )
 
+    # 5. Lancache self-test probe (ID2). Constructed once; the /health
+    # router calls `.probe()` per request, which is cached + concurrency-safe.
+    app.state.lancache_probe = LancacheProbe(
+        url=settings.lancache_heartbeat_url,
+        timeout_sec=settings.lancache_probe_timeout_sec,
+        cache_ttl_sec=settings.lancache_probe_cache_ttl_sec,
+    )
+    log.info(
+        "api.boot.lancache_probe_initialized",
+        url=settings.lancache_heartbeat_url,
+        timeout_sec=settings.lancache_probe_timeout_sec,
+        cache_ttl_sec=settings.lancache_probe_cache_ttl_sec,
+    )
+
     try:
-        # 5. Boot metadata
+        # 6. Boot metadata
         app.state.boot_time = time.monotonic()
         app.state.git_sha = os.environ.get("GIT_SHA", "unknown")
 
-        # 6. Deployment-hardening warning: surface non-loopback bind at boot.
+        # 7. Deployment-hardening warning: surface non-loopback bind at boot.
         # UAT-3 S2-D: detect non-loopback from any of three signals so an
         # operator running `uvicorn --host 0.0.0.0` from the CLI gets the
         # warning even without ORCH_API_HOST set.

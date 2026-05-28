@@ -73,6 +73,20 @@ class Settings(BaseSettings):
     cache_levels: str = Field(default="2:2", pattern=r"^\d+(:\d+)*$")
     chunk_concurrency: int = Field(default=32, ge=1, le=256)
 
+    # --- Lancache self-test (ID2) -----------------------------------
+    # Heartbeat URL — `http://<lancache>/lancache-heartbeat` returns
+    # 200 + identifier string when the lancache nginx is up. Default
+    # uses the compose service name; deployments where the orchestrator
+    # is co-resident with lancache (DNS bypass) should set this to
+    # `http://127.0.0.1/lancache-heartbeat` or similar.
+    lancache_heartbeat_url: str = Field(
+        default="http://lancache/lancache-heartbeat",
+        min_length=1,
+        max_length=2048,
+    )
+    lancache_probe_timeout_sec: float = Field(default=5.0, gt=0.0, le=60.0)
+    lancache_probe_cache_ttl_sec: float = Field(default=30.0, ge=0.0, le=600.0)
+
     # --- Misc --------------------------------------------------------
     manifest_size_cap_bytes: int = Field(default=134_217_728, gt=0)
     epic_refresh_buffer_sec: int = Field(default=600, ge=0)

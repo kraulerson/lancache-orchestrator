@@ -35,12 +35,52 @@ class TestHealthShipState:
         # populated_pool fixture has healthy pool → status="ok"
         assert body["status"] == "ok"
 
-    async def test_three_stubbed_subsystems_are_false_in_bl5(self, client):
+    async def test_remaining_stubbed_subsystems_are_false(self, client):
+        """scheduler_running + validator_healthy stay stubbed until those
+        subsystems ship. lancache_reachable is now wired to the probe
+        (ID2); the unit_app fixture omits app.state.lancache_probe so it
+        also reports False — exercised by the next test."""
         r = await client.get("/api/v1/health")
         body = r.json()
         assert body["scheduler_running"] is False
-        assert body["lancache_reachable"] is False
         assert body["validator_healthy"] is False
+
+    async def test_lancache_reachable_false_when_probe_absent(self, client):
+        """The unit_app fixture skips lifespan, so app.state.lancache_probe
+        is not set. /health must fall back to False rather than crashing."""
+        r = await client.get("/api/v1/health")
+        assert r.status_code == 503
+        body = r.json()
+        assert body["lancache_reachable"] is False
+
+    async def test_lancache_reachable_true_when_probe_reports_up(self, client):
+        """Inject a stub probe that always returns True; verify /health
+        surfaces the value."""
+
+        class _StubProbe:
+            async def probe(self):
+                return True
+
+        client._transport.app.state.lancache_probe = _StubProbe()
+        try:
+            r = await client.get("/api/v1/health")
+            body = r.json()
+            assert body["lancache_reachable"] is True
+        finally:
+            del client._transport.app.state.lancache_probe
+
+    async def test_lancache_reachable_false_when_probe_reports_down(self, client):
+        class _StubProbe:
+            async def probe(self):
+                return False
+
+        client._transport.app.state.lancache_probe = _StubProbe()
+        try:
+            r = await client.get("/api/v1/health")
+            body = r.json()
+            assert body["lancache_reachable"] is False
+        finally:
+            del client._transport.app.state.lancache_probe
 
 
 class TestHealthDynamicFields:
