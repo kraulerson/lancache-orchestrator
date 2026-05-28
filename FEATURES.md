@@ -722,4 +722,76 @@ handlers. Means a slow library_sync can never block the scheduler.
 
 ---
 
+## Feature 15: F10 — Status Page
+
+**Phase Built:** 2 (Milestone B, Build Loop 15)
+**Status:** Complete (2026-05-28)
+
+**Summary:** Single-file HTML status dashboard at `GET /`. Operator-
+facing summary of system state — Health, Platforms, Active Jobs,
+Library Stats, Recent Errors — polled from existing `/api/v1/*`
+endpoints. Self-contained (no external CSS/JS), works offline on
+LAN-only deployments.
+
+**Key Interfaces:**
+  - `src/orchestrator/api/routers/status.py` — `GET /` returns the
+    embedded HTML+CSS+JS as a single text/html response
+  - `src/orchestrator/api/dependencies.py` — adds `("/", False)` to
+    `AUTH_EXEMPT_PATHS` so the page itself bypasses bearer auth (JS
+    inside the page handles token prompting + storage)
+  - Endpoints the JS polls: `/api/v1/health`, `/api/v1/platforms`,
+    `/api/v1/jobs?state=queued|running|failed`, `/api/v1/games?limit=1`,
+    `/api/v1/manifests?limit=1`
+
+**Locked design decisions (Bible §9.3):**
+  - **Single HTML file** — no separate CSS/JS assets, no Jinja templates,
+    no JS framework. Bundle is ~14 KB raw, ~5.8 KB gzipped (well
+    under the < 20 KB ceiling).
+  - **Bearer in sessionStorage + `prompt()`** — token is held only
+    for the browser tab's lifetime; closes-tab-loses-token by design.
+    FG1 tracks post-MVP HTML-form replacement.
+  - **Color + icon + text label** for every status indicator
+    (Intake §9 colorblind-safe). Text labels: OK / DEGRADED / ERROR /
+    UNKNOWN / IDLE / NONE / N ACTIVE / N FAILED.
+  - **Polling cadence** — fast tier (2 s): health, platforms, active
+    jobs. Slow tier (10 s): library stats, recent errors. Backoff to
+    10 s on 5xx until success returns.
+  - **Security headers** — `Cache-Control: no-store`,
+    `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
+    `Referrer-Policy: no-referrer`, `<meta name="robots" content="noindex,nofollow">`.
+  - **No external dependencies** — explicit regex test rejects any
+    `<script src="http..."/>` or external stylesheet. Operator's
+    lancache LAN may not have internet.
+
+**Test Coverage:** 18 new tests in `tests/api/test_status_router.py`:
+  - Route returns 200 + text/html
+  - Bearer auth exemption
+  - 5 panel IDs present
+  - 5 pill IDs present
+  - Accessibility text labels visible without JS
+  - Size < 60 KB raw / < 20 KB gzipped
+  - No external script/stylesheet sources
+  - All 5 referenced API endpoints present (drift detection)
+
+**Related ADRs:** None new — design lives in PROJECT_BIBLE §9.3.
+
+**Known Limitations:**
+  - **No CSRF protection on `prompt()` token entry.** Reflects Bible's
+    Phase-0 lock that the status page is operator-driven, LAN-only,
+    and bearer rotation is the substitute control. FG1 tracks
+    replacement with HTML form + same-origin gating post-MVP.
+  - **No /stats endpoint yet** — the "Library Stats" panel currently
+    derives counts from `/games?limit=1` and `/manifests?limit=1`
+    (using the `meta.total` field returned by BL7-BL9 paginated
+    endpoints). A dedicated `/stats` endpoint can be added later
+    without changing the page contract.
+  - **No SSE/WebSocket progress** — polling-only per the spec's
+    Post-MVP deferral list.
+  - **Page works only with bearer auth.** Loopback-only endpoints
+    (`/auth/begin`, etc.) are NOT reachable from the page because
+    of the bearer middleware's loopback check on `scope[client]` —
+    that's by design for credential-intake paths.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->

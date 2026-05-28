@@ -32,6 +32,7 @@ from orchestrator.api.routers.health import router as health_router
 from orchestrator.api.routers.jobs import router as jobs_router
 from orchestrator.api.routers.manifests import router as manifests_router
 from orchestrator.api.routers.platforms import router as platforms_router
+from orchestrator.api.routers.status import router as status_router
 from orchestrator.api.routers.sync import router as sync_router
 from orchestrator.core.settings import get_settings
 from orchestrator.db import migrate
@@ -355,6 +356,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(manifests_router)
     app.include_router(sync_router)
+    app.include_router(status_router)
 
     return app
 

@@ -30,6 +30,12 @@ AUTH_EXEMPT_PATHS: tuple[tuple[str, bool], ...] = (
     ("/api/v1/openapi.json", False),
     ("/api/v1/docs", True),
     ("/api/v1/redoc", False),
+    # F10 status page: serves a single HTML file at GET /. The JS in
+    # the page prompts for the bearer + uses it for subsequent API
+    # calls (Bible §9.3). The page fetch itself is unauthenticated;
+    # all data fetches inside it ARE auth-gated by the existing
+    # middleware on /api/v1/* paths.
+    ("/", False),
 )
 
 # Backwards-compatibility view for older imports (just the path strings).

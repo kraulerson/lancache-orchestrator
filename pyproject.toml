@@ -56,6 +56,10 @@ section-order = ["future", "standard-library", "third-party", "first-party", "lo
 # test_logging.py asserts redaction by necessarily including fake credential
 # literals in test inputs; S105/S106 would flood the signal there.
 "tests/core/test_logging.py" = ["S101", "S105", "S106"]
+# F10 status page embeds a single-file HTML+CSS+JS asset as a Python
+# string literal — lines naturally exceed 100 cols. Reformatting would
+# corrupt the HTML structure (CSS selectors, JSX-style attributes).
+"src/orchestrator/api/routers/status.py" = ["E501"]
 
 # --- mypy (strict) ---
 [tool.mypy]
