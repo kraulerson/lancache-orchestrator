@@ -15,21 +15,34 @@ pytestmark = pytest.mark.asyncio
 
 URL = "http://lancache:80/lancache-heartbeat"
 
+# Lancache nginx stamps this header on every response, including the
+# 204 returned by /lancache-heartbeat. Verified against the running
+# `lancachenet/monolithic` image. The probe requires it as positive
+# identification.
+LANCACHE_HEADERS = {"X-LanCache-Processed-By": "test-lancache-host"}
 
-def _ok_response(text: str = "lancache-heartbeat") -> httpx.Response:
-    """Mock a 200 OK heartbeat response."""
+
+def _ok_response(
+    text: str = "",
+    status: int = 204,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """Mock a healthy lancache heartbeat response — 204 No Content with
+    the identifier header (default), matching real lancache behavior."""
     return httpx.Response(
-        status_code=200,
+        status_code=status,
         text=text,
         request=httpx.Request("GET", URL),
+        headers=headers if headers is not None else LANCACHE_HEADERS,
     )
 
 
-def _status_response(status: int) -> httpx.Response:
+def _status_response(status: int, headers: dict[str, str] | None = None) -> httpx.Response:
     return httpx.Response(
         status_code=status,
         text="",
         request=httpx.Request("GET", URL),
+        headers=headers or {},
     )
 
 
@@ -51,15 +64,59 @@ class TestProbeBasics:
         assert probe.last_checked_at_mono() is not None
         assert mock.call_count == 1
 
-    async def test_non_200_returns_false(self):
+    async def test_non_2xx_returns_false(self):
         probe = LancacheProbe(url=URL)
         for status in (301, 302, 400, 401, 403, 404, 500, 502, 503):
-            mock = AsyncMock(return_value=_status_response(status))
+            mock = AsyncMock(return_value=_status_response(status, LANCACHE_HEADERS))
             with patch.object(httpx.AsyncClient, "get", new=mock, create=True):
                 # Fresh probe each iteration so caching doesn't suppress the call.
                 probe = LancacheProbe(url=URL, cache_ttl_sec=0.0)
                 result = await probe.probe()
             assert result is False, f"status={status} should report unreachable"
+
+    async def test_accepts_204_with_identifier_header(self):
+        """Real lancache returns 204 No Content + X-LanCache-Processed-By
+        header — verified against a running lancachenet/monolithic image."""
+        probe = LancacheProbe(url=URL)
+        mock = AsyncMock(return_value=_ok_response(status=204))
+        with patch.object(httpx.AsyncClient, "get", new=mock, create=True):
+            assert await probe.probe() is True
+
+    async def test_accepts_200_with_identifier_header(self):
+        """Some lancache variants return 200; still healthy as long as the
+        identifier header is present."""
+        probe = LancacheProbe(url=URL)
+        mock = AsyncMock(return_value=_ok_response(status=200))
+        with patch.object(httpx.AsyncClient, "get", new=mock, create=True):
+            assert await probe.probe() is True
+
+    async def test_accepts_all_2xx_with_identifier_header(self):
+        probe = LancacheProbe(url=URL, cache_ttl_sec=0.0)
+        for status in (200, 201, 202, 204, 206):
+            mock = AsyncMock(return_value=_ok_response(status=status))
+            with patch.object(httpx.AsyncClient, "get", new=mock, create=True):
+                assert await probe.probe() is True, f"status={status} should be reachable"
+
+    async def test_2xx_without_identifier_header_returns_false(self):
+        """Defends against a misconfigured DNS bypass / wrong target —
+        a generic 2xx-responding service is not lancache."""
+        probe = LancacheProbe(url=URL)
+        mock = AsyncMock(return_value=_status_response(204, headers={}))
+        with patch.object(httpx.AsyncClient, "get", new=mock, create=True):
+            assert await probe.probe() is False
+
+    async def test_header_match_is_case_insensitive(self):
+        """httpx normalizes header lookup; verify the probe handles
+        lower-case + mixed-case header names."""
+        probe = LancacheProbe(url=URL, cache_ttl_sec=0.0)
+        for header_name in (
+            "X-LanCache-Processed-By",
+            "x-lancache-processed-by",
+            "X-LANCACHE-PROCESSED-BY",
+        ):
+            mock = AsyncMock(return_value=_status_response(204, headers={header_name: "host"}))
+            with patch.object(httpx.AsyncClient, "get", new=mock, create=True):
+                assert await probe.probe() is True, f"header={header_name!r}"
 
 
 class TestErrorHandling:

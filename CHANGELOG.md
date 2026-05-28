@@ -19,6 +19,15 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — ID2 lancache probe: real lancache returns 204 with header identifier — 2026-05-28
+
+Surfaced by post-PR-#113 deployment testing against the running `lancachenet/monolithic` image: lancache's `/lancache-heartbeat` endpoint returns **HTTP 204 No Content** (not 200) and identifies itself via the **`X-LanCache-Processed-By`** response header. PR #113's `LancacheProbe._refresh()` strictly checked for 200 → would have reported `lancache_reachable: false` even against a healthy lancache.
+
+- `LancacheProbe` now accepts any 2xx status code AND requires the `X-LanCache-Processed-By` header. The header check is positive identification — defends against misconfigured DNS bypass / wrong target where some other 2xx-responding service would otherwise pass the probe.
+- Headers checked case-insensitively (httpx normalizes lookup).
+- New structured log event: `lancache.probe.missing_identifier_header` (WARN) fires when a 2xx response arrives without the lancache header — helps operators diagnose "responsive endpoint, wrong target."
+- 5 new tests in `tests/lancache/test_heartbeat.py` (204 with header, 200 with header, all-2xx-with-header, 2xx-without-header-rejected, case-insensitive header match). Renamed `test_non_200_returns_false` → `test_non_2xx_returns_false`.
+
 ### Added — ID6 Startup Job Reaper — 2026-05-27
 
 Implements `docs/phase-0/frd.md:649` ID6 — the "startup reaper for abandoned jobs" requirement. Closes the SEV-3 deployment-shape finding F-UAT6-8 (stale `library_sync` jobs surviving container restarts forever).
