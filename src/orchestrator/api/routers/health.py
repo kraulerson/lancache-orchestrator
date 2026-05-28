@@ -67,12 +67,20 @@ async def get_health(
     if probe is not None:
         lancache_reachable = await probe.probe()
 
+    # F12 scheduler. `app.state.scheduler_manager` is built in lifespan
+    # startup; `.running` reads the underlying AsyncIOScheduler. Tests
+    # without lifespan omit the state — fall back to False (BL5-stub-like).
+    scheduler_manager = getattr(request.app.state, "scheduler_manager", None)
+    scheduler_running = False
+    if scheduler_manager is not None:
+        scheduler_running = scheduler_manager.running
+
     body = HealthResponse(
         status="ok" if pool_ok else "degraded",
         version=__version__,
         uptime_sec=int(time.monotonic() - request.app.state.boot_time),
-        # Remaining BL5 stubs — real when scheduler + validator subsystems ship.
-        scheduler_running=False,
+        # Remaining BL5 stub — real when validator subsystem ships.
+        scheduler_running=scheduler_running,
         lancache_reachable=lancache_reachable,
         cache_volume_mounted=cache_volume_mounted,
         validator_healthy=False,

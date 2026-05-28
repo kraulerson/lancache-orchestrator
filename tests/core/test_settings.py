@@ -254,6 +254,26 @@ class TestFieldValidators:
         with pytest.raises(ValidationError):
             Settings(orchestrator_token=VALID_TOKEN, lancache_probe_cache_ttl_sec=-1.0)
 
+    def test_scheduler_enabled_default(self):
+        s = Settings(orchestrator_token=VALID_TOKEN)
+        assert s.scheduler_enabled is True
+
+    def test_scheduler_enabled_can_disable(self):
+        s = Settings(orchestrator_token=VALID_TOKEN, scheduler_enabled=False)
+        assert s.scheduler_enabled is False
+
+    def test_scheduler_library_sync_interval_default_is_6h(self):
+        s = Settings(orchestrator_token=VALID_TOKEN)
+        assert s.scheduler_library_sync_interval_sec == 21600  # 6 * 3600
+
+    def test_scheduler_library_sync_interval_rejects_below_min(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, scheduler_library_sync_interval_sec=30)
+
+    def test_scheduler_library_sync_interval_rejects_above_24h(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, scheduler_library_sync_interval_sec=90000)
+
     def test_pool_readers_zero_rejects(self):
         with pytest.raises(ValidationError):
             Settings(orchestrator_token=VALID_TOKEN, pool_readers=0)

@@ -48,6 +48,7 @@ from orchestrator.jobs.worker import Deps as JobsDeps
 from orchestrator.jobs.worker import worker_loop as jobs_worker_loop
 from orchestrator.lancache.heartbeat import LancacheProbe
 from orchestrator.platform.steam.client import SteamWorkerClient
+from orchestrator.scheduler.manager import SchedulerManager
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -153,6 +154,29 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         poll_interval_sec=settings.jobs_worker_poll_interval_sec,
     )
 
+    # 4b. Scheduler (F12). Registers periodic enqueue callbacks that
+    # insert library_sync rows into the jobs table. The BL11 jobs worker
+    # (started at step 4) actually executes the handlers — the scheduler
+    # only fires cron-style. If start() raises, lifespan catches the
+    # error and continues with scheduler_running=False so /health surfaces
+    # 503 per JQ3.
+    scheduler_manager = SchedulerManager(
+        pool=get_pool(),
+        enabled=settings.scheduler_enabled,
+        library_sync_interval_sec=settings.scheduler_library_sync_interval_sec,
+    )
+    try:
+        await scheduler_manager.start()
+        log.info(
+            "api.boot.scheduler_started",
+            enabled=settings.scheduler_enabled,
+            running=scheduler_manager.running,
+            library_sync_interval_sec=settings.scheduler_library_sync_interval_sec,
+        )
+    except Exception as e:
+        log.critical("api.boot.scheduler_start_failed", reason=str(e)[:200])
+    app.state.scheduler_manager = scheduler_manager
+
     # 5. Lancache self-test probe (ID2). Constructed once; the /health
     # router calls `.probe()` per request, which is cached + concurrency-safe.
     app.state.lancache_probe = LancacheProbe(
@@ -194,7 +218,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         log.info("api.shutdown.starting")
 
-        # Stop the jobs worker FIRST so it isn't still holding pool /
+        # Stop the scheduler FIRST so it doesn't enqueue new work during
+        # teardown. scheduler_manager.shutdown() is idempotent + safe
+        # when the scheduler never started (e.g., scheduler_enabled=False).
+        log.info("api.shutdown.scheduler_stopping")
+        try:
+            await scheduler_manager.shutdown()
+        except Exception as e:
+            log.error("api.shutdown.scheduler_stop_failed", reason=str(e)[:200])
+
+        # Stop the jobs worker NEXT so it isn't still holding pool /
         # steam-client refs when those resources unwind.
         log.info("api.shutdown.jobs_worker_stopping")
         jobs_shutdown.set()
