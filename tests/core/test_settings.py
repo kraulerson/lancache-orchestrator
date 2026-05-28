@@ -537,6 +537,24 @@ class TestBL10SteamWorkerSettings:
         with pytest.raises(ValueError, match="steam_worker_library_enumerate_timeout_sec"):
             Settings()
 
+    def test_steam_worker_manifest_fetch_timeout_default(self, monkeypatch):
+        """BL12: 5-minute default budget for manifest.fetch."""
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        s = Settings()
+        assert s.steam_worker_manifest_fetch_timeout_sec == 300
+
+    def test_steam_worker_manifest_fetch_timeout_rejects_too_low(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        monkeypatch.setenv("ORCH_STEAM_WORKER_MANIFEST_FETCH_TIMEOUT_SEC", "10")
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="steam_worker_manifest_fetch_timeout_sec"):
+            Settings()
+
     def test_steam_worker_max_restart_attempts_rejects_negative(self, monkeypatch):
         monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
         monkeypatch.setenv("ORCH_STEAM_WORKER_MAX_RESTART_ATTEMPTS", "-1")

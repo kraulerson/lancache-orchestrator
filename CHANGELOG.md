@@ -19,6 +19,23 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — BL12 Steam Manifest Fetcher (F1 milestone 3/3) — 2026-05-28
+
+Implements BL12 from PROJECT_BIBLE §1.2 MVP cutline — the final F1 milestone. Fetches the operator's owned depot manifests for a single Steam app via the worker subprocess's Steam CDN client and upserts the `manifests` table, recording version, chunk count, total bytes, and the raw compressed manifest BLOB. Unblocks the F7 validator (which deserializes the stored BLOB inside the worker venv).
+
+- New `manifest_fetch` job kind. Migration [`0002_jobs_kind_manifest_fetch.sql`](src/orchestrator/db/migrations/0002_jobs_kind_manifest_fetch.sql) extends the `jobs.kind` CHECK constraint (SQLite can't ALTER a CHECK in place — uses the snapshot→drop→recreate→restore recipe with a regex-clean expected-tables set).
+- New [`src/orchestrator/jobs/handlers/manifest_fetch.py`](src/orchestrator/jobs/handlers/manifest_fetch.py) — `manifest_fetch_handler`. Looks up `app_id` from `games`, calls `steam_client.manifest_fetch(app_id)`, UPSERTs each returned depot manifest `ON CONFLICT(game_id, version)`, and sets `games.size_bytes` to the SUM of manifest `total_bytes` (full install size across depots). Re-fetch of the same `manifest_gid` is idempotent; a new gid adds a historical row.
+- New worker IPC op `manifest.fetch` in [`src/orchestrator/platform/steam/worker.py`](src/orchestrator/platform/steam/worker.py) — lazily constructs a `CDNClient`, calls `cdn.get_manifests(app_id, branch="public")`, and returns `{manifests: [{depot_id, manifest_gid, name, total_bytes, chunk_count, raw_b64}, ...]}`. Per spike-A3, the raw manifest is serialized via protobuf `.serialize()` (NOT pickle — `CDNDepotManifest` holds an unpicklable `cdn_client` back-reference), then zstd-compressed and base64-encoded.
+- New [`src/orchestrator/api/routers/manifest_trigger.py`](src/orchestrator/api/routers/manifest_trigger.py) — `POST /api/v1/games/{game_id}/manifest/fetch`. Handler-side dedup of in-flight jobs (race-tolerant per P8); 202 + `job_id`, 400 non-steam, 404 unknown game, 503 on `PoolError`.
+- `client.manifest_fetch(app_id)` method + per-op `manifest.fetch` timeout override on `SteamWorkerClient`.
+- `NotAuthenticated` from the worker flips `platforms.auth_status='expired'` before re-raising (mirrors the BL11 F-UAT6-3 fix), so an expired session surfaces in `/platforms`.
+- Anomaly guard: a single manifest BLOB exceeding `Settings.manifest_size_cap_bytes` (default 128 MiB) raises rather than storing — defends against a malformed/hostile CDN response.
+- 35 new tests: 13 handler (`tests/jobs/test_manifest_fetch_handler.py`), 9 router (`tests/api/test_manifest_trigger_router.py`), settings bounds (`tests/core/test_settings.py`), client IPC round-trip (`tests/platform/steam/test_client_unit.py`), migration runner coverage. Full suite: 874 pass.
+
+### Data Model — `jobs.kind` adds `manifest_fetch` (migration 0002) — 2026-05-28
+
+`jobs.kind` CHECK constraint extended from `('prefill','validate','library_sync','auth_refresh','sweep')` to additionally allow `'manifest_fetch'`. Forward-only; the recipe preserves all existing rows and recreates the four `idx_jobs_*` indexes identically to 0001. Rollback: restore from backup (no down-migration — STRICT table CHECK changes are not reversible without a data round-trip). CHECKSUMS manifest pinned for supply-chain tamper detection.
+
 ### Added — F10 Status Page — 2026-05-28
 
 Implements F10 from PROJECT_BIBLE §1.2 + §9.3. Single-file HTML status dashboard at `GET /`. Operator-facing summary of system state — Health, Platforms, Active Jobs, Library Stats, Recent Errors — polled from the existing `/api/v1/*` endpoints.

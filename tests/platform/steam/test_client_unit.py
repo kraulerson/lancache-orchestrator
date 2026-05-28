@@ -307,6 +307,37 @@ class TestWorkerEnvForSessionDir:
         assert env["ORCH_STEAM_SESSION_DIR"] == "/data/orchestrator/steam_session_custom"
 
 
+class TestManifestFetch:
+    """BL12: SteamWorkerClient.manifest_fetch() round-trips the IPC op."""
+
+    async def test_returns_manifests_list(self):
+        from orchestrator.platform.steam.client import SteamWorkerClient
+
+        client = SteamWorkerClient.__new__(SteamWorkerClient)
+        client._writer = _StubWriter()
+        client._pending = {}
+        client._timeout = 5.0
+        client._op_timeout_overrides = {"manifest.fetch": 300.0}
+
+        async def round_trip():
+            msg_id = await client._send("manifest.fetch", {"app_id": 730})
+            line = (
+                b'{"msg_id":"'
+                + msg_id.encode()
+                + b'","ok":true,"result":{"manifests":['
+                + b'{"depot_id":731,"manifest_gid":42,"name":"x",'
+                + b'"total_bytes":100,"chunk_count":5,"raw_b64":"AAAA"}'
+                + b"]}}\n"
+            )
+            await client._on_response_line(line)
+            return await client._await_response(msg_id, timeout=300.0)
+
+        result = await round_trip()
+        assert "manifests" in result
+        assert len(result["manifests"]) == 1
+        assert result["manifests"][0]["depot_id"] == 731
+
+
 class TestPerOpTimeoutOverride:
     """Issue #109: library.enumerate must use the long-running timeout
     (steam_worker_library_enumerate_timeout_sec) instead of the default

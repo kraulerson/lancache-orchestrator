@@ -794,4 +794,82 @@ LAN-only deployments.
 
 ---
 
+## Feature 16: BL12 — Steam Manifest Fetcher (F1 milestone 3/3)
+
+**Phase Built:** 2 (Milestone B, Build Loop 12)
+**Status:** Complete (2026-05-28)
+
+**Summary:** Final F1 milestone. Fetches the operator's owned depot
+manifests for a single Steam app and upserts the `manifests` table.
+A `manifest_fetch` job calls the steam-worker subprocess's new
+`manifest.fetch` IPC op (CDN client → `get_manifests`), which serializes
+each manifest as raw protobuf, zstd-compresses, and base64-encodes it;
+the handler stores the bytes as an opaque BLOB and sets `games.size_bytes`
+to the sum of depot total_bytes. A `POST /api/v1/games/{game_id}/manifest/fetch`
+endpoint provides operator-driven fetches with handler-side dedup of
+in-flight jobs. Unblocks the F7 validator, which deserializes the stored
+BLOB inside the worker venv.
+
+**Key Interfaces:**
+  - `src/orchestrator/db/migrations/0002_jobs_kind_manifest_fetch.sql` —
+    extends `jobs.kind` CHECK to include `manifest_fetch`
+  - `src/orchestrator/jobs/handlers/manifest_fetch.py` —
+    `manifest_fetch_handler` (UPSERT `ON CONFLICT(game_id, version)`,
+    `games.size_bytes` = SUM total_bytes)
+  - `src/orchestrator/jobs/handlers/__init__.py` — registers the handler
+  - `src/orchestrator/platform/steam/worker.py` —
+    `_handle_manifest_fetch` IPC op + lazy `CDNClient`
+  - `src/orchestrator/platform/steam/client.py` — `manifest_fetch()`
+    method + `manifest.fetch` per-op timeout override
+  - `src/orchestrator/api/routers/manifest_trigger.py` — trigger endpoint
+  - `src/orchestrator/core/settings.py` —
+    `steam_worker_manifest_fetch_timeout_sec` (default 300, 30..3600)
+
+**Locked decisions (spike-A3 + plan):**
+  - **`.serialize()` raw protobuf, not pickle** — `CDNDepotManifest`
+    holds a `cdn_client` back-reference (requests.Session / GPool /
+    LRUCache) that is unpicklable. Spike-A3 confirmed `.serialize()`
+    yields stable raw protobuf bytes the F7 validator can re-parse.
+  - **Orchestrator never deserializes the BLOB** (ADR-0013 D14) —
+    raw manifest is opaque at the orchestrator layer; only the worker
+    venv touches steam-next types.
+  - **`games.size_bytes` = SUM of depot total_bytes** (full install
+    size across depots), set only when ≥1 manifest upserts.
+  - **Handler-side dedup, race-tolerant** (P8) — concurrent POSTs may
+    yield one extra queued row; the UPSERT handler is idempotent.
+  - **Size-cap anomaly guard** — a single BLOB over
+    `manifest_size_cap_bytes` (128 MiB) raises rather than storing.
+  - **`NotAuthenticated` flips `platforms.auth_status='expired'`**
+    before re-raising (mirrors BL11 F-UAT6-3).
+
+**Test Coverage:** 35 new tests:
+  - `tests/jobs/test_manifest_fetch_handler.py` (13) — happy paths
+    (single + multi-depot + size_bytes sum + opaque BLOB), idempotency
+    (re-fetch same gid upserts, new gid adds row), error paths
+    (non-steam, no game_id, unknown game, non-numeric app_id, missing
+    steam_client, NotAuthenticated marks expired), size-cap guard,
+    skipped/empty entries
+  - `tests/api/test_manifest_trigger_router.py` (9) — queue 202, dedup,
+    distinct games, post-finished new job, 404, 400 non-steam, auth
+    boundary, 503 PoolError
+  - `tests/core/test_settings.py` — timeout default + bounds
+  - `tests/platform/steam/test_client_unit.py` — `manifest_fetch`
+    IPC round-trip + timeout override
+
+**Related ADRs:**
+  - ADR-0013 — Steam-next subprocess isolation (inherited; D14 covers
+    the opaque-BLOB boundary). No new ADR — the `.serialize()` decision
+    is captured in `spikes/spike_a3_steam_manifest.md`.
+
+**Known Limitations:**
+  - Live manifest fetch (real CDN interaction) deferred to UAT — the
+    assistant cannot drive interactive Steam login / 2FA.
+  - Single-depot-failure granularity: an entry missing required fields
+    is skipped with a WARN; a single oversized BLOB fails the whole job
+    (anomaly guard). No partial-success job state.
+  - Branch (`public` only) — non-default branches / beta passwords not
+    yet supported. Adequate for the F1 owned-library cutline.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->

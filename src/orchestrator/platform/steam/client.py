@@ -93,6 +93,7 @@ class SteamWorkerClient:
         # back to `self._timeout`.
         self._op_timeout_overrides: dict[str, float] = {
             "library.enumerate": float(settings.steam_worker_library_enumerate_timeout_sec),
+            "manifest.fetch": float(settings.steam_worker_manifest_fetch_timeout_sec),
         }
         self._max_restart_attempts = settings.steam_worker_max_restart_attempts
         self._restart_attempts = 0
@@ -190,6 +191,15 @@ class SteamWorkerClient:
         Raises `SteamWorkerError(kind='NotAuthenticated')` if no Steam session.
         """
         return await self._send_and_await("library.enumerate", {})
+
+    async def manifest_fetch(self, app_id: int) -> dict[str, Any]:
+        """Ask the worker to fetch all depot manifests for a Steam app (BL12).
+
+        Returns `{"manifests": [{depot_id, manifest_gid, name, total_bytes,
+        chunk_count, raw_b64}, ...]}`. Raises `SteamWorkerError(kind=
+        'NotAuthenticated')` if no Steam session.
+        """
+        return await self._send_and_await("manifest.fetch", {"app_id": app_id})
 
     # --- internals -----------------------------------------------------
 
