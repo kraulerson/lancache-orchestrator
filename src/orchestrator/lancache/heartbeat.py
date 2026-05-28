@@ -25,6 +25,16 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+# Lancache nginx identifies itself with this header on EVERY response,
+# including the /lancache-heartbeat 204. Verified against lancache.net's
+# `lancachenet/monolithic` image at v3.x. We require the header (not
+# just any 2xx) so a misconfigured DNS bypass pointing at a different
+# server can't accidentally look "reachable". Surfaced by post-PR-#113
+# deployment testing where the bare-2xx check passed against a real
+# lancache returning 204 but would have also passed against any other
+# 2xx-responding service.
+LANCACHE_IDENTIFIER_HEADER = "X-LanCache-Processed-By"
+
 
 class LancacheProbe:
     """Cached async HTTP probe of `GET <url>` for lancache reachability.
@@ -102,7 +112,22 @@ class LancacheProbe:
         try:
             async with httpx.AsyncClient(timeout=self._timeout_sec) as client:
                 response = await client.get(self._url)
-                ok = response.status_code == 200
+                # Lancache nginx returns 204 No Content on the heartbeat
+                # endpoint (verified against the running lancachenet/
+                # monolithic image). Accept any 2xx and require the
+                # `X-LanCache-Processed-By` header so the probe doesn't
+                # call a non-lancache service "reachable" by accident.
+                ok = (
+                    200 <= response.status_code < 300
+                    and LANCACHE_IDENTIFIER_HEADER in response.headers
+                )
+                if not ok and 200 <= response.status_code < 300:
+                    _log.warning(
+                        "lancache.probe.missing_identifier_header",
+                        url=self._url,
+                        status_code=response.status_code,
+                        header=LANCACHE_IDENTIFIER_HEADER,
+                    )
         except (
             httpx.ConnectTimeout,
             httpx.ReadTimeout,
