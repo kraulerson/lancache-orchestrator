@@ -566,3 +566,32 @@ class TestJobsPoolFailure:
         )
         assert r.status_code == 503
         assert r.json() == {"detail": "database unavailable"}
+
+
+def test_job_response_accepts_all_db_job_kinds():
+    """UAT-9 regression: the /jobs response model dropped manifest_fetch rows
+    (its kind Literal was stale), silently hiding them from the API. The
+    model's allowed kinds must match the jobs.kind DB CHECK constraint."""
+    from orchestrator.api.routers.jobs import JobResponse
+
+    for kind in (
+        "prefill",
+        "validate",
+        "library_sync",
+        "auth_refresh",
+        "sweep",
+        "manifest_fetch",
+    ):
+        JobResponse(
+            id=1,
+            kind=kind,
+            game_id=None,
+            platform="steam",
+            state="queued",
+            progress=None,
+            source="api",
+            started_at=None,
+            finished_at=None,
+            error=None,
+            payload=None,
+        )

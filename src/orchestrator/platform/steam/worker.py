@@ -261,11 +261,30 @@ def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
         if _cdn_client is None:
             _cdn_client = CDNClient(_client)
 
-        manifests = _cdn_client.get_manifests(app_id, branch="public")
+        # NOTE (UAT-9): we deliberately do NOT call CDNClient.get_manifests().
+        # steam-next 1.4.4 assumes depot_info["manifests"][branch] is a bare
+        # gid string and does int() on it; current Steam returns a dict
+        # ({"gid","size","download"}), so the library raises
+        # "int() argument ... not 'dict'". We replicate the enumeration with
+        # a dict-aware gid extractor (enumerate.manifest_gids_for_app) and
+        # fetch each depot manifest ourselves, skipping depots we can't
+        # access (unowned/shared) rather than failing the whole job.
+        depots = _cdn_client.get_app_depot_info(app_id)
+        depot_gids = enumerate_module.manifest_gids_for_app(depots, "public")
         compressor = _zstd.ZstdCompressor(level=3)
 
         payload: list[dict[str, Any]] = []
-        for mfst in manifests:
+        skipped: list[dict[str, Any]] = []
+        for depot_id, gid in depot_gids:
+            try:
+                code = _cdn_client.get_manifest_request_code(app_id, depot_id, gid)
+                mfst = _cdn_client.get_manifest(
+                    app_id, depot_id, gid, decrypt=True, manifest_request_code=code
+                )
+            except Exception as e:
+                skipped.append({"depot_id": depot_id, "reason": f"{type(e).__name__}: {e}"[:120]})
+                continue
+
             data = mfst.serialize()  # raw protobuf bytes
             compressed = compressor.compress(data)
 
@@ -276,25 +295,22 @@ def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
             blob_path = _blob_temp_path("manifest")
             blob_path.write_bytes(compressed)
 
-            # Sum chunk counts across all file mappings.
             chunk_count = 0
             for mapping in mfst.payload.mappings:
                 chunk_count += len(mapping.chunks)
-
-            total_bytes = int(mfst.metadata.cb_disk_original or 0)
 
             payload.append(
                 {
                     "depot_id": int(mfst.depot_id),
                     "manifest_gid": int(mfst.gid),
-                    "name": str(mfst.name or ""),
-                    "total_bytes": total_bytes,
+                    "name": str(getattr(mfst, "name", "") or ""),
+                    "total_bytes": int(mfst.metadata.cb_disk_original or 0),
                     "chunk_count": chunk_count,
                     "raw_path": str(blob_path),
                 }
             )
 
-        _ok(msg_id, {"manifests": payload})
+        _ok(msg_id, {"manifests": payload, "skipped": skipped})
     except Exception as e:
         _err(msg_id, "SteamAPIError", str(e)[:200])
 

@@ -180,3 +180,49 @@ def enumerate_apps(
         resp = client.get_product_info(apps=batch)
         out.extend(_extract_app_metadata(resp, batch))
     return out
+
+
+def extract_manifest_gid(entry: Any) -> int | None:
+    """Extract a manifest gid from a depot's ``manifests[branch]`` entry.
+
+    Steam-next 1.4.4's ``CDNClient.get_manifests`` assumes this entry is a
+    bare gid string and does ``int(entry)``. Current Steam returns it as a
+    dict — ``{"gid": "...", "size": "...", "download": "..."}`` — so the
+    library raises ``int() argument ... not 'dict'`` (surfaced live in
+    UAT-9). Handle both the legacy string form and the dict form. Returns
+    the gid as int, or ``None`` if absent/unparseable.
+    """
+    if isinstance(entry, dict):
+        entry = entry.get("gid")
+    if entry is None:
+        return None
+    try:
+        return int(entry)
+    except (TypeError, ValueError):
+        return None
+
+
+def manifest_gids_for_app(depots: Any, branch: str = "public") -> list[tuple[int, int]]:
+    """From ``CDNClient.get_app_depot_info()`` output, return
+    ``[(depot_id, manifest_gid)]`` for depots that publish a manifest on
+    ``branch``.
+
+    Skips non-depot keys (``branches``, ``baselanguages``, etc.), depots
+    with no ``manifests`` mapping (e.g. ``depotfromapp`` shared depots), and
+    entries with no/unparseable gid for the branch. Pure — no network — so
+    it is unit-testable without a Steam session.
+    """
+    out: list[tuple[int, int]] = []
+    if not isinstance(depots, dict):
+        return out
+    for key, info in depots.items():
+        if not str(key).isdigit() or not isinstance(info, dict):
+            continue
+        manifests = info.get("manifests")
+        if not isinstance(manifests, dict):
+            continue
+        gid = extract_manifest_gid(manifests.get(branch))
+        if gid is None:
+            continue
+        out.append((int(key), gid))
+    return out
