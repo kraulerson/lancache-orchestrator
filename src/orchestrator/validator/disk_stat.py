@@ -69,7 +69,15 @@ def _stat_batch(paths: list[Path]) -> tuple[int, int]:
             # A symlink is never a genuine cache file — don't follow it.
             if p.is_symlink():
                 continue
-            if p.stat().st_size > 0:
+            st = p.stat()
+            # F5/#128: lancache (www-data, the file owner) must be able to
+            # READ the file to serve it. ~1.7% of cache files are mode-000 —
+            # they exist with size>0 but are unreadable, so lancache returns
+            # 500 + re-downloads. Require the owner-read bit so those don't
+            # count as cached. stat() returns st_mode without needing read
+            # access to the content, so this works even though the
+            # orchestrator (uid 1000) can't open www-data:600 files itself.
+            if st.st_size > 0 and (st.st_mode & 0o400):
                 cached += 1
         except FileNotFoundError:
             pass  # plain cache miss — expected, not an error

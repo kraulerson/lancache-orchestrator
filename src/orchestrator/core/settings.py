@@ -74,7 +74,19 @@ class Settings(BaseSettings):
     # F7: nginx $cacheidentifier for Steam traffic (the lancache map sets
     # this to the literal "steam"). Part of the cache-key md5 input.
     steam_cache_identifier: str = "steam"
+    # Prefill (F5) chunk-download concurrency. Pre-staged generic name; F5
+    # uses it as the per-game parallel-chunk cap.
     chunk_concurrency: int = Field(default=32, ge=1, le=256)
+
+    # --- F5 Steam prefill -------------------------------------------
+    # Prefill streams depot chunks THROUGH the lancache so they get cached
+    # under the key F7 validates (spike A5). Target the lancache; override
+    # the Host + UA so nginx classifies the request as `steam`.
+    lancache_base_url: str = "http://127.0.0.1"
+    steam_cdn_host: str = "lancache.steamcontent.com"
+    prefill_user_agent: str = "Valve/Steam HTTP Client 1.0"
+    prefill_chunk_timeout_sec: float = Field(default=10.0, gt=0.0, le=120.0)
+    prefill_chunk_max_attempts: int = Field(default=3, ge=1, le=10)
 
     # --- Lancache self-test (ID2) -----------------------------------
     # Heartbeat URL — `http://<lancache>/lancache-heartbeat` returns

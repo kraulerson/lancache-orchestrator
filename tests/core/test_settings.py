@@ -589,6 +589,28 @@ class TestBL10SteamWorkerSettings:
         get_settings.cache_clear()
         assert Settings().steam_cache_identifier == "steam"
 
+    def test_prefill_defaults(self, monkeypatch):
+        """F5 prefill config defaults."""
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        s = Settings()
+        assert s.lancache_base_url == "http://127.0.0.1"
+        assert s.steam_cdn_host == "lancache.steamcontent.com"
+        assert s.prefill_user_agent == "Valve/Steam HTTP Client 1.0"
+        assert s.chunk_concurrency == 32  # reused pre-staged field for prefill
+        assert s.prefill_chunk_timeout_sec == 10.0
+        assert s.prefill_chunk_max_attempts == 3
+
+    def test_prefill_chunk_max_attempts_bounds(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="prefill_chunk_max_attempts"):
+            Settings(prefill_chunk_max_attempts=0)
+
     def test_manifest_expand_timeout_default(self, monkeypatch):
         """F7: 2-minute default budget for the offline manifest.expand op."""
         monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
