@@ -359,3 +359,47 @@ class TestEnumerateApps:
     def test_default_batch_size_constant(self):
         # Sanity: 50 packages per call balances Steam's 15s job timeout vs round-trip count
         assert DEFAULT_BATCH_SIZE == 50
+
+
+class TestManifestGidExtraction:
+    """UAT-9: steam-next 1.4.4 chokes on the dict-form manifests[branch]
+    entry. Our dict-aware extractor must handle both forms."""
+
+    def test_legacy_string_gid(self):
+        from orchestrator.platform.steam.enumerate import extract_manifest_gid
+
+        assert extract_manifest_gid("7611933945298954112") == 7611933945298954112
+
+    def test_dict_form_gid(self):
+        from orchestrator.platform.steam.enumerate import extract_manifest_gid
+
+        entry = {"gid": "7611933945298954112", "size": "123", "download": "45"}
+        assert extract_manifest_gid(entry) == 7611933945298954112
+
+    def test_none_and_unparseable(self):
+        from orchestrator.platform.steam.enumerate import extract_manifest_gid
+
+        assert extract_manifest_gid(None) is None
+        assert extract_manifest_gid({}) is None
+        assert extract_manifest_gid({"gid": None}) is None
+        assert extract_manifest_gid("not-a-number") is None
+
+    def test_manifest_gids_for_app_filters_and_extracts(self):
+        from orchestrator.platform.steam.enumerate import manifest_gids_for_app
+
+        depots = {
+            "branches": {"public": {"buildid": "1"}},  # non-depot key, skipped
+            "baselanguages": "english",  # non-depot, skipped
+            "529341": {"manifests": {"public": {"gid": "100", "size": "1"}}},
+            "529345": {"manifests": {"public": "200"}},  # legacy string form
+            "529346": {"manifests": {"beta": {"gid": "300"}}},  # no public, skipped
+            "529347": {"depotfromapp": "228980"},  # shared depot, no manifests
+        }
+        result = manifest_gids_for_app(depots, "public")
+        assert sorted(result) == [(529341, 100), (529345, 200)]
+
+    def test_manifest_gids_for_app_non_dict(self):
+        from orchestrator.platform.steam.enumerate import manifest_gids_for_app
+
+        assert manifest_gids_for_app(None) == []
+        assert manifest_gids_for_app([]) == []
