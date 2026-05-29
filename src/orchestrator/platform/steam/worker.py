@@ -16,9 +16,11 @@ from steam import monkey  # type: ignore[import-not-found]
 
 monkey.patch_minimal()
 
+import contextlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import sys  # noqa: E402
+import tempfile  # noqa: E402
 import time  # noqa: E402
 import uuid  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -67,6 +69,17 @@ def _ok(msg_id: str, result: dict[str, Any]) -> None:
 
 def _err(msg_id: str, kind: str, message: str = "") -> None:
     _send({"msg_id": msg_id, "ok": False, "error": {"kind": kind, "message": message}})
+
+
+def _blob_temp_path(prefix: str) -> Path:
+    """A unique temp-file path on the shared container FS for a manifest BLOB.
+
+    The worker and orchestrator run in the same container, so a path under
+    the system temp dir is readable by both. Used to hand off manifest BLOBs
+    out-of-band (S2-1) instead of stuffing them into the IPC line.
+    """
+    tmp_dir = Path(tempfile.gettempdir())
+    return tmp_dir / f"orch-{prefix}-{uuid.uuid4().hex}.zst"
 
 
 def _ensure_client(credential_dir: str | None = None) -> SteamClient:
@@ -242,8 +255,6 @@ def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
         # Steam-next imports inside the handler so module-import time
         # doesn't trigger any CDN-related network calls or thread-pool
         # allocation — they happen only when manifest.fetch is invoked.
-        import base64 as _base64
-
         import zstandard as _zstd  # type: ignore[import-not-found]
         from steam.client.cdn import CDNClient  # type: ignore[import-not-found]
 
@@ -257,7 +268,13 @@ def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
         for mfst in manifests:
             data = mfst.serialize()  # raw protobuf bytes
             compressed = compressor.compress(data)
-            raw_b64 = _base64.b64encode(compressed).decode("ascii")
+
+            # S2-1: write the BLOB to a temp file on the shared container FS
+            # and send its PATH, not the bytes. A 50+ depot game's combined
+            # base64 response would otherwise exceed the 10 MiB IPC line cap
+            # and kill the worker. The orchestrator reads + deletes the file.
+            blob_path = _blob_temp_path("manifest")
+            blob_path.write_bytes(compressed)
 
             # Sum chunk counts across all file mappings.
             chunk_count = 0
@@ -273,7 +290,7 @@ def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
                     "name": str(mfst.name or ""),
                     "total_bytes": total_bytes,
                     "chunk_count": chunk_count,
-                    "raw_b64": raw_b64,
+                    "raw_path": str(blob_path),
                 }
             )
 
@@ -292,18 +309,19 @@ def _handle_manifest_expand(msg_id: str, params: dict[str, str]) -> None:
 
     Chunk SHAs are deduped: the same chunk can appear in multiple file
     mappings (Steam content dedup), but in the cache it is one file.
+
+    S2-2: the orchestrator writes the stored BLOB to a temp file and sends
+    its PATH (not ~170 MB of base64 over stdin). We read, then delete it.
     """
-    raw_b64 = params.get("raw_b64")
-    if not raw_b64:
-        _err(msg_id, "InvalidArgument", "manifest.expand requires raw_b64")
+    raw_path = params.get("raw_path")
+    if not raw_path:
+        _err(msg_id, "InvalidArgument", "manifest.expand requires raw_path")
         return
     try:
-        import base64 as _base64
-
         import zstandard as _zstd
         from steam.core.manifest import DepotManifest  # type: ignore[import-not-found]
 
-        compressed = _base64.b64decode(raw_b64)
+        compressed = Path(raw_path).read_bytes()
         data = _zstd.ZstdDecompressor().decompress(compressed)
         mfst = DepotManifest(data)
 
@@ -315,6 +333,11 @@ def _handle_manifest_expand(msg_id: str, params: dict[str, str]) -> None:
         _ok(msg_id, {"depot_id": int(mfst.depot_id), "chunk_shas": list(seen)})
     except Exception as e:
         _err(msg_id, "ManifestParseError", f"{type(e).__name__}: {e}"[:200])
+    finally:
+        # The orchestrator produced this temp file; the worker (consumer)
+        # deletes it after reading.
+        with contextlib.suppress(OSError):
+            Path(raw_path).unlink()
 
 
 _HANDLERS = {

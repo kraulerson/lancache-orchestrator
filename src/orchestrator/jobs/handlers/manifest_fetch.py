@@ -13,8 +13,10 @@ inside the worker venv.
 
 Per spike-A3 (`spikes/spike_a3_steam_manifest.md`):
 - IPC contract: worker returns `{manifests: [{depot_id, manifest_gid,
-  name, total_bytes, chunk_count, raw_b64}, ...]}` — one entry per
-  depot for the requested app_id.
+  name, total_bytes, chunk_count, raw_path}, ...]}` — one entry per
+  depot for the requested app_id. `raw_path` is a temp file on the
+  shared container FS (S2-1: avoids the 10 MiB IPC line cap); this
+  handler reads, stores, and deletes it.
 - Schema: UPSERT ON CONFLICT(game_id, version) — re-fetch is
   idempotent; new manifest_gid creates a new row, old version stays
   in the table as historical record.
@@ -24,7 +26,8 @@ Per spike-A3 (`spikes/spike_a3_steam_manifest.md`):
 
 from __future__ import annotations
 
-import base64
+import contextlib
+import os
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -35,6 +38,13 @@ if TYPE_CHECKING:
     from orchestrator.jobs.worker import Deps
 
 _log = structlog.get_logger(__name__)
+
+
+def _safe_unlink(path: str) -> None:
+    """Best-effort delete of a worker BLOB temp file (idempotent)."""
+    with contextlib.suppress(OSError):
+        os.unlink(path)
+
 
 _UPSERT_SQL = (
     "INSERT INTO manifests "
@@ -130,14 +140,18 @@ async def manifest_fetch_handler(job: dict[str, Any], deps: Deps) -> None:
         gid = m.get("manifest_gid")
         total_bytes = m.get("total_bytes")
         chunk_count = m.get("chunk_count")
-        raw_b64 = m.get("raw_b64")
+        # S2-1: the worker writes the compressed BLOB to a temp file on the
+        # shared container FS and sends its path (not the bytes) to avoid the
+        # 10 MiB IPC line cap on large multi-depot responses. We read it,
+        # store it, and delete it.
+        raw_path = m.get("raw_path")
 
         if (
             depot_id is None
             or gid is None
             or total_bytes is None
             or chunk_count is None
-            or not raw_b64
+            or not raw_path
         ):
             _log.warning(
                 "manifest_fetch.skipped_entry",
@@ -148,21 +162,26 @@ async def manifest_fetch_handler(job: dict[str, Any], deps: Deps) -> None:
             continue
 
         try:
-            raw_bytes = base64.b64decode(raw_b64)
-        except (ValueError, TypeError) as e:
+            file_size = os.path.getsize(raw_path)
+            if file_size > cap:
+                # Unlink before raising so the oversized temp file isn't leaked.
+                _safe_unlink(raw_path)
+                raise ValueError(
+                    f"manifest depot_id={depot_id} gid={gid} exceeds size cap "
+                    f"({file_size} > {cap} bytes)"
+                )
+            with open(raw_path, "rb") as fh:
+                raw_bytes = fh.read()
+        except FileNotFoundError:
             _log.warning(
                 "manifest_fetch.skipped_entry",
                 job_id=job_id,
-                reason=f"base64 decode failed: {type(e).__name__}",
+                reason="blob temp file missing",
                 depot_id=depot_id,
             )
             continue
-
-        if len(raw_bytes) > cap:
-            raise ValueError(
-                f"manifest depot_id={depot_id} gid={gid} exceeds size cap "
-                f"({len(raw_bytes)} > {cap} bytes)"
-            )
+        finally:
+            _safe_unlink(raw_path)
 
         await deps.pool.execute_write(
             _UPSERT_SQL,

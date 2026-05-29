@@ -62,10 +62,38 @@ def cache_path(cache_root: Path, h: str, levels: str) -> Path:
     """
     if not _HEX32_RE.match(h):
         raise ValueError(f"expected 32-char md5 hex, got {h!r}")
-    widths = [int(x) for x in levels.split(":")]
+    widths = parse_levels(levels)
     parts: list[str] = []
     end = len(h)
     for w in widths:
         parts.append(h[end - w : end])
         end -= w
-    return cache_root.joinpath(*parts, h)
+    result = cache_root.joinpath(*parts, h)
+    # D8 path-containment backstop: the segments are slices of validated
+    # hex so escape is structurally impossible, but assert it anyway to
+    # catch any future refactor that lets a non-hex segment through.
+    if not result.is_relative_to(cache_root):
+        raise ValueError(f"computed cache path {result} escapes root {cache_root}")
+    return result
+
+
+def parse_levels(levels: str) -> list[int]:
+    """Parse an nginx ``levels`` string into width ints, validating bounds.
+
+    Each width must be >= 1 and the total must not exceed 32 (the md5 hex
+    length) — otherwise the directory slicing would silently wrap/produce
+    garbage paths (bug A). Raises ``ValueError`` on any malformed value.
+    """
+    if not levels:
+        raise ValueError("cache_levels must be non-empty (e.g. '2:2')")
+    try:
+        widths = [int(x) for x in levels.split(":")]
+    except ValueError as e:
+        raise ValueError(f"cache_levels has a non-integer width: {levels!r}") from e
+    if any(w < 1 for w in widths):
+        raise ValueError(f"cache_levels widths must each be >= 1: {levels!r}")
+    if sum(widths) > 32:
+        raise ValueError(
+            f"cache_levels widths sum to {sum(widths)} > 32 (md5 hex length): {levels!r}"
+        )
+    return widths

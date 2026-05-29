@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import tempfile
 import uuid
 from typing import Any
 
@@ -205,15 +206,23 @@ class SteamWorkerClient:
     async def manifest_expand(self, raw: bytes) -> dict[str, Any]:
         """Deserialize a stored manifest BLOB in the worker venv (F7).
 
-        Offline — no Steam session required. `raw` is the
-        `zstd(protobuf)` bytes stored in `manifests.raw`. Returns
-        `{"depot_id": int, "chunk_shas": [hex, ...]}` (deduped).
-        """
-        import base64
+        Offline — no Steam session required. `raw` is the `zstd(protobuf)`
+        bytes stored in `manifests.raw`. Returns `{"depot_id": int,
+        "chunk_shas": [hex, ...]}` (deduped).
 
-        return await self._send_and_await(
-            "manifest.expand", {"raw_b64": base64.b64encode(raw).decode("ascii")}
-        )
+        S2-2: the BLOB is handed to the worker via a temp file on the shared
+        container FS (its path travels in the IPC line, not ~170 MB of
+        base64). The worker deletes it after reading; we clean up on the
+        error path as a fallback.
+        """
+        blob_path = os.path.join(tempfile.gettempdir(), f"orch-expand-{uuid.uuid4().hex}.zst")
+        with open(blob_path, "wb") as fh:
+            fh.write(raw)
+        try:
+            return await self._send_and_await("manifest.expand", {"raw_path": blob_path})
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(blob_path)
 
     # --- internals -----------------------------------------------------
 

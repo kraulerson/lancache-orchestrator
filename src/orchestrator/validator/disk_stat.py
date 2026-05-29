@@ -54,35 +54,57 @@ class ValidationResult:
     error: str | None = None
 
 
-def _stat_batch(paths: list[Path]) -> int:
-    """Count paths that exist with non-empty size. Runs in a thread."""
+def _stat_batch(paths: list[Path]) -> tuple[int, int]:
+    """Count (cached, errors) for a batch. Runs in a thread.
+
+    Cached = a regular file with non-empty size. Symlinks are NOT followed
+    (a cache path that is a symlink is not a genuine cached chunk).
+    `errors` counts unexpected OSErrors (e.g. EACCES) — a plain missing
+    file is not an error.
+    """
     cached = 0
+    errors = 0
     for p in paths:
         try:
+            # A symlink is never a genuine cache file — don't follow it.
+            if p.is_symlink():
+                continue
             if p.stat().st_size > 0:
                 cached += 1
+        except FileNotFoundError:
+            pass  # plain cache miss — expected, not an error
         except OSError:
-            pass
-    return cached
+            errors += 1  # EACCES, EIO, etc. — surfaced via the run WARN
+    return cached, errors
 
 
 async def validate_chunks(paths: list[Path], *, batch_size: int = 256) -> tuple[int, int]:
-    """Return (cached, missing). Cached = exists AND st_size > 0.
+    """Return (cached, missing). Cached = a regular, non-empty file.
 
     Stats are offloaded to the default executor in batches so a large
-    chunk list never blocks the event loop.
+    chunk list never blocks the event loop. Per-file stat errors (EACCES
+    etc.) count as missing and are aggregated into a single WARN per run.
     """
     loop = asyncio.get_running_loop()
     cached = 0
+    errors = 0
     for i in range(0, len(paths), batch_size):
         batch = paths[i : i + batch_size]
-        cached += await loop.run_in_executor(None, _stat_batch, batch)
+        batch_cached, batch_errors = await loop.run_in_executor(None, _stat_batch, batch)
+        cached += batch_cached
+        errors += batch_errors
+    if errors:
+        _log.warning("validate.stat_errors", error_count=errors, total=len(paths))
     return cached, len(paths) - cached
 
 
 def _classify(total: int, cached: int) -> str:
+    # total == 0 here means manifests existed but contained no chunks —
+    # nothing to cache, so the game is up to date ('cached'). The
+    # genuinely-no-manifests case is handled separately (returns 'error'
+    # before reaching classification).
     if total == 0:
-        return "error"
+        return "cached"
     if cached == total:
         return "cached"
     if cached == 0:
@@ -113,18 +135,31 @@ async def validate_game(
     seen: set[tuple[int, str]] = set()
     paths: list[Path] = []
     versions: list[str] = []
-    for row in rows:
-        depot_id = int(row["depot_id"])
-        versions.append(f"{depot_id}:{row['version']}")
-        expanded = await steam_client.manifest_expand(row["raw"])
-        for sha in expanded.get("chunk_shas", []):
-            key = (depot_id, sha)
-            if key in seen:
-                continue
-            seen.add(key)
-            uri = steam_chunk_uri(depot_id, sha)
-            h = cache_key(identifier, uri, slice_range)
-            paths.append(cache_path(cache_root, h, levels))
+    try:
+        for row in rows:
+            depot_id = int(row["depot_id"])
+            versions.append(f"{depot_id}:{row['version']}")
+            expanded = await steam_client.manifest_expand(row["raw"])
+            # Bug D: the BLOB must belong to the depot its DB row claims —
+            # otherwise we'd stat the wrong CDN paths and report false misses.
+            expanded_depot = expanded.get("depot_id")
+            if expanded_depot is not None and int(expanded_depot) != depot_id:
+                raise ValueError(
+                    f"depot_id mismatch: row says {depot_id}, BLOB says {expanded_depot}"
+                )
+            for sha in expanded.get("chunk_shas", []):
+                key = (depot_id, sha)
+                if key in seen:
+                    continue
+                seen.add(key)
+                uri = steam_chunk_uri(depot_id, sha)
+                h = cache_key(identifier, uri, slice_range)
+                paths.append(cache_path(cache_root, h, levels))
+    except ValueError as e:
+        # Bug C: a malformed chunk SHA / depot mismatch is a data error for
+        # this run, not an uncaught crash that loses the whole job.
+        _log.warning("validate.expand_error", game_id=game_id, reason=str(e)[:200])
+        return ValidationResult(0, 0, 0, "error", ",".join(sorted(versions)), str(e)[:200])
 
     cached, missing = await validate_chunks(paths)
     total = len(paths)

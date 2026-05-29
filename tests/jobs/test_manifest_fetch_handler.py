@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import base64
 import json
+import os
+import tempfile
+import uuid
 
 import pytest
 
@@ -43,6 +45,18 @@ async def _seed_game(pool, *, app_id="730", title="Counter-Strike 2"):
     return row["id"]
 
 
+def _write_blob(raw_bytes: bytes) -> str:
+    """Write a BLOB to a temp file (as the worker does) and return its path.
+
+    S2-1: the worker hands manifest BLOBs to the handler via temp files on
+    the shared FS, not base64 in the IPC line. The handler reads + unlinks.
+    """
+    path = os.path.join(tempfile.gettempdir(), f"test-manifest-{uuid.uuid4().hex}.zst")
+    with open(path, "wb") as fh:
+        fh.write(raw_bytes)
+    return path
+
+
 def _fake_manifest_payload(
     depot_id: int,
     gid: int,
@@ -58,7 +72,7 @@ def _fake_manifest_payload(
         "name": name,
         "total_bytes": total_bytes,
         "chunk_count": chunk_count,
-        "raw_b64": base64.b64encode(raw_bytes).decode("ascii"),
+        "raw_path": _write_blob(raw_bytes),
     }
 
 
@@ -155,7 +169,7 @@ class TestHappyPath:
                         "name": "d1",
                         "total_bytes": 1000,
                         "chunk_count": 5,
-                        "raw_b64": base64.b64encode(fake_raw).decode("ascii"),
+                        "raw_path": _write_blob(fake_raw),
                     }
                 ]
             }
@@ -282,7 +296,7 @@ class TestSizeCap:
         from unittest.mock import patch
 
         game_id = await _seed_game(pool)
-        oversized = b"x" * 1024  # treated as raw bytes after b64-decode
+        oversized = b"x" * 1024  # 1024-byte BLOB file
         stub = _StubSteam(
             result={
                 "manifests": [
@@ -292,7 +306,7 @@ class TestSizeCap:
                         "name": "huge",
                         "total_bytes": 1_000_000_000,
                         "chunk_count": 100,
-                        "raw_b64": base64.b64encode(oversized).decode("ascii"),
+                        "raw_path": _write_blob(oversized),
                     }
                 ]
             }

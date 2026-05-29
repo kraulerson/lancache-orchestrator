@@ -555,6 +555,32 @@ class TestBL10SteamWorkerSettings:
         with pytest.raises(ValueError, match="steam_worker_manifest_fetch_timeout_sec"):
             Settings()
 
+    def test_cache_levels_valid_defaults_accepted(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        assert Settings(cache_levels="2:2").cache_levels == "2:2"
+        assert Settings(cache_levels="1:2").cache_levels == "1:2"
+
+    def test_cache_levels_rejects_zero_width(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="cache_levels"):
+            Settings(cache_levels="0")
+
+    def test_cache_levels_rejects_sum_over_32(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="cache_levels"):
+            Settings(cache_levels="30:4")
+        with pytest.raises(ValueError, match="cache_levels"):
+            Settings(cache_levels="99")
+
     def test_steam_cache_identifier_default(self, monkeypatch):
         """F7: lancache cacheidentifier for Steam is the literal 'steam'."""
         monkeypatch.setenv("ORCH_TOKEN", "a" * 32)

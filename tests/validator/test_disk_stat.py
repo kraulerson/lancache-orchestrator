@@ -48,6 +48,17 @@ async def test_empty_path_list(tmp_path):
     assert await validate_chunks([]) == (0, 0)
 
 
+async def test_symlink_not_counted_cached(tmp_path):
+    """Bug E: stat must not follow symlinks — a cache path that is a symlink
+    to an unrelated non-empty file is NOT a real cached chunk."""
+    target = tmp_path / "elsewhere"
+    target.write_bytes(b"unrelated content")
+    link = tmp_path / "chunkpath"
+    link.symlink_to(target)
+    cached, missing = await validate_chunks([link])
+    assert (cached, missing) == (0, 1)
+
+
 # --- validate_game helpers ---------------------------------------------
 
 
@@ -143,12 +154,45 @@ async def test_dedup_across_mappings(pool, tmp_path):
     assert result.outcome == "cached"
 
 
+async def test_zero_chunk_manifest_is_cached_not_error(pool, tmp_path):
+    """Bug B: a valid manifest that expands to zero chunks means nothing to
+    cache — that is 'cached' (up_to_date), not an infra 'error'."""
+    game_id = await _seed_game(pool)
+    await _seed_manifest(pool, game_id, depot_id=731, version="100")
+    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 731, "chunk_shas": []}))
+    result = await validate_game(pool, deps, game_id, _settings(tmp_path))
+    assert result.outcome == "cached"
+    assert (result.chunks_total, result.chunks_cached, result.chunks_missing) == (0, 0, 0)
+
+
 async def test_no_manifests_is_error(pool, tmp_path):
     game_id = await _seed_game(pool)
     deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 0, "chunk_shas": []}))
     result = await validate_game(pool, deps, game_id, _settings(tmp_path))
     assert result.outcome == "error"
     assert result.chunks_total == 0
+
+
+async def test_malformed_sha_is_error_not_raise(pool, tmp_path):
+    """Bug C: a malformed chunk SHA from the worker must yield outcome=error,
+    not an uncaught ValueError that fails the whole job."""
+    game_id = await _seed_game(pool)
+    await _seed_manifest(pool, game_id, depot_id=731, version="100")
+    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 731, "chunk_shas": ["NOT_HEX"]}))
+    result = await validate_game(pool, deps, game_id, _settings(tmp_path))
+    assert result.outcome == "error"
+    assert result.error is not None
+
+
+async def test_depot_id_mismatch_is_error(pool, tmp_path):
+    """Bug D: if the worker-parsed depot_id disagrees with the DB column,
+    the stored BLOB doesn't match its row — fail closed rather than stat
+    wrong paths."""
+    game_id = await _seed_game(pool)
+    await _seed_manifest(pool, game_id, depot_id=731, version="100")
+    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 999, "chunk_shas": [SHA_A]}))
+    result = await validate_game(pool, deps, game_id, _settings(tmp_path))
+    assert result.outcome == "error"
 
 
 async def test_cache_root_missing_is_error(pool, tmp_path):
