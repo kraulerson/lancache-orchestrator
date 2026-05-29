@@ -94,6 +94,7 @@ class SteamWorkerClient:
         self._op_timeout_overrides: dict[str, float] = {
             "library.enumerate": float(settings.steam_worker_library_enumerate_timeout_sec),
             "manifest.fetch": float(settings.steam_worker_manifest_fetch_timeout_sec),
+            "manifest.expand": float(settings.steam_worker_manifest_expand_timeout_sec),
         }
         self._max_restart_attempts = settings.steam_worker_max_restart_attempts
         self._restart_attempts = 0
@@ -200,6 +201,19 @@ class SteamWorkerClient:
         'NotAuthenticated')` if no Steam session.
         """
         return await self._send_and_await("manifest.fetch", {"app_id": app_id})
+
+    async def manifest_expand(self, raw: bytes) -> dict[str, Any]:
+        """Deserialize a stored manifest BLOB in the worker venv (F7).
+
+        Offline — no Steam session required. `raw` is the
+        `zstd(protobuf)` bytes stored in `manifests.raw`. Returns
+        `{"depot_id": int, "chunk_shas": [hex, ...]}` (deduped).
+        """
+        import base64
+
+        return await self._send_and_await(
+            "manifest.expand", {"raw_b64": base64.b64encode(raw).decode("ascii")}
+        )
 
     # --- internals -----------------------------------------------------
 

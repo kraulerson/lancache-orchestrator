@@ -282,12 +282,48 @@ def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
         _err(msg_id, "SteamAPIError", str(e)[:200])
 
 
+def _handle_manifest_expand(msg_id: str, params: dict[str, str]) -> None:
+    """Deserialize a stored manifest BLOB → {depot_id, chunk_shas} (F7).
+
+    Offline: zstd-decompress the stored bytes then reconstruct via
+    `DepotManifest(data)` and iterate `payload.mappings[*].chunks[*].sha`.
+    No CDNClient, no `_client`, no Steam session — pure protobuf parse, so
+    validation works even when the operator's auth has expired.
+
+    Chunk SHAs are deduped: the same chunk can appear in multiple file
+    mappings (Steam content dedup), but in the cache it is one file.
+    """
+    raw_b64 = params.get("raw_b64")
+    if not raw_b64:
+        _err(msg_id, "InvalidArgument", "manifest.expand requires raw_b64")
+        return
+    try:
+        import base64 as _base64
+
+        import zstandard as _zstd
+        from steam.core.manifest import DepotManifest  # type: ignore[import-not-found]
+
+        compressed = _base64.b64decode(raw_b64)
+        data = _zstd.ZstdDecompressor().decompress(compressed)
+        mfst = DepotManifest(data)
+
+        seen: dict[str, None] = {}
+        for mapping in mfst.payload.mappings:
+            for chunk in mapping.chunks:
+                seen.setdefault(chunk.sha.hex(), None)
+
+        _ok(msg_id, {"depot_id": int(mfst.depot_id), "chunk_shas": list(seen)})
+    except Exception as e:
+        _err(msg_id, "ManifestParseError", f"{type(e).__name__}: {e}"[:200])
+
+
 _HANDLERS = {
     "auth.begin": _handle_auth_begin,
     "auth.complete": _handle_auth_complete,
     "auth.status": _handle_auth_status,
     "library.enumerate": _handle_library_enumerate,
     "manifest.fetch": _handle_manifest_fetch,
+    "manifest.expand": _handle_manifest_expand,
 }
 
 

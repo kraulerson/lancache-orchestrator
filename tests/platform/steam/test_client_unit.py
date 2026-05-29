@@ -338,6 +338,54 @@ class TestManifestFetch:
         assert result["manifests"][0]["depot_id"] == 731
 
 
+class TestManifestExpand:
+    """F7: SteamWorkerClient.manifest_expand() round-trips the IPC op."""
+
+    async def test_round_trip_and_encodes_raw(self):
+        import base64
+        import json
+
+        from orchestrator.platform.steam.client import SteamWorkerClient
+
+        client = SteamWorkerClient.__new__(SteamWorkerClient)
+        client._writer = _StubWriter()
+        client._pending = {}
+        client._timeout = 5.0
+        client._op_timeout_overrides = {"manifest.expand": 120.0}
+
+        raw = b"\x28\xb5\x2f\xfd_stub_zstd_bytes"
+        sha_a = "aa" * 20
+        sha_b = "bb" * 20
+
+        async def round_trip():
+            msg_id = await client._send("manifest.expand", {"raw_b64": "PLACEHOLDER"})
+            line = (
+                b'{"msg_id":"'
+                + msg_id.encode()
+                + b'","ok":true,"result":{"depot_id":731,"chunk_shas":["'
+                + sha_a.encode()
+                + b'","'
+                + sha_b.encode()
+                + b'"]}}\n'
+            )
+            await client._on_response_line(line)
+            return await client._await_response(msg_id, timeout=120.0)
+
+        # Use the real method to verify base64 encoding of raw bytes.
+        sent_msg_id = await client._send(
+            "manifest.expand",
+            {"raw_b64": base64.b64encode(raw).decode("ascii")},
+        )
+        sent = json.loads(client._writer.lines[-1].decode())
+        assert base64.b64decode(sent["params"]["raw_b64"]) == raw
+        assert sent["op"] == "manifest.expand"
+        # And the response decoding path returns the parsed dict.
+        client._pending.pop(sent_msg_id, None)
+        result = await round_trip()
+        assert result["depot_id"] == 731
+        assert result["chunk_shas"] == [sha_a, sha_b]
+
+
 class TestPerOpTimeoutOverride:
     """Issue #109: library.enumerate must use the long-running timeout
     (steam_worker_library_enumerate_timeout_sec) instead of the default

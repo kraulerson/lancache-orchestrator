@@ -38,9 +38,10 @@ _log = structlog.get_logger(__name__)
 
 _UPSERT_SQL = (
     "INSERT INTO manifests "
-    "(game_id, version, fetched_at, chunk_count, total_bytes, raw) "
-    "VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?) "
+    "(game_id, depot_id, version, fetched_at, chunk_count, total_bytes, raw) "
+    "VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?) "
     "ON CONFLICT(game_id, version) DO UPDATE SET "
+    "  depot_id = excluded.depot_id, "
     "  fetched_at = CURRENT_TIMESTAMP, "
     "  chunk_count = excluded.chunk_count, "
     "  total_bytes = excluded.total_bytes, "
@@ -165,7 +166,7 @@ async def manifest_fetch_handler(job: dict[str, Any], deps: Deps) -> None:
 
         await deps.pool.execute_write(
             _UPSERT_SQL,
-            (game_id, str(gid), int(chunk_count), int(total_bytes), raw_bytes),
+            (game_id, int(depot_id), str(gid), int(chunk_count), int(total_bytes), raw_bytes),
         )
         upserted += 1
         total_size += int(total_bytes)

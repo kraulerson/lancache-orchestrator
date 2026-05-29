@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     lancache_nginx_cache_path: Path = Path("/data/cache/cache/")
     cache_slice_size_bytes: int = Field(default=10_485_760, gt=0)
     cache_levels: str = Field(default="2:2", pattern=r"^\d+(:\d+)*$")
+    # F7: nginx $cacheidentifier for Steam traffic (the lancache map sets
+    # this to the literal "steam"). Part of the cache-key md5 input.
+    steam_cache_identifier: str = "steam"
     chunk_concurrency: int = Field(default=32, ge=1, le=256)
 
     # --- Lancache self-test (ID2) -----------------------------------
@@ -131,6 +134,10 @@ class Settings(BaseSettings):
     # against Steam's CDN. Big games with 50+ depots can take 1-3 min
     # serially; budget 5 min by default.
     steam_worker_manifest_fetch_timeout_sec: int = Field(default=300, ge=30, le=3600)
+    # F7 validator: manifest.expand just zstd-decompresses + protobuf-parses
+    # a stored BLOB (offline, no network). Fast, but big manifests can take
+    # a few seconds; budget 2 min.
+    steam_worker_manifest_expand_timeout_sec: int = Field(default=120, ge=30, le=600)
     steam_worker_max_restart_attempts: int = Field(default=3, ge=0, le=10)
     steam_session_dir: Path = Path("/var/lib/orchestrator/steam_session")
     jobs_worker_poll_interval_sec: float = Field(default=1.0, gt=0.0, le=60.0)

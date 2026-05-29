@@ -95,6 +95,14 @@ class TestHappyPath:
         assert rows[0]["total_bytes"] == 5_000_000_000
         assert rows[0]["raw_len"] > 0
 
+    async def test_stores_depot_id(self, pool):
+        """F7 needs depot_id stored to build chunk URLs (migration 0003)."""
+        game_id = await _seed_game(pool)
+        stub = _StubSteam(result={"manifests": [_fake_manifest_payload(731, 100, "d1", 1000, 10)]})
+        await manifest_fetch_handler(_job(game_id), Deps(pool=pool, steam_client=stub))
+        row = await pool.read_one("SELECT depot_id FROM manifests WHERE game_id=?", (game_id,))
+        assert row["depot_id"] == 731
+
     async def test_inserts_multiple_depot_manifests(self, pool):
         game_id = await _seed_game(pool)
         stub = _StubSteam(
