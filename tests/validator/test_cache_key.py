@@ -64,6 +64,22 @@ def test_cache_path_rejects_bad_hash():
         cache_path(Path("/c"), "abc", "2:2")  # too short
 
 
+def test_cache_path_rejects_bad_levels():
+    """Bug A: levels that would slice past the 32-char digest or use a
+    zero/negative width must raise, not silently produce wrong paths."""
+    h = "0123456789abcdef0123456789abcdef"
+    with pytest.raises(ValueError):
+        cache_path(Path("/c"), h, "0")  # zero width
+    with pytest.raises(ValueError):
+        cache_path(Path("/c"), h, "99")  # exceeds digest length
+    with pytest.raises(ValueError):
+        cache_path(Path("/c"), h, "2:" * 16 + "2")  # 17 levels, sum 34 > 32
+    with pytest.raises(ValueError):
+        cache_path(Path("/c"), h, "30:4")  # sum 34 > 32
+    with pytest.raises(ValueError):
+        cache_path(Path("/c"), h, "")  # empty
+
+
 def test_rejects_bad_sha():
     with pytest.raises(ValueError):
         steam_chunk_uri(1, "NOTHEX")
@@ -76,3 +92,11 @@ def test_rejects_bad_sha():
 def test_rejects_negative_depot():
     with pytest.raises(ValueError):
         steam_chunk_uri(-1, SHA)
+
+
+def test_cache_path_always_under_root():
+    """Bug E / D8: the computed path must stay under the cache root."""
+    root = Path("/data/cache/cache")
+    h = "22e7d56f787714bc78e23495d93da0db"
+    p = cache_path(root, h, "2:2")
+    assert p.is_relative_to(root)

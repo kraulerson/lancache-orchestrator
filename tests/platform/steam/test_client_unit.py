@@ -339,51 +339,38 @@ class TestManifestFetch:
 
 
 class TestManifestExpand:
-    """F7: SteamWorkerClient.manifest_expand() round-trips the IPC op."""
+    """F7 / S2-2: manifest_expand() hands the BLOB off via a temp file path."""
 
-    async def test_round_trip_and_encodes_raw(self):
-        import base64
-        import json
+    async def test_writes_blob_temp_file_and_returns_result(self):
+        import os
 
         from orchestrator.platform.steam.client import SteamWorkerClient
 
         client = SteamWorkerClient.__new__(SteamWorkerClient)
-        client._writer = _StubWriter()
-        client._pending = {}
-        client._timeout = 5.0
-        client._op_timeout_overrides = {"manifest.expand": 120.0}
-
         raw = b"\x28\xb5\x2f\xfd_stub_zstd_bytes"
         sha_a = "aa" * 20
-        sha_b = "bb" * 20
+        captured: dict = {}
 
-        async def round_trip():
-            msg_id = await client._send("manifest.expand", {"raw_b64": "PLACEHOLDER"})
-            line = (
-                b'{"msg_id":"'
-                + msg_id.encode()
-                + b'","ok":true,"result":{"depot_id":731,"chunk_shas":["'
-                + sha_a.encode()
-                + b'","'
-                + sha_b.encode()
-                + b'"]}}\n'
-            )
-            await client._on_response_line(line)
-            return await client._await_response(msg_id, timeout=120.0)
+        async def fake_send_and_await(op, params):
+            captured["op"] = op
+            captured["params"] = params
+            # The client must have written the raw bytes to the temp path
+            # BEFORE sending — read them back to verify.
+            with open(params["raw_path"], "rb") as fh:
+                captured["blob"] = fh.read()
+            return {"depot_id": 731, "chunk_shas": [sha_a]}
 
-        # Use the real method to verify base64 encoding of raw bytes.
-        sent_msg_id = await client._send(
-            "manifest.expand",
-            {"raw_b64": base64.b64encode(raw).decode("ascii")},
-        )
-        sent = json.loads(client._writer.lines[-1].decode())
-        assert base64.b64decode(sent["params"]["raw_b64"]) == raw
-        assert sent["op"] == "manifest.expand"
-        # And the response decoding path returns the parsed dict.
-        client._pending.pop(sent_msg_id, None)
-        result = await round_trip()
-        assert result["depot_id"] == 731
-        assert result["chunk_shas"] == [sha_a, sha_b]
+        client._send_and_await = fake_send_and_await  # type: ignore[method-assign]
+
+        result = await client.manifest_expand(raw)
+
+        assert result == {"depot_id": 731, "chunk_shas": [sha_a]}
+        assert captured["op"] == "manifest.expand"
+        assert "raw_path" in captured["params"]
+        assert "raw_b64" not in captured["params"]  # no bytes in the IPC line
+        assert captured["blob"] == raw
+        # Client cleans up the temp file after the call (finally unlink).
+        assert not os.path.exists(captured["params"]["raw_path"])
 
 
 class TestPerOpTimeoutOverride:

@@ -19,6 +19,16 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — UAT-9 hardening (BL12 + F7 agent sweep) — 2026-05-29
+
+Remediation of the UAT-9 adversarial agent sweep over BL12 + F7 (pre-live-test hardening). Deferred SEV-3/4 items tracked in issues #121–#123.
+
+- **Security/correctness (SEV-2):** `cache_levels` is now validated both at config load (`Settings`) and in `cache_path` — widths must each be ≥1 and total ≤32. A value like `"0"` or `"99"` previously passed the regex and silently produced wrong cache paths (validator reporting *everything missing* deployment-wide).
+- **SEV-2 — large-manifest IPC (S2-1/S2-2):** `manifest.fetch` packed all depots into one IPC response line, overflowing the 10 MiB cap on 50+ depot games (worker killed → restart-storm); `manifest.expand` inflated a stored BLOB to a ~170 MB stdin line. Both now use a **temp-file handoff**: the producer writes the BLOB to a temp file on the shared container FS (`tempfile.gettempdir()`, uuid-named) and the IPC carries the path; the consumer reads then unlinks. Eliminates IPC-size limits for both ops.
+- **SEV-3 — validator robustness:** a manifest that expands to zero chunks is now classified `cached` (up to date), not `error`; a malformed chunk SHA yields `outcome=error` instead of an uncaught crash that loses the whole job; `validate_game` asserts the worker-parsed `depot_id` matches the DB row (fails closed on mismatch).
+- **SEV-3/4 polish:** D8 path-containment backstop in `cache_path`; `validate_chunks` no longer follows symlinks (a symlinked cache path is not a genuine chunk) and aggregates per-file stat errors into one WARN per run.
+- Tests: +~15 (cache_levels bounds, 0-chunk, malformed-SHA, depot mismatch, symlink, temp-file handoff round-trips). Full suite: 928 pass. ruff/mypy/gitleaks/semgrep clean.
+
 ### Added — F7 Cache Validator (disk-stat) — 2026-05-28
 
 Implements F7 from PROJECT_BIBLE §1.2 — the orchestrator's core value proposition. Determines whether a Steam game's depot-manifest chunks are present in the lancache on-disk cache by computing each chunk's nginx cache path and `os.stat`-ing it. Records a `validation_history` row and updates `games.status`. `/health.validator_healthy` is now real.

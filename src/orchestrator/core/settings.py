@@ -150,6 +150,22 @@ class Settings(BaseSettings):
             raise ValueError("cors_origins must not contain empty strings")
         return v
 
+    @field_validator("cache_levels", mode="after")
+    @classmethod
+    def _validate_cache_levels(cls, v: str) -> str:
+        """F7 bug A: the regex allows widths like '0' or '99' or many levels
+        whose total exceeds the 32-char md5 hex. Those silently produce wrong
+        cache paths (validator reports everything missing). Reject at load.
+        """
+        widths = [int(x) for x in v.split(":")]
+        if any(w < 1 for w in widths):
+            raise ValueError(f"cache_levels widths must each be >= 1: {v!r}")
+        if sum(widths) > 32:
+            raise ValueError(
+                f"cache_levels widths sum to {sum(widths)} > 32 (md5 hex length): {v!r}"
+            )
+        return v
+
     @field_validator("orchestrator_token", mode="before")
     @classmethod
     def _strip_token(cls, v: Any) -> Any:
