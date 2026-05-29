@@ -956,4 +956,69 @@ it — pure local filesystem inspection, no HEAD probes. Records a
 
 ---
 
+## Feature 18: F5 — Steam CDN Prefill
+
+**Phase Built:** 2 (Milestone B / F5)
+**Status:** Complete (2026-05-29)
+
+**Summary:** Downloads a Steam game's depot chunks **through** the lancache
+(stream-and-discard) so they get cached under the exact key F7 validates —
+the feature that generates the content F7 checks, closing the prefill → cache
+→ validate loop. On success it auto-triggers an F7 validate (ID5). Steam-only;
+F6 (Epic) deferred. Bundled a small F7 fix to stop counting mode-000
+unreadable cache files.
+
+**Key Interfaces:**
+  - `src/orchestrator/prefill/downloader.py` — `prefill_chunks` (async httpx,
+    bounded `Semaphore`, stream+discard, retry/backoff) + `PrefillResult`
+  - `src/orchestrator/jobs/handlers/prefill.py` — `prefill_handler`
+    (registered as `prefill`)
+  - `src/orchestrator/api/routers/prefill_trigger.py` —
+    `POST /api/v1/games/{game_id}/prefill`
+  - `src/orchestrator/core/settings.py` — `lancache_base_url`,
+    `steam_cdn_host`, `prefill_user_agent`, `prefill_chunk_timeout_sec`,
+    `prefill_chunk_max_attempts` (+ reuses `chunk_concurrency`)
+  - `src/orchestrator/validator/disk_stat.py` — owner-read-bit check
+
+**Locked decisions (spike A5 + spec):**
+  - **Verified request shape:** `GET /depot/{id}/chunk/{sha}` with Steam UA +
+    `Host: lancache.steamcontent.com`, no Range → lancache caches under
+    `md5("steam"+uri+"bytes=0-10485759")` = F7's key. Chunk URLs are
+    unauthenticated (no manifest request code).
+  - **Orchestrator-side httpx** (no worker/steam-next for the download);
+    stream + discard so memory is constant.
+  - **Chunk list** reuses F7's latest-manifest-per-depot + `manifest.expand`;
+    fetches manifests first if the game has none.
+  - **ID5:** success → enqueue a `validate` job (`source='scheduler'`).
+  - **Retry:** per-chunk up to `prefill_chunk_max_attempts` with [1,4,16]s on
+    timeout/transport/5xx; 4xx not retried. Any failed chunk → job failed,
+    `games.status='failed'`.
+  - **F7 readability:** `cached` also requires `st_mode & 0o400` (stat-only).
+
+**Test Coverage:** ~25 new tests:
+  - `tests/prefill/test_downloader.py` — all-ok, retry-then-success,
+    persistent-failure recorded, 4xx-not-retried, empty list, progress
+    callback, header/path assertions (httpx MockTransport)
+  - `tests/jobs/test_prefill_handler.py` — downloading set + validate
+    enqueued, chunk-failure→failed, no-manifests→fetch, non-steam/unknown
+    raise, registration
+  - `tests/api/test_prefill_trigger_router.py` — 202/dedup/404/400/auth/503
+  - `tests/validator/test_disk_stat.py` — mode-000 excluded, mode-644 counted
+  - `tests/core/test_settings.py` — prefill defaults + bounds
+
+**Related ADRs:** None new — design in
+`docs/superpowers/specs/2026-05-29-f5-steam-prefill-design.md`; mechanism in
+`spikes/spike_a5_prefill.md`.
+
+**Known Limitations:**
+  - **MISS→upstream→cache path** (a real cache miss fetching upstream) is a
+    UAT step — verified only that the request shape produces F7's key + HITs
+    cached chunks; the live prefill of missing chunks confirms upstream fetch.
+  - Steam-only; Epic (F6) deferred. No scheduled/bulk prefill (F13).
+  - No pre-skip of already-cached chunks (every chunk is requested; lancache
+    HITs are cheap). A post-MVP optimization.
+  - Any single chunk failure fails the whole job (no partial-success state).
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->

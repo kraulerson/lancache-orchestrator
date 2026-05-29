@@ -48,6 +48,31 @@ async def test_empty_path_list(tmp_path):
     assert await validate_chunks([]) == (0, 0)
 
 
+async def test_unreadable_mode000_not_counted(tmp_path):
+    """F5: a mode-000 cache file is unreadable by lancache (owner www-data has
+    no read bit); it must NOT count as cached even though it exists size>0."""
+    import os
+
+    f = tmp_path / "unreadable"
+    f.write_bytes(b"data")
+    os.chmod(f, 0o000)
+    try:
+        cached, missing = await validate_chunks([f])
+    finally:
+        os.chmod(f, 0o644)  # restore so tmp cleanup can remove it
+    assert (cached, missing) == (0, 1)
+
+
+async def test_readable_mode644_counted(tmp_path):
+    import os
+
+    f = tmp_path / "readable"
+    f.write_bytes(b"data")
+    os.chmod(f, 0o644)
+    cached, missing = await validate_chunks([f])
+    assert (cached, missing) == (1, 0)
+
+
 async def test_symlink_not_counted_cached(tmp_path):
     """Bug E: stat must not follow symlinks — a cache path that is a symlink
     to an unrelated non-empty file is NOT a real cached chunk."""
