@@ -17,6 +17,16 @@ COPY pyproject.toml .
 COPY src/ src/
 RUN /build/.venv/bin/pip install --no-cache-dir --no-deps .
 
+# Steam worker venv (gevent + steam-next + zstandard) — isolated from the
+# orchestrator venv per ADR-0013. The worker subprocess imports
+# `orchestrator.platform.steam.worker`, so the orchestrator package is also
+# installed here (--no-deps; deps are pinned in requirements-steam-worker.txt).
+COPY requirements-steam-worker.txt .
+RUN python -m venv /build/.venv-steam-worker \
+    && /build/.venv-steam-worker/bin/pip install --no-cache-dir --require-hashes \
+       -r requirements-steam-worker.txt \
+    && /build/.venv-steam-worker/bin/pip install --no-cache-dir --no-deps .
+
 # ── Stage 2: runtime ────────────────────────────────────────────
 FROM python:3.12-slim@sha256:520153e2deb359602c9cffd84e491e3431d76e7bf95a3255c9ce9433b76ab99a AS runtime
 
@@ -32,6 +42,8 @@ RUN groupadd -r -g 1000 orchestrator \
 
 COPY --from=builder /build/.venv /app/.venv
 COPY --from=builder /build/src /app/src
+# Steam worker venv at the path Settings.steam_worker_python_path expects.
+COPY --from=builder /build/.venv-steam-worker /opt/orchestrator/venv-steam-worker
 # Migrations ship as package data inside /app/src/orchestrator/db/migrations/ and
 # are loaded at runtime via importlib.resources. No separate COPY required.
 
