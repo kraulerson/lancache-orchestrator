@@ -22,6 +22,7 @@ KNOWN_OPS: frozenset[str] = frozenset(
         "auth.status",
         "library.enumerate",
         "manifest.fetch",
+        "manifest.expand",
         "shutdown",
     }
 )

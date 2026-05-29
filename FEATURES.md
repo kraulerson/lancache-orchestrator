@@ -872,4 +872,88 @@ BLOB inside the worker venv.
 
 ---
 
+## Feature 17: F7 — Cache Validator (disk-stat)
+
+**Phase Built:** 2 (Milestone B, Build Loop / F7)
+**Status:** Complete (2026-05-28)
+
+**Summary:** The orchestrator's core value proposition. Determines whether
+a Steam game's depot-manifest chunks are present in the lancache on-disk
+cache by computing each chunk's nginx cache file path and `os.stat`-ing
+it — pure local filesystem inspection, no HEAD probes. Records a
+`validation_history` row and updates `games.status`. Makes
+`/health.validator_healthy` real via a startup self-test.
+
+**Key Interfaces:**
+  - `src/orchestrator/validator/cache_key.py` — pure cache-key derivation
+    (`steam_chunk_uri`, `slice_range_zero`, `cache_key`, `cache_path`)
+  - `src/orchestrator/validator/disk_stat.py` — `validate_chunks`
+    (batched stat) + `validate_game` (`ValidationResult`)
+  - `src/orchestrator/validator/self_test.py` — `validator_self_test`
+  - `src/orchestrator/jobs/handlers/validate.py` — `validate_handler`
+    (registered as `validate`)
+  - `src/orchestrator/platform/steam/worker.py` —
+    `_handle_manifest_expand` (offline BLOB → `{depot_id, chunk_shas}`)
+  - `src/orchestrator/platform/steam/client.py` — `manifest_expand()`
+  - `src/orchestrator/api/routers/validate_trigger.py` —
+    `POST /api/v1/games/{game_id}/validate`
+  - `src/orchestrator/db/migrations/0003_manifests_depot_id.sql`
+  - `src/orchestrator/api/routers/health.py` — `validator_healthy` wired
+  - `src/orchestrator/api/main.py` — lifespan self-test (step 5b)
+
+**Locked decisions (spike A4 + spec):**
+  - **Verified cache-key formula, not the FRD.** `md5("steam" + uri +
+    "bytes=0-10485759")`; path `<H[-2:]>/<H[-4:-2]>/<H>` for `levels=2:2`.
+    10 MiB slice (FRD said 1 MiB); directory ordering corrected. Presence
+    = exists AND size>0 (cache files carry an nginx header — never
+    size-match).
+  - **Offline worker expansion** (ADR-0013 D14) — protobuf parse only in
+    the worker venv; orchestrator handles ints + hex strings. No Steam
+    session needed → validation survives expired auth.
+  - **Latest manifest per depot** (max fetched_at, tie-break id); chunk
+    SHAs deduped per depot.
+  - **`error` outcome never clobbers `games.status`** (infra failure ≠
+    validation failure).
+  - **`manifests.depot_id`** (migration 0003) supplies the depot id F7
+    needs; BL12 handler now populates it.
+  - **Self-test** gates `validator_healthy`: cache root must be a listable
+    dir + key-derivation smoke. A cache *miss* does not flip health; a
+    mount/derivation error does.
+
+**Test Coverage:** ~50 new tests:
+  - `tests/validator/test_cache_key.py` — golden vectors (3 real cached
+    chunks from spike A4), levels generalization, input validation
+  - `tests/validator/test_cache_path.py` — refactored to delegate to the
+    module (real-deployment regression, depot 292732)
+  - `tests/validator/test_disk_stat.py` — cached/partial/missing/error,
+    dedup, latest-per-depot, batch boundary, empty list
+  - `tests/validator/test_self_test.py` — dir ok / missing / is-a-file
+  - `tests/jobs/test_validate_handler.py` — status transitions, error
+    leaves status unchanged, non-steam/unknown raise, registration
+  - `tests/api/test_validate_trigger_router.py` — 202/dedup/404/400/auth/503
+  - `tests/api/test_health_endpoint.py` — `validator_healthy` reflects
+    state + gates 200/503
+  - `tests/core/test_settings.py` — new fields' defaults + bounds
+  - `tests/platform/steam/test_client_unit.py` — `manifest_expand` IPC
+    round-trip + base64 encoding + timeout override
+
+**Related ADRs:**
+  - ADR-0013 — Steam-next subprocess isolation (inherited; D14 keeps
+    deserialization in the worker). No new ADR — the cache-key formula is
+    captured in `spikes/spike_a4_lancache_cache_key.md`.
+
+**Known Limitations:**
+  - **Live end-to-end validation** (real deserialized manifest vs. real
+    cache) is a UAT step — it needs the operator's Steam 2FA to first
+    fetch manifests. The cache-key formula itself is already verified
+    against the live cache (spike A4).
+  - Steam-only; Epic (`$http_host` identifier) deferred. Non-steam →
+    400 / handler ValueError.
+  - No auto-trigger on prefill (ID5) — lands with prefill (F5/F6). No
+    full-library sweep (F13). No HEAD-probe / deep byte-level check.
+  - One `validation_history` row per run, `manifest_version` a composite
+    `depot:gid` string; per-depot breakdown not surfaced separately.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->

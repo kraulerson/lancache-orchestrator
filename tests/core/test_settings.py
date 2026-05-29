@@ -555,6 +555,40 @@ class TestBL10SteamWorkerSettings:
         with pytest.raises(ValueError, match="steam_worker_manifest_fetch_timeout_sec"):
             Settings()
 
+    def test_steam_cache_identifier_default(self, monkeypatch):
+        """F7: lancache cacheidentifier for Steam is the literal 'steam'."""
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        assert Settings().steam_cache_identifier == "steam"
+
+    def test_manifest_expand_timeout_default(self, monkeypatch):
+        """F7: 2-minute default budget for the offline manifest.expand op."""
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        assert Settings().steam_worker_manifest_expand_timeout_sec == 120
+
+    def test_manifest_expand_timeout_rejects_too_low(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        monkeypatch.setenv("ORCH_STEAM_WORKER_MANIFEST_EXPAND_TIMEOUT_SEC", "10")
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="steam_worker_manifest_expand_timeout_sec"):
+            Settings()
+
+    def test_manifest_expand_timeout_rejects_too_high(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        monkeypatch.setenv("ORCH_STEAM_WORKER_MANIFEST_EXPAND_TIMEOUT_SEC", "601")
+        from orchestrator.core.settings import Settings, get_settings
+
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="steam_worker_manifest_expand_timeout_sec"):
+            Settings()
+
     def test_steam_worker_max_restart_attempts_rejects_negative(self, monkeypatch):
         monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
         monkeypatch.setenv("ORCH_STEAM_WORKER_MAX_RESTART_ATTEMPTS", "-1")

@@ -11,3 +11,4 @@
 # commit without detection in code review.
 0001  f09db05873bd2068d697a940261dcba99a1d600e10eb2fbfdb7dc4f71295606a  0001_initial.sql
 0002  fb9508fb2d70b3fb6dc57fa26a20034ef7652597112bbaa8d15210972c8ea60d  0002_jobs_kind_manifest_fetch.sql
+0003  6fb282b4035e11020c93497d4daef261a4d553ba8a51faaa10237b225caac3ff  0003_manifests_depot_id.sql

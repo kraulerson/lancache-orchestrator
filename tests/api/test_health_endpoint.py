@@ -114,6 +114,55 @@ class TestHealthShipState:
             del client._transport.app.state.scheduler_manager
 
 
+class TestValidatorHealth:
+    """F7: validator_healthy reflects app.state and gates the 200/503 result."""
+
+    async def test_validator_healthy_reflects_app_state_true(self, client):
+        client._transport.app.state.validator_healthy = True
+        try:
+            r = await client.get("/api/v1/health")
+            assert r.json()["validator_healthy"] is True
+        finally:
+            del client._transport.app.state.validator_healthy
+
+    async def test_all_healthy_returns_200_only_with_validator(self, client, monkeypatch, tmp_path):
+        """With every other subsystem healthy, validator_healthy is the
+        deciding term: True -> 200, False -> 503."""
+
+        class _StubProbe:
+            async def probe(self):
+                return True
+
+        class _StubManager:
+            running = True
+
+        # cache_volume_mounted needs a real dir.
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setenv("ORCH_LANCACHE_NGINX_CACHE_PATH", str(cache_dir))
+        from orchestrator.core.settings import get_settings
+
+        get_settings.cache_clear()
+
+        app_state = client._transport.app.state
+        app_state.lancache_probe = _StubProbe()
+        app_state.scheduler_manager = _StubManager()
+        try:
+            app_state.validator_healthy = True
+            r_ok = await client.get("/api/v1/health")
+            assert r_ok.status_code == 200
+
+            app_state.validator_healthy = False
+            r_bad = await client.get("/api/v1/health")
+            assert r_bad.status_code == 503
+            assert r_bad.json()["validator_healthy"] is False
+        finally:
+            del app_state.lancache_probe
+            del app_state.scheduler_manager
+            del app_state.validator_healthy
+            get_settings.cache_clear()
+
+
 class TestHealthDynamicFields:
     async def test_uptime_sec_increases_monotonically(self, client):
         r1 = await client.get("/api/v1/health")

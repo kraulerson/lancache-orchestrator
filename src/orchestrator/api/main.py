@@ -35,6 +35,7 @@ from orchestrator.api.routers.manifests import router as manifests_router
 from orchestrator.api.routers.platforms import router as platforms_router
 from orchestrator.api.routers.status import router as status_router
 from orchestrator.api.routers.sync import router as sync_router
+from orchestrator.api.routers.validate_trigger import router as validate_trigger_router
 from orchestrator.core.settings import get_settings
 from orchestrator.db import migrate
 from orchestrator.db.pool import (
@@ -192,6 +193,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         timeout_sec=settings.lancache_probe_timeout_sec,
         cache_ttl_sec=settings.lancache_probe_cache_ttl_sec,
     )
+
+    # 5b. F7 validator self-test. Gates health.validator_healthy: a failed
+    # cache-mount check forces /health to 503 until restart.
+    from orchestrator.validator.self_test import validator_self_test
+
+    app.state.validator_healthy = await validator_self_test(settings)
+    log.info("api.boot.validator_self_test", healthy=app.state.validator_healthy)
 
     try:
         # 6. Boot metadata
@@ -357,6 +365,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(manifests_router)
     app.include_router(manifest_trigger_router)
+    app.include_router(validate_trigger_router)
     app.include_router(sync_router)
     app.include_router(status_router)
 

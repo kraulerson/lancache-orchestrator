@@ -75,15 +75,18 @@ async def get_health(
     if scheduler_manager is not None:
         scheduler_running = scheduler_manager.running
 
+    # F7 validator self-test result, set in lifespan startup. Tests without
+    # lifespan omit the state — fall back to False (BL5-stub-like).
+    validator_healthy = bool(getattr(request.app.state, "validator_healthy", False))
+
     body = HealthResponse(
         status="ok" if pool_ok else "degraded",
         version=__version__,
         uptime_sec=int(time.monotonic() - request.app.state.boot_time),
-        # Remaining BL5 stub — real when validator subsystem ships.
         scheduler_running=scheduler_running,
         lancache_reachable=lancache_reachable,
         cache_volume_mounted=cache_volume_mounted,
-        validator_healthy=False,
+        validator_healthy=validator_healthy,
         # UAT-3 S2-B: /api/v1/health is unauthenticated, so the git_sha
         # is reachable by anyone with network access. Truncate to 8 hex
         # chars — enough to identify a build for ops, not enough for

@@ -6,8 +6,10 @@ Lancache deployment at 192.168.1.40 (Spike C, 2026-04-20).
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
+
+from orchestrator.validator.cache_key import cache_key as _cache_key
+from orchestrator.validator.cache_key import cache_path as _cache_path
 
 
 def compute_cache_path(
@@ -16,12 +18,14 @@ def compute_cache_path(
     uri: str,
     slice_range: str,
 ) -> tuple[str, Path]:
-    """Compute nginx cache key and on-disk path (levels=2:2)."""
-    cache_key = f"{cache_identifier}{uri}{slice_range}"
-    # nosemgrep: insecure-hash-algorithm-md5 — nginx uses md5 for cache keys
-    md5_hex = hashlib.md5(cache_key.encode()).hexdigest()  # noqa: S324
-    disk_path = cache_root / md5_hex[-2:] / md5_hex[-4:-2] / md5_hex
-    return cache_key, disk_path
+    """Compute nginx cache key string and on-disk path (levels=2:2).
+
+    Delegates to the production ``validator.cache_key`` module so this
+    real-deployment regression doubles as a golden-vector check of it.
+    """
+    key = f"{cache_identifier}{uri}{slice_range}"
+    md5_hex = _cache_key(cache_identifier, uri, slice_range)
+    return key, _cache_path(cache_root, md5_hex, "2:2")
 
 
 def test_cache_path_matches_real_lancache_deployment() -> None:

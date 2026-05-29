@@ -19,6 +19,23 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — F7 Cache Validator (disk-stat) — 2026-05-28
+
+Implements F7 from PROJECT_BIBLE §1.2 — the orchestrator's core value proposition. Determines whether a Steam game's depot-manifest chunks are present in the lancache on-disk cache by computing each chunk's nginx cache path and `os.stat`-ing it. Records a `validation_history` row and updates `games.status`. `/health.validator_healthy` is now real.
+
+- New `src/orchestrator/validator/cache_key.py` — pure, offline cache-key derivation. The nginx key is `md5(identifier + uri + slice_range)`; the on-disk path consumes hex from the END of the digest per `levels` (for `2:2`: `<H[-2:]>/<H[-4:-2]>/<H>`). **Verified empirically against the live lancache (spike A4), correcting two FRD errors: 10 MiB slice (not 1 MiB) and the levels directory ordering.** Validates `depot_id`/`sha_hex` shape (path-traversal guard).
+- New `src/orchestrator/validator/disk_stat.py` — `validate_chunks` (batched `os.stat` via `run_in_executor`; cached = exists AND size>0, never size-match) + `validate_game` (latest manifest per depot, dedup chunk SHAs, classify cached/partial/missing/error).
+- New worker IPC op `manifest.expand` (`platform/steam/worker.py`) — **offline** zstd-decompress + `DepotManifest(data)` parse in the worker venv (ADR-0013 D14), returning `{depot_id, chunk_shas}`. No Steam session required, so validation works even with expired auth. Plus `client.manifest_expand()` + per-op timeout.
+- New `src/orchestrator/jobs/handlers/validate.py` — `validate_handler`: writes `validation_history` (`method='disk_stat'`) and maps outcome → `games.status` (cached→`up_to_date`, partial/missing→`validation_failed`; **`error` never clobbers status**).
+- New `POST /api/v1/games/{game_id}/validate` (`api/routers/validate_trigger.py`) — bearer-gated, in-flight dedup, 202/400/404/503.
+- New `src/orchestrator/validator/self_test.py` — startup self-test (cache root is a listable dir + key-derivation smoke) wires `app.state.validator_healthy`; `/health` now includes it in the `all_healthy` conjunction (was a BL5 stub-false).
+- Settings: `steam_cache_identifier` (default `steam`) + `steam_worker_manifest_expand_timeout_sec` (default 120, 30..600).
+- ~50 new tests (cache_key golden vectors incl. 3 real cached chunks, disk_stat engine, validate handler, trigger router, self-test, health gating, settings, migration). Full suite: 919 pass. ruff/mypy/gitleaks/semgrep clean; security audit 0 SEV (`docs/security-audits/f7-cache-validator-security-audit.md`).
+
+### Data Model — `manifests.depot_id` (migration 0003) — 2026-05-28
+
+Adds a nullable `depot_id INTEGER` column to `manifests` plus index `idx_manifests_game_depot(game_id, depot_id, fetched_at DESC)`. F7 needs `depot_id` to build chunk URLs (`/depot/<depot_id>/chunk/<sha>`) and to select the latest manifest per depot. The BL12 `manifest_fetch` handler now populates it (the depot id was already in the worker IPC payload). Forward-only, nullable `ADD COLUMN` (STRICT-safe, no table rebuild); no backfill needed (no live manifest data exists yet). CHECKSUMS manifest pinned.
+
 ### Added — BL12 Steam Manifest Fetcher (F1 milestone 3/3) — 2026-05-28
 
 Implements BL12 from PROJECT_BIBLE §1.2 MVP cutline — the final F1 milestone. Fetches the operator's owned depot manifests for a single Steam app via the worker subprocess's Steam CDN client and upserts the `manifests` table, recording version, chunk count, total bytes, and the raw compressed manifest BLOB. Unblocks the F7 validator (which deserializes the stored BLOB inside the worker venv).
