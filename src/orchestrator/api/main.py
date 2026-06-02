@@ -33,6 +33,7 @@ from orchestrator.api.routers.jobs import router as jobs_router
 from orchestrator.api.routers.manifest_trigger import router as manifest_trigger_router
 from orchestrator.api.routers.manifests import router as manifests_router
 from orchestrator.api.routers.platforms import router as platforms_router
+from orchestrator.api.routers.prefill_trigger import router as prefill_trigger_router
 from orchestrator.api.routers.status import router as status_router
 from orchestrator.api.routers.sync import router as sync_router
 from orchestrator.api.routers.validate_trigger import router as validate_trigger_router
@@ -366,6 +367,7 @@ def create_app() -> FastAPI:
     app.include_router(manifests_router)
     app.include_router(manifest_trigger_router)
     app.include_router(validate_trigger_router)
+    app.include_router(prefill_trigger_router)
     app.include_router(sync_router)
     app.include_router(status_router)
 

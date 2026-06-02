@@ -19,6 +19,20 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — F5 Steam CDN Prefill — 2026-05-29
+
+Implements F5 from PROJECT_BIBLE §1.2 — downloads a Steam game's depot chunks **through** the lancache so they get cached. Together with F7 this closes the orchestrator's core loop (prefill → cache → validate). Steam-only; F6 (Epic) deferred.
+
+- New `src/orchestrator/prefill/downloader.py` — async httpx engine. For each chunk, `GET {lancache_base_url}/depot/{depot_id}/chunk/{sha}` with `User-Agent: Valve/Steam HTTP Client 1.0` + `Host: lancache.steamcontent.com`, **streamed and discarded**, so lancache caches it under the exact key F7 validates (verified live, spike A5). Bounded by `Semaphore(chunk_concurrency)`; per-chunk read timeout + retry/backoff (`[1,4,16]s`, 4xx not retried). Chunk URLs are unauthenticated — no manifest request code needed.
+- New `src/orchestrator/jobs/handlers/prefill.py` — `prefill` job handler: sets `games.status='downloading'`, builds the deduped `(depot_id, sha)` chunk list (latest manifest per depot → worker `manifest.expand`, reusing F7's path; fetches manifests first if the game has none), downloads, and on full success **enqueues a `validate` job (ID5)**. Any failed chunk → `games.status='failed'` + job failed.
+- New `POST /api/v1/games/{game_id}/prefill` (`api/routers/prefill_trigger.py`) — bearer-gated, in-flight dedup, 202/400/404/503.
+- Settings: `lancache_base_url` (`http://127.0.0.1`), `steam_cdn_host` (`lancache.steamcontent.com`), `prefill_user_agent`, `prefill_chunk_timeout_sec` (10), `prefill_chunk_max_attempts` (3); reuses the pre-staged `chunk_concurrency` (32).
+- ~25 new tests (downloader via httpx MockTransport: headers/path/retry/4xx/concurrency/progress; handler status transitions + ID5 enqueue + fetch-if-no-manifests; trigger 202/dedup/404/400/auth/503; settings bounds). Full suite: 963 pass. ruff/mypy/gitleaks/semgrep clean; security audit 0 SEV (`docs/security-audits/f5-steam-prefill-security-audit.md`).
+
+### Fixed — F7 validator excludes unreadable (mode-000) cache files — 2026-05-29
+
+Bundled with F5 (operator-approved). `disk_stat` now requires the owner-read bit (`st_mode & 0o400`) in addition to exists + size>0. ~1.7% of cache files on the host are mode-000 — they exist but lancache (`www-data`) can't read them (`Permission denied` → 500 → re-download), so they were being over-counted as cached. The check uses `stat()` only (no `open()`), so it works despite the orchestrator (uid 1000) not being able to read `www-data:600` files. Operational finding: issue #128.
+
 ### Fixed — UAT-9 hardening (BL12 + F7 agent sweep) — 2026-05-29
 
 Remediation of the UAT-9 adversarial agent sweep over BL12 + F7 (pre-live-test hardening). Deferred SEV-3/4 items tracked in issues #121–#123.
