@@ -38,8 +38,10 @@ class TestClaimNextJob:
         assert row["started_at"] is not None
 
     async def test_skips_already_claimed_jobs(self, pool):
-        await _queue_job(pool)
-        await _queue_job(pool)
+        # prefill: no single-in-flight constraint (unlike library_sync, capped
+        # at one per platform by migration 0004), so two can coexist queued.
+        await _queue_job(pool, kind="prefill")
+        await _queue_job(pool, kind="prefill")
         first = await claim_next_job(pool)
         second = await claim_next_job(pool)
         assert first is not None and second is not None
@@ -57,7 +59,7 @@ class TestClaimNextJob:
     async def test_atomic_under_concurrency(self, pool):
         """Two parallel claim_next_job calls must return distinct rows."""
         for _ in range(4):
-            await _queue_job(pool)
+            await _queue_job(pool, kind="prefill")
         results = await asyncio.gather(
             claim_next_job(pool),
             claim_next_job(pool),

@@ -177,6 +177,68 @@ def test_reserved_keys_constant_exported() -> None:
     assert "correlation_id" in log_mod.RESERVED_KEYS
 
 
+def test_user_kwarg_level_rescued(capsys: pytest.CaptureFixture[str]) -> None:
+    """SEV-3 (review 2026-06-02): `level` is owned by the downstream
+    `add_log_level` processor, which runs AFTER _protect_reserved_keys and
+    would silently overwrite a user-provided `level`. The user's value must be
+    rescued to `user_level` rather than lost."""
+    log_mod.configure_logging()
+    structlog.get_logger().info("evt", level="custom")
+
+    record = _last_json_line(capsys.readouterr().out)
+    assert record["level"] == "info"  # authoritative level preserved
+    assert record["user_level"] == "custom"  # user's value rescued, not lost
+
+
+def test_user_kwarg_timestamp_rescued(capsys: pytest.CaptureFixture[str]) -> None:
+    """`timestamp` is owned by the downstream TimeStamper; a user-provided
+    timestamp must be rescued to `user_timestamp`, not silently overwritten."""
+    log_mod.configure_logging()
+    structlog.get_logger().info("evt", timestamp="not-a-real-ts")
+
+    record = _last_json_line(capsys.readouterr().out)
+    assert record["timestamp"] != "not-a-real-ts"  # authoritative ISO ts
+    assert record["user_timestamp"] == "not-a-real-ts"
+
+
+def test_user_kwarg_level_collision_uses_numbered_slot(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """If the caller already set `user_level`, the rescued value falls back to
+    user_level_2 — never silently overwrites a pre-existing user field."""
+    log_mod.configure_logging()
+    structlog.get_logger().info("evt", level="custom", user_level="legit")
+
+    record = _last_json_line(capsys.readouterr().out)
+    assert record["level"] == "info"
+    assert record["user_level"] == "legit"
+    assert record["user_level_2"] == "custom"
+
+
+def test_user_kwarg_level_collision_chains_to_higher_slots(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When user_level AND user_level_2 already exist, the rescued value chains
+    to user_level_3 — the numbered-slot search keeps incrementing."""
+    log_mod.configure_logging()
+    structlog.get_logger().info("evt", level="custom", user_level="a", user_level_2="b")
+
+    record = _last_json_line(capsys.readouterr().out)
+    assert record["level"] == "info"
+    assert record["user_level"] == "a"
+    assert record["user_level_2"] == "b"
+    assert record["user_level_3"] == "custom"
+
+
+def test_reserved_keys_reflects_protected_set() -> None:
+    """RESERVED_KEYS lists only keys the pipeline actually protects:
+    correlation_id (contextvars), level/timestamp (downstream processors), and
+    event (positional, unclobberable). `logger`/`logger_name` are NOT auto-added
+    in this processor chain, so listing them overstated the protection (SEV-3
+    misleading-contract finding, review 2026-06-02)."""
+    assert set(log_mod.RESERVED_KEYS) == {"correlation_id", "level", "timestamp", "event"}
+
+
 # ---------------------------------------------------------------------------
 # Issue #14 SEV-3 — PII / secret redaction
 # ---------------------------------------------------------------------------

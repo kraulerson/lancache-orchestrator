@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from orchestrator.scheduler.jobs import enqueue_library_sync
@@ -76,6 +78,21 @@ class TestEnqueueLibrarySync:
         n = await enqueue_library_sync(pool)
         assert n == 1
 
+    async def test_concurrent_enqueue_creates_single_row(self, pool):
+        """SEV-3 (review 2026-06-02): concurrent cron + API enqueues must not
+        race onto duplicate in-flight rows. With the DB-enforced ON CONFLICT
+        the outcome is deterministic — exactly one row inserted regardless of
+        interleaving, and the two callers return [1, 0]."""
+        results = await asyncio.gather(
+            enqueue_library_sync(pool),
+            enqueue_library_sync(pool),
+        )
+        assert sorted(results) == [0, 1]
+        rows = await pool.read_all(
+            "SELECT id FROM jobs WHERE kind='library_sync' AND state IN ('queued','running')"
+        )
+        assert len(rows) == 1
+
     async def test_returns_zero_on_pool_error_without_raising(self, pool):
         """Defensive: scheduler callbacks must never raise (would put the
         scheduler in a degraded state)."""
@@ -83,8 +100,9 @@ class TestEnqueueLibrarySync:
 
         from orchestrator.db.pool import PoolError
 
-        # Replace pool methods with raising stubs.
+        # Replace the write path with a raising stub (the handler now inserts
+        # atomically via execute_write + ON CONFLICT — no pre-SELECT).
         broken_pool = pool
-        broken_pool.read_one = AsyncMock(side_effect=PoolError("simulated"))
+        broken_pool.execute_write = AsyncMock(side_effect=PoolError("simulated"))
         n = await enqueue_library_sync(broken_pool)
         assert n == 0  # logged + returned; did not raise

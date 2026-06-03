@@ -9,7 +9,11 @@ from orchestrator.jobs.reaper import REAPER_ERROR_MESSAGE, reap_running_jobs
 pytestmark = pytest.mark.asyncio
 
 
-async def _insert_job(pool, kind="library_sync", state="queued", started_at=None):
+# Use a non-singleton kind: migration 0004 permits only ONE in-flight
+# library_sync per platform, but these reaper tests seed several concurrent
+# in-flight jobs. prefill (per-game) has no such constraint and the reaper is
+# kind-agnostic, so it is the realistic fixture for "multiple running jobs".
+async def _insert_job(pool, kind="prefill", state="queued", started_at=None):
     """Insert a job row with the given state. Returns the new id."""
     sql = "INSERT INTO jobs (kind, platform, state, source, started_at) VALUES (?, ?, ?, 'api', ?)"
     await pool.execute_write(sql, (kind, "steam", state, started_at))

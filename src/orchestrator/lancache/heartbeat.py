@@ -70,6 +70,10 @@ class LancacheProbe:
 
         self._last_result: bool = False
         self._last_checked_at_mono: float | None = None
+        # One-shot operator-forced-refresh flag (see invalidate()). Cleared when
+        # the satisfying refresh begins, so it survives an in-flight refresh's
+        # cache-timestamp write instead of being clobbered by it.
+        self._force_refresh: bool = False
         # Single lock collapses concurrent probes onto one in-flight call.
         self._refresh_lock = asyncio.Lock()
 
@@ -80,10 +84,20 @@ class LancacheProbe:
         return self._last_checked_at_mono
 
     def invalidate(self) -> None:
-        """Force the next probe() to ignore the TTL and refresh."""
-        self._last_checked_at_mono = None
+        """Force the next probe() to ignore the TTL and refresh.
+
+        Sets a one-shot flag rather than nulling the cache timestamp directly:
+        an in-flight ``_refresh()`` writes the timestamp on completion, which
+        would otherwise clobber a concurrent ``invalidate()`` and swallow the
+        operator's forced refresh for a full TTL (SEV-3, code review
+        2026-06-02). The flag is cleared when the satisfying refresh begins, so
+        an invalidate arriving *during* a refresh still forces the next one.
+        """
+        self._force_refresh = True
 
     def _cache_fresh(self) -> bool:
+        if self._force_refresh:
+            return False
         if self._last_checked_at_mono is None:
             return False
         age = self._monotonic() - self._last_checked_at_mono
@@ -108,6 +122,11 @@ class LancacheProbe:
         return self._last_result
 
     async def _refresh(self) -> None:
+        # Clear the forced-refresh flag at the START: this refresh satisfies any
+        # invalidate() that preceded it. An invalidate() arriving while we're in
+        # flight re-sets the flag, so the next probe still refreshes — the flag
+        # is never clobbered by our trailing cache-timestamp write.
+        self._force_refresh = False
         ok = False
         try:
             async with httpx.AsyncClient(timeout=self._timeout_sec) as client:

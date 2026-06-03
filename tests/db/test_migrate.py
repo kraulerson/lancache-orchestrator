@@ -937,3 +937,51 @@ class TestChecksumFilenameValidation:
         _write_migration(migs_dir, 1, "initial", _VALID_FIRST_MIG)
         _write_checksums(migs_dir, [(1, _sha256(_VALID_FIRST_MIG), "0001_initial.sql")])
         migrate.run_migrations(db_path, migrations_dir=migs_dir)
+
+
+def test_migration_0004_cleanup_keeps_earliest_inflight_per_platform() -> None:
+    """SEV-3 (review 2026-06-02): migration 0004's one-time cleanup cancels
+    all-but-earliest in-flight library_sync per platform BEFORE creating the
+    UNIQUE index, so it applies cleanly to already-deployed DBs that carry the
+    pre-existing duplicates the index prevents. Exercised against a raw DB
+    seeded with the dup state the running pool can no longer produce."""
+    from pathlib import Path
+
+    import orchestrator
+
+    mig_path = (
+        Path(orchestrator.__file__).parent
+        / "db"
+        / "migrations"
+        / "0004_jobs_library_sync_unique.sql"
+    )
+    db = sqlite3.connect(":memory:")
+    try:
+        db.executescript(
+            "CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, "
+            "platform TEXT, state TEXT, source TEXT, started_at TEXT, "
+            "finished_at TEXT, error TEXT);"
+            "INSERT INTO jobs (kind,platform,state,source) VALUES "
+            "('library_sync','steam','running','api');"
+            "INSERT INTO jobs (kind,platform,state,source) VALUES "
+            "('library_sync','steam','queued','scheduler');"
+            "INSERT INTO jobs (kind,platform,state,source) VALUES "
+            "('library_sync','epic','queued','api');"
+            "INSERT INTO jobs (kind,platform,state,source) VALUES "
+            "('library_sync','steam','succeeded','api');"
+        )
+        db.executescript(mig_path.read_text(encoding="utf-8"))  # cleanup UPDATE + index
+        inflight = dict(
+            db.execute(
+                "SELECT platform, COUNT(*) FROM jobs WHERE kind='library_sync' "
+                "AND state IN ('queued','running') GROUP BY platform"
+            ).fetchall()
+        )
+        assert inflight == {"steam": 1, "epic": 1}
+        kept = db.execute(
+            "SELECT id, state FROM jobs WHERE kind='library_sync' "
+            "AND platform='steam' AND state IN ('queued','running')"
+        ).fetchone()
+        assert kept == (1, "running")  # earliest (lowest id) survives
+    finally:
+        db.close()

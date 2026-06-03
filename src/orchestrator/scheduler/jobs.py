@@ -22,30 +22,27 @@ _log = structlog.get_logger(__name__)
 async def enqueue_library_sync(pool: Pool) -> int:
     """Insert a `library_sync` job row if none is queued/running for steam.
 
-    Returns the rowcount affected (0 if dedup-skipped or DB failure, 1
-    if a new row was queued). Never raises — DB errors are logged and
-    swallowed so a failing scheduler tick doesn't crash the scheduler.
+    Returns the rowcount affected (1 if a new row was queued, 0 if a dedup
+    conflict skipped it or on DB failure). Never raises — DB errors are logged
+    and swallowed so a failing scheduler tick doesn't crash the scheduler.
 
-    Dedup logic mirrors `sync.trigger_library_sync` so cron + operator
-    triggers don't race onto duplicate rows. F12 D7.
+    Dedup is DB-enforced: the partial UNIQUE index `idx_jobs_library_sync_inflight`
+    (migration 0004) guarantees at most one queued/running library_sync per
+    platform, and `ON CONFLICT DO NOTHING` collapses a concurrent cron + API
+    race into a single row (previously an app-level SELECT-then-INSERT that
+    straddled an await and could double-insert — code review 2026-06-02). F12 D7.
     """
     try:
-        existing = await pool.read_one(
-            "SELECT id FROM jobs "
-            "WHERE kind='library_sync' AND platform='steam' "
-            "AND state IN ('queued','running') "
-            "ORDER BY id LIMIT 1"
-        )
-        if existing is not None:
-            _log.info("scheduler.library_sync.dedup_skip", existing_job_id=existing["id"])
-            return 0
-
-        await pool.execute_write(
+        inserted = await pool.execute_write(
             "INSERT INTO jobs (kind, platform, state, source) "
-            "VALUES ('library_sync', 'steam', 'queued', 'scheduler')"
+            "VALUES ('library_sync', 'steam', 'queued', 'scheduler') "
+            "ON CONFLICT DO NOTHING"
         )
-        _log.info("scheduler.library_sync.queued")
-        return 1
+        if inserted:
+            _log.info("scheduler.library_sync.queued")
+        else:
+            _log.info("scheduler.library_sync.dedup_skip")
+        return inserted
     except PoolError as e:
         _log.error("scheduler.library_sync.db_error", reason=str(e)[:200])
         return 0

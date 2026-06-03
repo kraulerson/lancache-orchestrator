@@ -5,9 +5,11 @@ See `tests/core/test_logging.py` for the contract.
 - JSON output via structlog, one event per line on stdout
 - Correlation-ID tracking via contextvars, scoped by `request_context()`
   which clears even on exception (supersedes the raw bind/clear pair)
-- Reserved-key protection: user kwargs that collide with contextvars-
-  owned keys (correlation_id, level, timestamp, event, logger, logger_name)
-  are rescued to `user_<key>` rather than silently overriding
+- Reserved-key protection: user kwargs that would collide with pipeline-owned
+  keys are rescued to `user_<key>` rather than silently overriding (or being
+  overwritten). Two classes: contextvars-owned (`correlation_id`) and
+  downstream-processor-owned (`level`, `timestamp`). `event` is the positional
+  message slot and cannot be passed as a kwarg.
 - Secret redaction: keys matching common credential patterns have their
   values replaced with `<redacted>`; recursive through dicts + lists
 - log_level is validated against the stdlib set; raises `ValueError` on
@@ -31,9 +33,18 @@ if TYPE_CHECKING:
 # Public constants
 # ---------------------------------------------------------------------------
 
-RESERVED_KEYS: frozenset[str] = frozenset(
-    {"correlation_id", "level", "timestamp", "event", "logger", "logger_name"}
-)
+# Keys the logging pipeline owns and protects from user-kwarg clobber. Listing
+# only what is genuinely protected (SEV-3 misleading-contract fix, review
+# 2026-06-02): `correlation_id` is contextvars-owned; `level`/`timestamp` are
+# written by downstream processors; `event` is the positional message slot and
+# cannot be passed as a kwarg. `logger`/`logger_name` are NOT added by any
+# processor in this chain, so they were never actually reserved.
+RESERVED_KEYS: frozenset[str] = frozenset({"correlation_id", "level", "timestamp", "event"})
+
+# Reserved keys written by processors that run AFTER _protect_reserved_keys
+# (add_log_level → "level", TimeStamper → "timestamp"). A user kwarg with one of
+# these names would be silently overwritten downstream, so we rescue it first.
+_DOWNSTREAM_OWNED_KEYS: frozenset[str] = frozenset({"level", "timestamp"})
 
 _VALID_LOG_LEVELS: frozenset[str] = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
@@ -127,36 +138,56 @@ def request_context(correlation_id: str | None = None) -> Iterator[str]:
 # ---------------------------------------------------------------------------
 
 
+def _stash_user_value(event_dict: MutableMapping[str, Any], key: str, value: Any) -> None:
+    """Move a user-supplied reserved-key value to `user_<key>`, never silently
+    overwriting a pre-existing user field — collisions fall back to
+    `user_<key>_2`, `user_<key>_3`, etc."""
+    target = f"user_{key}"
+    if target in event_dict:
+        i = 2
+        while f"{target}_{i}" in event_dict:
+            i += 1
+        target = f"{target}_{i}"
+    event_dict[target] = value
+
+
 def _protect_reserved_keys(
     _logger: Any,
     _method_name: str,
     event_dict: MutableMapping[str, Any],
 ) -> MutableMapping[str, Any]:
-    """Rescue reserved keys that user kwargs would otherwise clobber.
+    """Rescue reserved keys that user kwargs would otherwise clobber — or be
+    clobbered by.
 
-    structlog's `merge_contextvars` runs before us and uses `ctx.update(event_dict)`
-    — user kwargs override contextvars. For reserved keys we invert that: if the
-    key is bound in contextvars and the event_dict has a different value, restore
-    the contextvars value and save the user's under `user_<key>`.
+    Two protection classes:
 
-    Collision handling: if `user_<key>` is ALREADY present in the event_dict
-    (caller genuinely set that field), the rescued value is stashed at
-    `user_<key>_2`, `user_<key>_3`, etc. — never silently overwrites a
-    pre-existing user field.
+    1. **Contextvars-owned** (`correlation_id`): `merge_contextvars` ran before
+       us with `ctx.update(event_dict)`, so a user kwarg overrides the bound
+       value. We invert that: restore the contextvars value and stash the user's
+       under `user_<key>`.
 
-    No-op for non-reserved keys and for reserved keys not currently bound.
+    2. **Downstream-owned** (`level`, `timestamp`): these are written by
+       processors that run AFTER us (`add_log_level`, `TimeStamper`). A user
+       kwarg with one of these names is present now but would be silently
+       overwritten downstream — so we move it to `user_<key>` before that
+       happens. Previously only the contextvars class was handled, so these
+       collisions were lost (SEV-3, code review 2026-06-02).
+
+    `event` needs no handling here: structlog's `meth(event, **kwargs)` signature
+    makes it an exclusive positional slot, so it cannot arrive as a user kwarg.
     """
     ctx = structlog.contextvars.get_contextvars()
-    for key in RESERVED_KEYS & ctx.keys():
+    # Exclude downstream-owned keys from the contextvars loop so a key can never
+    # be processed by BOTH loops (defensive: today only correlation_id is ever
+    # contextvars-bound, but binding `level`/`timestamp` later must not
+    # double-stash).
+    for key in (RESERVED_KEYS - _DOWNSTREAM_OWNED_KEYS) & ctx.keys():
         if key in event_dict and event_dict[key] != ctx[key]:
-            target = f"user_{key}"
-            if target in event_dict:
-                i = 2
-                while f"{target}_{i}" in event_dict:
-                    i += 1
-                target = f"{target}_{i}"
-            event_dict[target] = event_dict[key]
+            _stash_user_value(event_dict, key, event_dict[key])
             event_dict[key] = ctx[key]
+    for key in _DOWNSTREAM_OWNED_KEYS:
+        if key in event_dict:
+            _stash_user_value(event_dict, key, event_dict.pop(key))
     return event_dict
 
 
