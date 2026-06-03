@@ -19,6 +19,15 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Security/Stability: DB pool reader-exhaustion deadlock (SEV-2) — 2026-06-02
+
+Surfaced by the multi-agent code review. On reader I/O errors (e.g. a failing DB volume), `_replace_connection`'s storm-guard and replacement-open-failure paths returned **without re-queueing** the reader, permanently shrinking the reader pool; with `_checkout_reader` awaiting `self._readers.get()` with **no timeout**, once the queue drained **every read blocked forever** while the pool still reported `state="ready"` and raised no `PoolError`. The existing chaos/slow tests masked it (they asserted only a health symptom, never the loud-failure contract, and never issued the follow-up read that would hang).
+
+- **Bounded reader acquire** (`db/pool.py` `_acquire_reader`): reads now wait at most `pool_reader_acquire_timeout_sec` (default 30 s) for a free reader; on exhaustion they raise `PoolError` (→ 503) instead of hanging — fail loud, not silent.
+- **Lost-slot tracking + heal-on-exhaustion:** a give-up replacement now records the lost slot (`_lost_reader_slots`) instead of silently leaking it; on an acquire timeout with a recorded deficit the pool opens a fresh reader, so capacity **recovers automatically once the fault clears** (rather than requiring a restart).
+- New setting `pool_reader_acquire_timeout_sec` (default 30.0, range 0<t≤300).
+- New regression tests `tests/db/test_pool_reader_exhaustion.py` (exhaustion → `PoolError` within bounded wall-clock, not a hang; recovery after the fault clears). Strengthened the two masking storm tests to assert the lost-slot contract. Full suite: 966 pass + 3 slow.
+
 ### Fixed — Stability: scheduler `start()` no longer leaks a stale instance (SEV-2) — 2026-06-02
 
 From the 2026-06-02 code review. `SchedulerManager.start()` guarded idempotency with `if self._scheduler is not None and self._scheduler.running: return`. On the **non-running** path — a held-but-stopped scheduler, e.g. after a prior `shutdown()` that raised partway and left `_scheduler` dangling — `start()` fell through and **overwrote** `self._scheduler` with a fresh `AsyncIOScheduler`, silently abandoning the prior object instead of disposing of it. The "idempotent start" contract was false on that path. Currently unreachable via the single-call lifespan, but a latent lifecycle bug.

@@ -286,6 +286,14 @@ class TestFieldValidators:
         with pytest.raises(ValidationError):
             Settings(orchestrator_token=VALID_TOKEN, pool_busy_timeout_ms=-1)
 
+    def test_pool_reader_acquire_timeout_default_and_bounds(self):
+        """SEV-2 fix: bounded reader acquire timeout."""
+        assert Settings(orchestrator_token=VALID_TOKEN).pool_reader_acquire_timeout_sec == 30.0
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, pool_reader_acquire_timeout_sec=0)
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, pool_reader_acquire_timeout_sec=301)
+
     def test_db_cache_size_below_min_rejects(self):
         with pytest.raises(ValidationError):
             Settings(orchestrator_token=VALID_TOKEN, db_cache_size_kib=1023)
