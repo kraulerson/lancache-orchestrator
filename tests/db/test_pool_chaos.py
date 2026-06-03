@@ -105,8 +105,10 @@ class TestWriterReplacement:
 
 class TestStormGuard:
     async def test_storm_guard_trips_after_3_replacements_in_60s(self, pool: Pool, monkeypatch):
-        """Forcing 4+ replacements within 60s trips the storm guard; pool
-        transitions to degraded."""
+        """Forcing 4+ replacements within 60s trips the storm guard; each
+        give-up records a lost reader slot (SEV-2 fix) and the readers report
+        unhealthy. The full loud-failure (PoolError, not deadlock) + recovery
+        contract is covered by tests/db/test_pool_reader_exhaustion.py."""
 
         async def always_io_error(self, sql, parameters=()):
             raise aiosqlite.OperationalError("disk I/O error")
@@ -115,17 +117,18 @@ class TestStormGuard:
 
         # Trigger replacements rapidly
         for _ in range(4):
-            with contextlib.suppress(ConnectionLostError):
+            with contextlib.suppress(ConnectionLostError, aiosqlite.OperationalError):
                 await pool.read_one("SELECT 1")
             await asyncio.sleep(0.05)
 
         await asyncio.sleep(0.5)
 
-        # After storm guard trips, the pool's degraded
-        # Next op should raise PoolError indicating degraded state
-        # OR all readers may now be marked unhealthy
+        # SEV-2 fix: a give-up replacement no longer silently leaks the reader
+        # slot — it is recorded, so exhaustion is detectable rather than a
+        # silent deadlock.
+        assert pool._lost_reader_slots >= 1
+
         health = await pool.health_check()
-        # Either readers are mostly unhealthy OR the writer is unhealthy
         unhealthy_readers = health["readers"]["total"] - health["readers"]["healthy"]
         assert unhealthy_readers >= 1 or not health["writer"]["healthy"]
 
