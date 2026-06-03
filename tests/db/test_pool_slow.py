@@ -97,9 +97,14 @@ async def test_sustained_concurrent_workload(populated_pool: Pool):
 
 
 @pytest.mark.slow
-async def test_replacement_storm_guard_under_load(pool: Pool, monkeypatch):
-    """Pathologically broken connection forces many replacements in 60s; storm
-    guard trips and pool transitions to degraded state."""
+async def test_replacement_storm_guard_under_load(db_path, monkeypatch):
+    """Pathologically broken reads force many replacements in 60s; the storm
+    guard trips and records lost reader slots (SEV-2 fix) instead of silently
+    leaking them. Loud-failure + recovery contract: see
+    tests/db/test_pool_reader_exhaustion.py.
+
+    Uses a short reader_acquire_timeout so the post-exhaustion reads fail fast
+    instead of blocking on the production default."""
     original_execute = aiosqlite.Connection.execute
 
     async def io_error_for_reads(self, sql, parameters=()):
@@ -107,20 +112,22 @@ async def test_replacement_storm_guard_under_load(pool: Pool, monkeypatch):
             raise aiosqlite.OperationalError("disk I/O error")
         return await original_execute(self, sql, parameters)
 
-    monkeypatch.setattr(aiosqlite.Connection, "execute", io_error_for_reads)
+    async with Pool.create(
+        database_path=db_path, readers_count=4, reader_acquire_timeout_sec=0.3
+    ) as pool:
+        monkeypatch.setattr(aiosqlite.Connection, "execute", io_error_for_reads)
 
-    # Hammer reads in parallel to trigger replacements
-    async def trigger():
-        with contextlib.suppress(Exception):
-            await pool.read_one("SELECT 1")
+        async def trigger():
+            with contextlib.suppress(Exception):
+                await pool.read_one("SELECT 1")
 
-    await asyncio.gather(*(trigger() for _ in range(10)))
-    await asyncio.sleep(2)
+        await asyncio.gather(*(trigger() for _ in range(10)))
+        await asyncio.sleep(2)
 
-    # After storm guard, pool is degraded
-    health = await pool.health_check()
-    # All readers should be unhealthy now (storm guard refused further replacements)
-    assert health["readers"]["healthy"] < health["readers"]["total"]
+        # Storm guard tripped → at least one reader slot recorded as lost.
+        assert pool._lost_reader_slots >= 1
+        health = await pool.health_check()
+        assert health["readers"]["healthy"] < health["readers"]["total"]
 
 
 @pytest.mark.slow

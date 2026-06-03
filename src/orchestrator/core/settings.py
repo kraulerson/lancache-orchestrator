@@ -120,6 +120,11 @@ class Settings(BaseSettings):
     # --- DB pool & SQLite tuning (BL4) ---
     pool_readers: int = Field(default=8, ge=1, le=32)
     pool_busy_timeout_ms: int = Field(default=5000, ge=0, le=60000)
+    # SEV-2 fix (code review 2026-06-02): bound how long a read waits for a
+    # free reader connection. If the reader pool is exhausted (e.g. slots lost
+    # to failed replacements after disk I/O errors), reads raise PoolError
+    # rather than blocking forever.
+    pool_reader_acquire_timeout_sec: float = Field(default=30.0, gt=0.0, le=300.0)
     db_cache_size_kib: int = Field(default=16384, ge=1024, le=1048576)
     db_mmap_size_bytes: int = Field(default=268_435_456, ge=0, le=17_179_869_184)
     db_journal_size_limit_bytes: int = Field(default=67_108_864, ge=1_048_576, le=1_073_741_824)

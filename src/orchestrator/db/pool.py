@@ -548,6 +548,7 @@ class Pool:
         cache_size_kib: int,
         mmap_size_bytes: int,
         journal_size_limit_bytes: int,
+        reader_acquire_timeout_sec: float = 30.0,
     ) -> None:
         # V-1: enforce readers_count floor at the Pool layer too. Settings
         # already constrains 1..32 for the singleton path, but Pool.create()
@@ -563,6 +564,7 @@ class Pool:
             )
         self._database_path = database_path
         self._readers_count = readers_count
+        self._reader_acquire_timeout = reader_acquire_timeout_sec
         self._busy_timeout_ms = busy_timeout_ms
         self._cache_size_kib = cache_size_kib
         self._mmap_size_bytes = mmap_size_bytes
@@ -578,6 +580,11 @@ class Pool:
 
         self._writer_healthy = False
         self._reader_healthy: dict[int, bool] = {}
+        # SEV-2 fix: count reader slots lost when a replacement gives up
+        # (storm guard or replacement-open failure). Drives heal-on-acquire
+        # so capacity is restored once the fault clears, and lets the bounded
+        # acquire distinguish "exhausted" from "all readers merely busy".
+        self._lost_reader_slots = 0
         self._replacement_count: dict[str, int] = {"writer": 0, "reader": 0}
         self._replacement_timestamps: dict[str, list[float]] = {
             "writer": [],
@@ -621,6 +628,7 @@ class Pool:
         cache_size_kib: int = 16384,
         mmap_size_bytes: int = 268_435_456,
         journal_size_limit_bytes: int = 67_108_864,
+        reader_acquire_timeout_sec: float = 30.0,
         skip_schema_verify: bool = False,
     ) -> _PoolCreator:
         """Construct a pool. Supports both `await Pool.create(...)` and
@@ -634,6 +642,7 @@ class Pool:
                 "cache_size_kib": cache_size_kib,
                 "mmap_size_bytes": mmap_size_bytes,
                 "journal_size_limit_bytes": journal_size_limit_bytes,
+                "reader_acquire_timeout_sec": reader_acquire_timeout_sec,
                 "skip_schema_verify": skip_schema_verify,
             },
         )
@@ -648,6 +657,7 @@ class Pool:
         cache_size_kib: int,
         mmap_size_bytes: int,
         journal_size_limit_bytes: int,
+        reader_acquire_timeout_sec: float,
         skip_schema_verify: bool,
     ) -> Pool:
         pool = cls(
@@ -657,6 +667,7 @@ class Pool:
             cache_size_kib=cache_size_kib,
             mmap_size_bytes=mmap_size_bytes,
             journal_size_limit_bytes=journal_size_limit_bytes,
+            reader_acquire_timeout_sec=reader_acquire_timeout_sec,
         )
         try:
             pool._writer = await pool._open_connection(role="writer")
@@ -791,11 +802,59 @@ class Pool:
 
     # --- Connection checkout helpers ----------------------------------
 
+    async def _acquire_reader(self) -> aiosqlite.Connection:
+        """Get a reader from the queue, bounded by reader_acquire_timeout.
+
+        SEV-2 fix: a plain `await self._readers.get()` blocks forever once the
+        queue is drained (e.g. slots lost to failed replacements after disk
+        I/O errors), deadlocking all reads while the pool still reports
+        "ready". Instead we time out; if slots were lost we try to heal one
+        (so the pool recovers when the fault clears), otherwise we raise
+        PoolError so callers fail loudly (→ 503) rather than hanging.
+        """
+        try:
+            return await asyncio.wait_for(self._readers.get(), timeout=self._reader_acquire_timeout)
+        except TimeoutError as exc:
+            # Only open a replacement if a slot was genuinely lost — never
+            # exceed readers_count just because all readers are momentarily
+            # busy (that would overflow the bounded queue on release).
+            if self._lost_reader_slots > 0:
+                try:
+                    new_conn = await self._open_connection(role="reader")
+                except Exception as e:
+                    raise PoolError(
+                        "reader pool exhausted: replacement connection could not "
+                        f"be opened ({type(e).__name__})"
+                    ) from e
+                self._adopt_reader(new_conn)
+                self._lost_reader_slots -= 1
+                _log.warning("pool.reader_slot_healed", remaining_deficit=self._lost_reader_slots)
+                return new_conn
+            raise PoolError(
+                f"reader pool exhausted: no reader available within {self._reader_acquire_timeout}s"
+            ) from exc
+
+    def _adopt_reader(self, conn: aiosqlite.Connection) -> None:
+        """Register a freshly-healed reader into a known-dead slot (or append
+        if none), so _reader_pool / _reader_healthy stay consistent and
+        health_check probes the live connection."""
+        for i in range(self._readers_count):
+            if not self._reader_healthy.get(i, False):
+                if i < len(self._reader_pool):
+                    self._reader_pool[i] = conn
+                else:
+                    self._reader_pool.append(conn)
+                self._reader_healthy[i] = True
+                return
+        # No dead slot recorded — append defensively (should not normally hit
+        # since a positive deficit implies a dead slot exists).
+        self._reader_pool.append(conn)
+
     @asynccontextmanager
     async def _checkout_reader(self) -> AsyncIterator[aiosqlite.Connection]:
         if self._state != "ready":
             raise PoolClosedError(state=self._state)
-        reader = await self._readers.get()
+        reader = await self._acquire_reader()
         healthy_after = True
         try:
             yield reader
@@ -859,12 +918,20 @@ class Pool:
                 raise PoolError("reader replacement requires reader_index")
             self._reader_healthy[reader_index] = False
 
-        # Storm guard: > 3 replacements in 60s → degraded; refuse further
+        # Storm guard: > 3 replacements in 60s → refuse further replacement.
+        # SEV-2 fix: the reader was already removed from the queue by
+        # _checkout_reader; giving up here without re-queueing permanently
+        # shrinks capacity, so record the lost slot. The bounded acquire +
+        # heal-on-exhaustion then keep reads loud (PoolError) and let capacity
+        # recover once the fault clears.
         if len(recent) > 3:
+            if role == "reader":
+                self._lost_reader_slots += 1
             _log.critical(
                 "pool.replacement_storm",
                 role=role,
                 count_in_60s=len(recent),
+                lost_reader_slots=self._lost_reader_slots,
             )
             return
 
@@ -875,11 +942,17 @@ class Pool:
         try:
             new_conn = await self._open_connection(role=role)
         except Exception as e:
+            # SEV-2 fix: open failed → the reader slot is gone. Record it so
+            # the bounded acquire surfaces a PoolError (not a hang) and a later
+            # acquire can heal the slot once the fault clears.
+            if role == "reader":
+                self._lost_reader_slots += 1
             _log.critical(
                 "pool.replacement_failed",
                 role=role,
                 reader_index=reader_index,
                 reason=str(e),
+                lost_reader_slots=self._lost_reader_slots,
             )
             return
 
@@ -1260,6 +1333,7 @@ async def init_pool(*, verify_schema: bool = True) -> Pool:
             database_path=settings.database_path,
             readers_count=settings.pool_readers,
             busy_timeout_ms=settings.pool_busy_timeout_ms,
+            reader_acquire_timeout_sec=settings.pool_reader_acquire_timeout_sec,
             cache_size_kib=settings.db_cache_size_kib,
             mmap_size_bytes=settings.db_mmap_size_bytes,
             journal_size_limit_bytes=settings.db_journal_size_limit_bytes,
