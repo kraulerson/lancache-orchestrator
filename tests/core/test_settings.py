@@ -201,6 +201,42 @@ class TestFieldValidators:
     def test_cache_levels_valid_accepts(self):
         Settings(orchestrator_token=VALID_TOKEN, cache_levels="1:1:1")
 
+    def test_pool_busy_timeout_zero_rejects(self):
+        """SEV-4 (review 2026-06-02): busy_timeout=0 disables SQLite's busy
+        wait, surfacing spurious WriteConflictError under any write contention.
+        The floor is now 100 ms."""
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, pool_busy_timeout_ms=0)
+
+    def test_pool_busy_timeout_floor_accepts(self):
+        Settings(orchestrator_token=VALID_TOKEN, pool_busy_timeout_ms=100)
+
+    def test_token_error_scrubbed_other_field_error_not(self):
+        """SEV-4 (review 2026-06-02): the token-error scrub keys on the EXACT
+        secret field name, not a `"token" in loc` substring. A token error
+        becomes a scrubbed plain ValueError; a non-secret field error stays a
+        pydantic ValidationError (carrying full, non-secret detail)."""
+        candidate = "short"  # below the 32-char minimum
+        with pytest.raises(ValueError) as token_exc:
+            Settings(orchestrator_token=candidate)
+        assert not isinstance(token_exc.value, ValidationError)
+
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, api_port=0)
+
+    def test_token_error_via_env_alias_is_scrubbed(self, monkeypatch):
+        """SEV-1 (adversarial review 2026-06-02): a too-short token supplied via
+        the ORCH_TOKEN env alias fails with loc=('ORCH_TOKEN',), NOT the field
+        name. The scrub must still catch it — matching the field name alone
+        would miss the alias and leak the raw candidate via the propagated
+        ValidationError's echoed input_value."""
+        leak = "SHORT_ENV_CANARY_27_CHARS!!"  # 27 chars — below the 32 min
+        monkeypatch.setenv("ORCH_TOKEN", leak)
+        with pytest.raises(ValueError) as exc:
+            Settings()
+        assert not isinstance(exc.value, ValidationError)
+        assert leak not in str(exc.value)
+
     def test_chunk_concurrency_zero_rejects(self):
         with pytest.raises(ValidationError):
             Settings(orchestrator_token=VALID_TOKEN, chunk_concurrency=0)

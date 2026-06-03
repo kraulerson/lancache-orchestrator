@@ -528,6 +528,50 @@ class TestRawAcquire:
         assert secondary_entered  # entered after primary released
         assert secondary_entered[0] >= 0.1  # waited at least 100ms
 
+    async def test_acquire_writer_rolls_back_dangling_transaction(self, pool: Pool):
+        """SEV-4 (review 2026-06-02): the raw escape hatch must not let a
+        forgotten transaction bleed into the next writer. A caller that opens a
+        txn and exits without commit/rollback gets it rolled back on exit — so
+        the next execute_write's commit doesn't silently resurrect those writes."""
+        async with pool.acquire_writer() as conn:
+            await conn.execute("BEGIN")
+            await conn.execute(
+                "INSERT INTO games (platform, app_id, title, owned, status) "
+                "VALUES ('steam', 'dangle', 'Dangling', 1, 'not_downloaded')"
+            )
+            # exits WITHOUT commit/rollback
+
+        # A subsequent, unrelated write must NOT carry the dangling row with it.
+        await pool.execute_write(
+            "INSERT INTO games (platform, app_id, title, owned, status) "
+            "VALUES ('steam', 'after', 'After', 1, 'not_downloaded')"
+        )
+        rows = await pool.read_all("SELECT app_id FROM games WHERE app_id IN ('dangle', 'after')")
+        assert {r["app_id"] for r in rows} == {"after"}
+
+
+class TestHealthCheckBusyReaders:
+    async def test_busy_reader_not_marked_unhealthy(self, pool: Pool, monkeypatch):
+        """SEV-4 (review 2026-06-02): health_check must not probe a checked-out
+        (in-use) reader. A reader busy with a slow real query would queue the
+        SELECT-1 probe behind it and time out → readers.healthy < total → a
+        false /health 503. In-use readers count healthy (they're serving traffic
+        and self-police via the read path)."""
+        total = (await pool.health_check())["readers"]["total"]
+
+        async with pool.acquire_reader() as held:
+            # Simulate the held reader being busy with a slow in-flight query —
+            # any probe on its connection would block past the 1 s timeout.
+            async def slow_execute(*_a, **_kw):
+                await asyncio.sleep(5)
+
+            monkeypatch.setattr(held, "execute", slow_execute)
+
+            # Must not hang on the busy reader, and must not mark it unhealthy.
+            health = await asyncio.wait_for(pool.health_check(), timeout=3.0)
+
+        assert health["readers"]["healthy"] == total
+
 
 # ----------------------------------------------------------------------
 # 8. Error wrapping

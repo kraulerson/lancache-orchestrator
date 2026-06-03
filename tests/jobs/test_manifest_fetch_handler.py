@@ -325,3 +325,47 @@ class TestSizeCap:
 
         rows = await pool.read_all("SELECT id FROM manifests")
         assert rows == []
+
+    async def test_size_cap_raise_cleans_up_unprocessed_temp_files(self, pool):
+        """SEV-4 (review 2026-06-02): the worker writes EVERY depot's BLOB to a
+        temp file up front. When an early entry trips the size cap and the
+        handler raises, the not-yet-processed entries' temp files must not leak —
+        the per-iteration `finally` only reaches the entry being processed."""
+        from unittest.mock import MagicMock, patch
+
+        game_id = await _seed_game(pool)
+        oversized_path = _write_blob(b"x" * 1024)  # trips the cap → raises first
+        unprocessed_path = _write_blob(b"y" * 10)  # never reached by the loop
+        stub = _StubSteam(
+            result={
+                "manifests": [
+                    {
+                        "depot_id": 731,
+                        "manifest_gid": 1,
+                        "name": "huge",
+                        "total_bytes": 1_000_000_000,
+                        "chunk_count": 100,
+                        "raw_path": oversized_path,
+                    },
+                    {
+                        "depot_id": 734,
+                        "manifest_gid": 2,
+                        "name": "normal",
+                        "total_bytes": 10,
+                        "chunk_count": 1,
+                        "raw_path": unprocessed_path,
+                    },
+                ]
+            }
+        )
+
+        with patch("orchestrator.jobs.handlers.manifest_fetch.get_settings") as mock_settings:
+            settings_stub = MagicMock()
+            settings_stub.manifest_size_cap_bytes = 512
+            mock_settings.return_value = settings_stub
+
+            with pytest.raises(ValueError, match=r"exceeds size cap"):
+                await manifest_fetch_handler(_job(game_id), Deps(pool=pool, steam_client=stub))
+
+        assert not os.path.exists(oversized_path)
+        assert not os.path.exists(unprocessed_path), "unprocessed depot temp file leaked"

@@ -574,6 +574,12 @@ class Pool:
         self._writer_lock = asyncio.Lock()
         self._readers: asyncio.Queue[aiosqlite.Connection] = asyncio.Queue(maxsize=readers_count)
         self._reader_pool: list[aiosqlite.Connection] = []  # for index lookup
+        # id() of every reader connection currently checked out. health_check
+        # uses this to probe only IDLE readers — probing an in-use one would
+        # queue the SELECT-1 behind its real query and falsely time out
+        # (SEV-4, code review 2026-06-02). Explicit tracking avoids peeking the
+        # asyncio.Queue internals.
+        self._inuse_readers: set[int] = set()
 
         self._state: _StateLiteral = "initializing"
         self._state_lock = asyncio.Lock()
@@ -855,6 +861,7 @@ class Pool:
         if self._state != "ready":
             raise PoolClosedError(state=self._state)
         reader = await self._acquire_reader()
+        self._inuse_readers.add(id(reader))
         healthy_after = True
         try:
             yield reader
@@ -872,6 +879,7 @@ class Pool:
                 )
             raise
         finally:
+            self._inuse_readers.discard(id(reader))
             if healthy_after:
                 await self._readers.put(reader)
 
@@ -1173,8 +1181,22 @@ class Pool:
 
     @asynccontextmanager
     async def acquire_writer(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Raw writer-connection escape hatch. The caller manages its own
+        transactions — prefer `write_transaction()` or `execute_write()`, which
+        do that for you. As a safety net, any transaction still open when the
+        context exits is rolled back, so a forgotten commit can't bleed
+        uncommitted writes into the next caller's commit (SEV-4, code review
+        2026-06-02)."""
         async with self._checkout_writer() as conn:
-            yield conn
+            try:
+                yield conn
+            finally:
+                if conn.in_transaction:
+                    # Surface the safety net so a caller that forgot to
+                    # commit/rollback is visible to operators, not silent.
+                    _log.warning("pool.acquire_writer.rolled_back_open_txn")
+                    with contextlib.suppress(Exception):
+                        await conn.rollback()
 
     # --- Health & schema ----------------------------------------------
 
@@ -1195,12 +1217,25 @@ class Pool:
         else:
             writer_task = None
 
-        # Snapshot reader connections (don't drain queue — use _reader_pool)
-        reader_tasks = [
-            asyncio.create_task(probe(r, "reader", i))
-            for i, r in enumerate(self._reader_pool)
-            if self._reader_healthy.get(i, False)
-        ]
+        # Probe only IDLE readers. A checked-out reader is actively serving a
+        # real query; probing its connection would (a) serialize the SELECT-1
+        # behind that query and falsely time out — /health requires
+        # readers.healthy == total, so a busy reader would force a spurious 503 —
+        # and (b) is unsafe to run concurrently with an in-flight streaming read.
+        # In-use readers count healthy; the read path self-polices and replaces a
+        # genuinely broken one (SEV-4, code review 2026-06-02). A reader that
+        # races idle→checked-out between this check and the probe is an accepted,
+        # vanishingly-rare residual that self-heals on the next /health call.
+        in_use_snapshot = set(self._inuse_readers)
+        in_use_healthy = 0
+        reader_tasks = []
+        for i, r in enumerate(self._reader_pool):
+            if not self._reader_healthy.get(i, False):
+                continue
+            if id(r) in in_use_snapshot:
+                in_use_healthy += 1
+            else:
+                reader_tasks.append(asyncio.create_task(probe(r, "reader", i)))
 
         results = await asyncio.gather(
             *([writer_task] if writer_task is not None else []),
@@ -1216,7 +1251,9 @@ class Pool:
             writer_healthy = False
             reader_results = results
 
-        readers_healthy = sum(1 for r in reader_results if isinstance(r, tuple) and r[0])
+        readers_healthy = in_use_healthy + sum(
+            1 for r in reader_results if isinstance(r, tuple) and r[0]
+        )
 
         return {
             "writer": {

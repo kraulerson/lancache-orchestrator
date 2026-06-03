@@ -33,6 +33,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _SPIKE_F_CHUNK_CONCURRENCY = 32
 
+# Lookup names whose raw rejected value must never reach a ValidationError's
+# echoed `input_value` (and thus logs). A token-related validation failure is
+# re-raised as a scrubbed ValueError in `__init__`. Matched per-`loc`-element,
+# EXACTLY and case-insensitively (lowercased here) — NOT as a `"token"`
+# substring (which would over-scrub a future non-secret field containing
+# "token"). Crucially this must include EVERY validation_alias for the secret
+# field: pydantic puts the matched alias in the error `loc`, so an `ORCH_TOKEN`
+# env-var failure has `loc=('ORCH_TOKEN',)`, not `('orchestrator_token',)`. Keep
+# in sync with the `orchestrator_token` AliasChoices below (review 2026-06-02).
+_SECRET_FIELD_NAMES = frozenset({"orchestrator_token", "orch_token"})
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -119,7 +130,10 @@ class Settings(BaseSettings):
 
     # --- DB pool & SQLite tuning (BL4) ---
     pool_readers: int = Field(default=8, ge=1, le=32)
-    pool_busy_timeout_ms: int = Field(default=5000, ge=0, le=60000)
+    # Floor of 100 ms (SEV-4, code review 2026-06-02): busy_timeout=0 disables
+    # SQLite's busy wait entirely, so any write contention surfaces immediately
+    # as WriteConflictError instead of being absorbed by a short retry window.
+    pool_busy_timeout_ms: int = Field(default=5000, ge=100, le=60000)
     # SEV-2 fix (code review 2026-06-02): bound how long a read waits for a
     # free reader connection. If the reader pool is exhausted (e.g. slots lost
     # to failed replacements after disk I/O errors), reads raise PoolError
@@ -235,10 +249,16 @@ class Settings(BaseSettings):
         try:
             super().__init__(**kwargs)
         except ValidationError as e:
+            # SEV-4 (code review 2026-06-02): match each loc element EXACTLY
+            # (case-insensitively) against the secret field's lookup names rather
+            # than a `"token" in loc` substring. The substring over-matched a
+            # future non-secret field containing "token"; a naive exact match on
+            # only the field name would UNDER-match the `ORCH_TOKEN` alias (whose
+            # loc is the alias, not the field name) and leak the raw token.
             token_errors = [
                 err
                 for err in e.errors()
-                if any("token" in str(loc).lower() for loc in err.get("loc", ()))
+                if any(str(loc).lower() in _SECRET_FIELD_NAMES for loc in err.get("loc", ()))
             ]
             if token_errors:
                 msgs = "; ".join(err.get("msg", "unknown error") for err in token_errors)
