@@ -491,21 +491,30 @@ def parse_sort(
 def build_order_by_clause(
     sort: list[SortField],
     *,
-    allow_list: SortAllowList | None = None,
+    allow_list: SortAllowList,
 ) -> str:
-    """Build the `ORDER BY ...` SQL fragment from validated sort spec.
+    """Build the `ORDER BY ...` SQL fragment from a validated sort spec.
 
-    UAT-4 S3-b: when `allow_list` is provided, defensively re-validate
-    every field against it before interpolating into SQL. Callers that
-    construct SortField hand (i.e., not via parse_sort) get the same
-    safety net as build_where_clause already had.
+    `allow_list` is REQUIRED (symmetric with `build_where_clause`): every field
+    is re-validated against it before being interpolated into SQL, so a caller
+    that hand-builds a `SortField` (i.e., not via `parse_sort`) cannot smuggle
+    an unvalidated identifier into the ORDER BY. Making it optional previously
+    skipped this check on the default path — a latent ORDER BY injection
+    footgun (SEV-3, code review 2026-06-02).
+
+    Both interpolated components are validated: `field` against `allow_list`,
+    and `direction` against the literal set. `SortField.direction` is typed
+    `Literal["asc","desc"]`, but that is not enforced at runtime — a hand-built
+    `SortField` could carry an arbitrary string, so we re-check it here too
+    rather than trust the annotation (adversarial review, 2026-06-02).
     """
     if not sort:
         return ""
-    if allow_list is not None:
-        for s in sort:
-            if s.field not in allow_list.fields:
-                raise QueryParamError(f"{s.field!r} is not a sortable field (not allowed)")
+    for s in sort:
+        if s.field not in allow_list.fields:
+            raise QueryParamError(f"{s.field!r} is not a sortable field (not allowed)")
+        if s.direction not in ("asc", "desc"):
+            raise QueryParamError(f"invalid sort direction: {s.direction!r}")
     entries = [f"{s.field} {s.direction.upper()}" for s in sort]
     return "ORDER BY " + ", ".join(entries)
 

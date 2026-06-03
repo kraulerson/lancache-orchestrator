@@ -446,22 +446,78 @@ class TestBuildWhereClause:
 
 class TestBuildOrderByClause:
     def test_single_field(self):
-        from orchestrator.api._query_helpers import SortField, build_order_by_clause
+        from orchestrator.api._query_helpers import (
+            SortAllowList,
+            SortField,
+            build_order_by_clause,
+        )
 
-        sql = build_order_by_clause([SortField(field="title", direction="asc")])
+        sql = build_order_by_clause(
+            [SortField(field="title", direction="asc")],
+            allow_list=SortAllowList({"title"}),
+        )
         assert sql == "ORDER BY title ASC"
 
     def test_multi_field(self):
-        from orchestrator.api._query_helpers import SortField, build_order_by_clause
+        from orchestrator.api._query_helpers import (
+            SortAllowList,
+            SortField,
+            build_order_by_clause,
+        )
 
         sql = build_order_by_clause(
             [
                 SortField(field="last_prefilled_at", direction="desc"),
                 SortField(field="title", direction="asc"),
                 SortField(field="id", direction="asc"),
-            ]
+            ],
+            allow_list=SortAllowList({"last_prefilled_at", "title", "id"}),
         )
         assert sql == "ORDER BY last_prefilled_at DESC, title ASC, id ASC"
+
+    def test_allow_list_is_required(self):
+        """SEV-3 (review 2026-06-02): allow_list is now mandatory, symmetric
+        with build_where_clause. Omitting it previously skipped field
+        re-validation — a latent ORDER BY injection for any caller that builds
+        SortField by hand."""
+        from orchestrator.api._query_helpers import SortField, build_order_by_clause
+
+        with pytest.raises(TypeError):
+            build_order_by_clause([SortField(field="title", direction="asc")])  # type: ignore[call-arg]
+
+    def test_rejects_field_not_in_allow_list(self):
+        """A hand-built SortField whose field is not in the allow_list is
+        rejected before interpolation — never reaches the SQL string."""
+        from orchestrator.api._query_helpers import (
+            QueryParamError,
+            SortAllowList,
+            SortField,
+            build_order_by_clause,
+        )
+
+        with pytest.raises(QueryParamError):
+            build_order_by_clause(
+                [SortField(field="id", direction="asc")],
+                allow_list=SortAllowList({"title"}),
+            )
+
+    def test_rejects_malicious_direction_in_hand_built_sortfield(self):
+        """SEV-1 (adversarial review 2026-06-02): `direction` is typed
+        Literal['asc','desc'] but not enforced at runtime, so a hand-built
+        SortField could carry arbitrary SQL. It must be rejected, never
+        interpolated into the ORDER BY clause."""
+        from orchestrator.api._query_helpers import (
+            QueryParamError,
+            SortAllowList,
+            SortField,
+            build_order_by_clause,
+        )
+
+        with pytest.raises(QueryParamError):
+            build_order_by_clause(
+                [SortField(field="id", direction="; DROP TABLE games; --")],  # type: ignore[arg-type]
+                allow_list=SortAllowList({"id"}),
+            )
 
 
 # ---------------------------------------------------------------------------

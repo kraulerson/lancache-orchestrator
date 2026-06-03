@@ -196,6 +196,41 @@ class TestCaching:
             await probe.probe()
         assert mock.call_count == 2
 
+    async def test_invalidate_during_inflight_refresh_not_swallowed(self):
+        """SEV-3 (review 2026-06-02): an operator invalidate() arriving while a
+        refresh is in flight must NOT be swallowed by that refresh's cache write.
+        With the bug, invalidate() nulled the timestamp and the in-flight refresh
+        overwrote it with a fresh one (line 156), so the next probe saw a fresh
+        cache and skipped the forced refresh for a whole TTL."""
+        probe = LancacheProbe(url=URL, cache_ttl_sec=1000.0)
+        call_count = 0
+
+        async def get_with_midflight_invalidate(*_a, **_kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Operator forces a refresh WHILE this first refresh is in
+                # flight — before it writes its about-to-be-stale timestamp.
+                probe.invalidate()
+            return _ok_response()
+
+        with patch.object(httpx.AsyncClient, "get", new=get_with_midflight_invalidate, create=True):
+            await probe.probe()  # refresh #1; invalidate fires during its HTTP call
+            await probe.probe()  # must refresh AGAIN — invalidation honored
+        assert call_count == 2
+
+    async def test_invalidate_forces_exactly_one_refresh(self):
+        """The force is one-shot: after the forced refresh runs, a subsequent
+        probe within TTL uses the cache again (no perpetual refresh loop)."""
+        probe = LancacheProbe(url=URL, cache_ttl_sec=1000.0)
+        mock = AsyncMock(return_value=_ok_response())
+        with patch.object(httpx.AsyncClient, "get", new=mock, create=True):
+            await probe.probe()  # refresh #1
+            probe.invalidate()
+            await probe.probe()  # refresh #2 (forced)
+            await probe.probe()  # within TTL, force cleared → cached, no refresh
+        assert mock.call_count == 2
+
 
 class TestConcurrency:
     async def test_concurrent_probes_collapse_to_single_call(self):

@@ -132,3 +132,28 @@ class TestPoolFailure:
                 headers={"Authorization": f"Bearer {VALID_TOKEN}"},
             )
         assert r.status_code == 503
+
+    async def test_inflight_row_vanished_returns_503(self, unit_app):
+        """If the in-flight job we deduped onto completes in the gap between the
+        ON CONFLICT insert (rowcount 0) and the follow-up SELECT, read_one
+        returns None and the endpoint returns 503 for the caller to retry."""
+        from orchestrator.api.dependencies import get_pool_dep
+
+        class _RacyPool:
+            async def execute_write(self, *_a, **_kw):
+                return 0  # ON CONFLICT DO NOTHING — deduped onto an existing row
+
+            async def read_one(self, *_a, **_kw):
+                return None  # ...which then completed before we could read it
+
+        unit_app.dependency_overrides[get_pool_dep] = lambda: _RacyPool()
+
+        import httpx
+
+        transport = httpx.ASGITransport(app=unit_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            r = await c.post(
+                "/api/v1/platforms/steam/library/sync",
+                headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            )
+        assert r.status_code == 503
