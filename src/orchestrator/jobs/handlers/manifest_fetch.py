@@ -135,60 +135,71 @@ async def manifest_fetch_handler(job: dict[str, Any], deps: Deps) -> None:
 
     upserted = 0
     total_size = 0
-    for m in manifests:
-        depot_id = m.get("depot_id")
-        gid = m.get("manifest_gid")
-        total_bytes = m.get("total_bytes")
-        chunk_count = m.get("chunk_count")
-        # S2-1: the worker writes the compressed BLOB to a temp file on the
-        # shared container FS and sends its path (not the bytes) to avoid the
-        # 10 MiB IPC line cap on large multi-depot responses. We read it,
-        # store it, and delete it.
-        raw_path = m.get("raw_path")
+    # The worker wrote every depot's BLOB to its own temp file up front. The
+    # per-iteration `finally` cleans only the entry being processed; this outer
+    # backstop unlinks the rest so a skipped entry (`continue`) or an early raise
+    # (e.g. the size cap) can't leak unprocessed depots' temp files (SEV-4, code
+    # review 2026-06-02). `_safe_unlink` is idempotent, so double-unlink is fine.
+    raw_paths = [m.get("raw_path") for m in manifests]
+    try:
+        for m in manifests:
+            depot_id = m.get("depot_id")
+            gid = m.get("manifest_gid")
+            total_bytes = m.get("total_bytes")
+            chunk_count = m.get("chunk_count")
+            # S2-1: the worker writes the compressed BLOB to a temp file on the
+            # shared container FS and sends its path (not the bytes) to avoid the
+            # 10 MiB IPC line cap on large multi-depot responses. We read it,
+            # store it, and delete it.
+            raw_path = m.get("raw_path")
 
-        if (
-            depot_id is None
-            or gid is None
-            or total_bytes is None
-            or chunk_count is None
-            or not raw_path
-        ):
-            _log.warning(
-                "manifest_fetch.skipped_entry",
-                job_id=job_id,
-                reason="missing required field",
-                raw=str(m)[:200],
-            )
-            continue
-
-        try:
-            file_size = os.path.getsize(raw_path)
-            if file_size > cap:
-                # Unlink before raising so the oversized temp file isn't leaked.
-                _safe_unlink(raw_path)
-                raise ValueError(
-                    f"manifest depot_id={depot_id} gid={gid} exceeds size cap "
-                    f"({file_size} > {cap} bytes)"
+            if (
+                depot_id is None
+                or gid is None
+                or total_bytes is None
+                or chunk_count is None
+                or not raw_path
+            ):
+                _log.warning(
+                    "manifest_fetch.skipped_entry",
+                    job_id=job_id,
+                    reason="missing required field",
+                    raw=str(m)[:200],
                 )
-            with open(raw_path, "rb") as fh:
-                raw_bytes = fh.read()
-        except FileNotFoundError:
-            _log.warning(
-                "manifest_fetch.skipped_entry",
-                job_id=job_id,
-                reason="blob temp file missing",
-                depot_id=depot_id,
-            )
-            continue
-        finally:
-            _safe_unlink(raw_path)
+                continue
 
-        await deps.pool.execute_write(
-            _UPSERT_SQL,
-            (game_id, int(depot_id), str(gid), int(chunk_count), int(total_bytes), raw_bytes),
-        )
-        upserted += 1
-        total_size += int(total_bytes)
+            try:
+                file_size = os.path.getsize(raw_path)
+                if file_size > cap:
+                    # Unlink before raising so the oversized temp file isn't leaked.
+                    _safe_unlink(raw_path)
+                    raise ValueError(
+                        f"manifest depot_id={depot_id} gid={gid} exceeds size cap "
+                        f"({file_size} > {cap} bytes)"
+                    )
+                with open(raw_path, "rb") as fh:
+                    raw_bytes = fh.read()
+            except FileNotFoundError:
+                _log.warning(
+                    "manifest_fetch.skipped_entry",
+                    job_id=job_id,
+                    reason="blob temp file missing",
+                    depot_id=depot_id,
+                )
+                continue
+            finally:
+                _safe_unlink(raw_path)
+
+            await deps.pool.execute_write(
+                _UPSERT_SQL,
+                (game_id, int(depot_id), str(gid), int(chunk_count), int(total_bytes), raw_bytes),
+            )
+            upserted += 1
+            total_size += int(total_bytes)
+    finally:
+        for _p in raw_paths:
+            if _p:
+                _safe_unlink(_p)
 
     if upserted == 0:
         # All entries had missing fields — log and exit without touching games.
