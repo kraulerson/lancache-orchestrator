@@ -1,9 +1,9 @@
 {
   "build_loop": {
-    "feature": null,
+    "feature": "f6-epic-prefill",
     "step": 0,
     "steps_completed": [],
-    "started_at": null
+    "started_at": "2026-06-03T16:17:45Z"
   },
   "uat_session": {
     "session_id": 9,
