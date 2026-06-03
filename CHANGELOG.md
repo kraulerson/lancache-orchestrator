@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Stability: scheduler `start()` no longer leaks a stale instance (SEV-2) — 2026-06-02
+
+From the 2026-06-02 code review. `SchedulerManager.start()` guarded idempotency with `if self._scheduler is not None and self._scheduler.running: return`. On the **non-running** path — a held-but-stopped scheduler, e.g. after a prior `shutdown()` that raised partway and left `_scheduler` dangling — `start()` fell through and **overwrote** `self._scheduler` with a fresh `AsyncIOScheduler`, silently abandoning the prior object instead of disposing of it. The "idempotent start" contract was false on that path. Currently unreachable via the single-call lifespan, but a latent lifecycle bug.
+
+- `start()` now disposes any held-but-stopped scheduler (warning `scheduler.replacing_stale_instance` + new best-effort `_dispose_stale_scheduler()`, which clears the reference and stops the instance if it is somehow still running) **before** building a fresh one — the manager never abandons a scheduler it owns.
+- Hardened per an adversarial review of the fix: `start()`/`shutdown()` are now serialized behind an `asyncio.Lock`, and `_dispose_stale_scheduler()` is synchronous, so the rebuild is atomic and a future concurrent caller (e.g. a restart endpoint) can never race to construct two schedulers. Uncontended acquire does not suspend, so the single sequential lifespan path is unchanged. (The reviewed TOCTOU/`wakeup`-after-`_eventloop=None` races were shown empirically to be unreachable in the current code; the lock makes the atomicity explicit and durable rather than resting on a subtle no-await invariant.)
+- +3 regression tests (`tests/scheduler/test_manager.py`): replacing a stale non-running instance emits the warning, runs the dispose path, and swaps cleanly (no silent leak); end-to-end recovery after a dangling scheduler yields a fully functional, job-registered scheduler; and two concurrent `start()` calls after a dangling scheduler converge on exactly one running instance. Tests use `structlog.testing.CapturingLogger` patched onto the module logger (the app sets `cache_logger_on_first_use=True`, which defeats `capture_logs` once any earlier test caches the bound logger) and poll for APScheduler's deferred shutdown to keep the precondition deterministic. Full suite: 966 pass. ruff/mypy(strict, `src/`)/gitleaks clean. Security audit: 0 findings (`docs/security-audits/scheduler-start-leak-fix-security-audit.md`).
+
 ### Added — F5 Steam CDN Prefill — 2026-05-29
 
 Implements F5 from PROJECT_BIBLE §1.2 — downloads a Steam game's depot chunks **through** the lancache so they get cached. Together with F7 this closes the orchestrator's core loop (prefill → cache → validate). Steam-only; F6 (Epic) deferred.
