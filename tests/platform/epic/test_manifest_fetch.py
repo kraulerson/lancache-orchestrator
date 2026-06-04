@@ -74,8 +74,9 @@ async def test_fetch_manifest_size_cap(monkeypatch):
         await ep_man.fetch_manifest("TOK", item, s)
 
 
-async def test_fetch_manifest_rejects_non_fqdn_host(monkeypatch):
+async def test_fetch_manifest_rejects_non_fqdn_host_before_get(monkeypatch):
     raw = build_manifest(22, make_chunks(1))
+    downloaded = {"hit": False}
 
     def handler(req: httpx.Request) -> httpx.Response:
         if "/assets/v2/" in req.url.path:
@@ -84,12 +85,39 @@ async def test_fetch_manifest_rejects_non_fqdn_host(monkeypatch):
                 200,
                 json={"elements": [{"manifests": [{"uri": "http://internal-host/a/d.manifest"}]}]},
             )
+        downloaded["hit"] = True  # SSRF: the unvalidated host must NEVER be fetched
         return httpx.Response(200, content=raw)
 
     monkeypatch.setattr(ep_man, "_build_transport", lambda: httpx.MockTransport(handler))
     item = EpicLibraryItem(app_name="A", namespace="ns", catalog_item_id="c", title="A")
     with pytest.raises(ep_man.EpicManifestError, match="CDN host"):
         await ep_man.fetch_manifest("TOK", item, _settings())
+    assert downloaded["hit"] is False  # validation must precede the manifest GET
+
+
+async def test_fetch_manifest_rejects_path_traversal_before_get(monkeypatch):
+    raw = build_manifest(22, make_chunks(1))
+    downloaded = {"hit": False}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "/assets/v2/" in req.url.path:
+            # Dotted host passes the FQDN guard, but the path carries traversal.
+            return httpx.Response(
+                200,
+                json={
+                    "elements": [
+                        {"manifests": [{"uri": "https://epiccdn.test/a/../../x/d.manifest"}]}
+                    ]
+                },
+            )
+        downloaded["hit"] = True
+        return httpx.Response(200, content=raw)
+
+    monkeypatch.setattr(ep_man, "_build_transport", lambda: httpx.MockTransport(handler))
+    item = EpicLibraryItem(app_name="A", namespace="ns", catalog_item_id="c", title="A")
+    with pytest.raises(ep_man.EpicManifestError, match="path traversal"):
+        await ep_man.fetch_manifest("TOK", item, _settings())
+    assert downloaded["hit"] is False  # traversal rejected before the manifest GET
 
 
 async def test_fetch_manifest_no_elements_raises(monkeypatch):

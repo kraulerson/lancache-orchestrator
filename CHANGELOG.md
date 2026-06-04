@@ -19,6 +19,22 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — UAT-10 remediation (F5/F6 automated sweep) — 2026-06-04
+
+Remediates the 11 confirmed findings (+ 1 observation) from the UAT-10 automated
+adversarial sweep over F5 (Steam prefill) and F6 (Epic prefill). Each fix landed
+test-first; full suite **1051 pass**, mypy(strict)/ruff/gitleaks/semgrep clean.
+Security audit: `docs/security-audits/uat10-remediation-security-audit.md`.
+
+- **Security — Epic manifest decompression bomb (SEV-2):** `platform/epic/manifest.py` inflated the zlib body with unbounded `zlib.decompress`; a tiny compressed manifest (under the 128 MiB *compressed* cap) could expand to GBs and OOM the process. It now uses a bounded `zlib.decompressobj().decompress(body, max_decompressed)` (256 MiB default) and raises `EpicManifestError` before allocating beyond the cap.
+- **Security — Epic manifest fetch SSRF (SEV-3):** `fetch_manifest` GET-ed the response-supplied CDN `uri` *before* validating it; the FQDN + `..` guards ran only afterward. The host (FQDN) and path-traversal checks now run **before** the GET, so a hostile/MITM'd Epic response can no longer drive the manifest fetch at an internal host/IP.
+- **Changed — Epic prefill is now triggerable (SEV-3):** `POST /api/v1/games/{id}/prefill` was hardcoded to `steam` (400 for non-steam), leaving the Epic prefill handler reachable only by a manual DB insert. The trigger now accepts `steam`/`epic` and enqueues a job carrying the game's own platform; an unsupported platform still returns 400.
+- **Fixed — Steam prefill stuck `downloading` (SEV-3):** an IPC/worker/auth failure during manifest expand/fetch left the game in `downloading` forever (only the *jobs* row was marked failed). `_steam_prefill` now wraps its work and marks the game `failed` (`WHERE status='downloading'`), mirroring the Epic path.
+- **Fixed — post-prefill validate error leaves game stuck (SEV-3):** a successful prefill followed by a `validate` returning `outcome='error'` (e.g. cache unmounted) never resolved the transient `downloading` status. The validate handler now resolves only that transient state to `failed` (scoped `WHERE status='downloading'`) without clobbering an already-classified status.
+- **Fixed — Epic OAuth success-path error contract (SEV-4):** a malformed/non-JSON HTTP 200 from the token endpoint raised a raw `KeyError`/`JSONDecodeError` (→ a 500 instead of the documented 401). It now raises `EpicAuthError`, logging only `what`+`status` (never the body/token).
+- **Changed — Steam auth auto-enqueue:** switched `_queue_library_sync_job_best_effort` to atomic `INSERT ... ON CONFLICT DO NOTHING` (was a SELECT-then-INSERT straddling an `await`), consistent with the other four call sites.
+- **Tests:** added regression tests for every fix above, plus the previously-missing coverage the sweep flagged — Epic downloader retry (503→200 recovery, transport-error retry-then-fail), `verify_cached` MISS-ratio + non-gating low-ratio warning, the CDN `..` traversal guard, and the `O_NOFOLLOW` symlink/TOCTOU guard. Removed a redundant `pytest.mark.asyncio` that warned on two sync tests.
+
 ### Added — F6 Epic CDN Prefill (full Epic stack) — 2026-06-03
 
 Implements F6 from PROJECT_BIBLE §1.2 — brings Epic Games to parity with the Steam pipeline: OAuth → library enumeration → manifest fetch + parse → chunk prefill through the lancache → cache-HIT verification. All **pure-Python / async-httpx in the orchestrator process** — no `legendary` runtime dependency, no gevent, no worker subprocess (unlike Steam's ADR-0013 isolation). De-risked end-to-end by `spikes/spike_b_epic_prefill.py` (PASS). **No DB migration** — the schema was already Epic-ready. **ADR-0014** records pure-Python-over-`legendary` (a deliberate deviation from the Phase-0 Manifesto wording).

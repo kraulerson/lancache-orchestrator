@@ -85,6 +85,22 @@ async def test_chunk_failure_marks_game_failed(pool, monkeypatch):
     assert vj is None
 
 
+async def test_manifest_error_marks_failed_not_stuck_downloading(pool):
+    """An IPC/worker failure during manifest expand must not leave the game
+    stuck in 'downloading' forever — it must resolve to 'failed' (UAT-10 #2)."""
+    game_id = await _seed_game(pool)
+    await _seed_manifest(pool, game_id)
+
+    class _BoomSteam(_StubSteam):
+        async def manifest_expand(self, raw):
+            raise RuntimeError("worker died: IPC timeout")
+
+    with pytest.raises(RuntimeError):
+        await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=_BoomSteam()))
+    g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
+    assert g["status"] == "failed"
+
+
 async def test_no_manifests_triggers_fetch(pool, monkeypatch):
     game_id = await _seed_game(pool)  # no manifest rows
 

@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UAT Session 10</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0f0f17; color: #cdd6f4; line-height: 1.5; padding: 24px; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin-bottom: 4px; }
+  .meta { color: #a6adc8; font-size: 0.9rem; margin-bottom: 24px; }
+  .progress-bar { background: #1e1e2e; border-radius: 8px; height: 8px; margin-bottom: 24px; overflow: hidden; }
+  .progress-fill { background: #a6e3a1; height: 100%; width: 0%; transition: width 0.3s; }
+  .progress-text { text-align: center; color: #a6adc8; font-size: 0.85rem; margin-bottom: 24px; }
+  h2 { font-size: 1.2rem; color: #89b4fa; margin: 32px 0 16px; padding-bottom: 8px; border-bottom: 1px solid #313244; }
+  .fixture-ref { background: #11111b; border: 1px solid #313244; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 0.85rem; color: #a6adc8; }
+  .fixture-ref strong { color: #cdd6f4; }
+  .fixture-ref code { background: #313244; padding: 2px 6px; border-radius: 3px; color: #f9e2af; }
+  .banner { background: #2a1e2e; border: 1px solid #f38ba8; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 0.85rem; color: #f5c2e7; }
+  .banner strong { color: #f38ba8; }
+  .banner code { background: #313244; padding: 2px 6px; border-radius: 3px; color: #f9e2af; }
+  .scenario { background: #1e1e2e; border-radius: 8px; margin-bottom: 12px; overflow: hidden; border-left: 4px solid #45475a; transition: border-color 0.2s; }
+  .scenario.pass { border-left-color: #a6e3a1; }
+  .scenario.fail { border-left-color: #f38ba8; }
+  .scenario-header { padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+  .scenario-num { background: #313244; color: #a6adc8; font-size: 0.8rem; font-weight: 600; padding: 2px 8px; border-radius: 4px; min-width: 28px; text-align: center; }
+  .scenario-title { flex: 1; font-weight: 500; }
+  .btn-group { display: flex; gap: 4px; }
+  .btn { padding: 6px 14px; border: 1px solid #45475a; border-radius: 4px; background: transparent; color: #cdd6f4; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
+  .btn:hover { background: #313244; }
+  .btn.pass-btn.active { background: #a6e3a1; color: #1e1e2e; border-color: #a6e3a1; font-weight: 600; }
+  .btn.fail-btn.active { background: #f38ba8; color: #1e1e2e; border-color: #f38ba8; font-weight: 600; }
+  .btn.skip-btn.active { background: #f9e2af; color: #1e1e2e; border-color: #f9e2af; font-weight: 600; }
+  .scenario-details { padding: 0 16px 8px 16px; display: none; }
+  .scenario-details.open { display: block; }
+  .steps { background: #11111b; padding: 10px 14px; border-radius: 4px; font-size: 0.85rem; color: #a6adc8; margin-bottom: 8px; }
+  .steps strong { color: #cdd6f4; }
+  .scenario-notes { padding: 4px 16px 12px 16px; }
+  .notes-input { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; resize: vertical; min-height: 36px; }
+  .notes-input:focus { outline: none; border-color: #89b4fa; }
+  .toggle-details { background: none; border: none; color: #6c7086; cursor: pointer; font-size: 0.75rem; padding: 4px 8px; }
+  .toggle-details:hover { color: #89b4fa; }
+  .bugs-section { margin-top: 40px; }
+  .bug-entry { background: #1e1e2e; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #f38ba8; }
+  .bug-row { display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .bug-field { flex: 1; min-width: 200px; }
+  .bug-field label { display: block; color: #a6adc8; font-size: 0.8rem; margin-bottom: 4px; }
+  .bug-field input, .bug-field select, .bug-field textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; }
+  .bug-field textarea { resize: vertical; min-height: 60px; }
+  .bug-field input:focus, .bug-field select:focus, .bug-field textarea:focus { outline: none; border-color: #89b4fa; }
+  .bug-field select { appearance: auto; }
+  .add-bug-btn { background: #313244; border: 1px dashed #45475a; color: #a6adc8; padding: 10px; border-radius: 8px; width: 100%; cursor: pointer; font-size: 0.85rem; margin-bottom: 12px; }
+  .add-bug-btn:hover { border-color: #f38ba8; color: #f38ba8; }
+  .remove-bug { background: none; border: none; color: #f38ba8; cursor: pointer; font-size: 0.8rem; float: right; }
+  .overall-notes { margin-top: 32px; }
+  .overall-notes textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 12px; border-radius: 8px; font-size: 0.9rem; font-family: inherit; resize: vertical; min-height: 100px; }
+  .overall-notes textarea:focus { outline: none; border-color: #89b4fa; }
+  .export-section { margin-top: 32px; text-align: center; padding: 24px; }
+  .export-btn { background: #89b4fa; color: #1e1e2e; border: none; padding: 12px 32px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; }
+  .export-btn:hover { background: #74c7ec; }
+  .export-btn:active { transform: scale(0.98); }
+  .copy-msg { color: #a6e3a1; margin-top: 8px; font-size: 0.85rem; display: none; }
+</style>
+</head>
+<body>
+
+<h1>UAT Session 10</h1>
+<div class="meta">Date: 2026-06-04 | Features: F5 Steam Prefill, F6 Epic Prefill | Tester: <input id="tester-name" type="text" placeholder="Your name" style="background:#1e1e2e;border:1px solid #45475a;color:#cdd6f4;padding:4px 8px;border-radius:4px;font-size:0.85rem;width:140px;"></div>
+
+<div class="fixture-ref">
+  <strong>Setup.</strong> Deploy current <code>main</code> (commit <code>aa25597</code>) on the lancache host using the UAT-9 recipe (dual-venv image, <code>--network host</code>, cache mounted read-only). Set <code>ORCH=http://127.0.0.1:8765</code> and <code>TOKEN=&lt;your 32-hex orchestrator token&gt;</code>. <code>/platforms/*/auth</code> is loopback-only — run auth from the host. Watch logs with <code>docker logs -f &lt;container&gt;</code>.<br>
+  <strong>This session tests the PREFILL features (F5/F6) live</strong> — the automated agent sweep already passed 1037 unit tests + static gates; what only a live run can prove is real chunk download through the lancache and real on-disk cache population.
+</div>
+
+<div class="banner">
+  <strong>Heads-up — 11 bugs already found by the automated sweep</strong> (see <code>agent-results/uat-10-agent-sweep-2026-06-04.md</code>). They will be fixed test-first after this live pass. Two you may hit during testing:<br>
+  • <strong>#5 (SEV-3):</strong> Epic prefill has <em>no trigger endpoint</em> yet. To run F6 scenarios 11–14, enqueue manually on the host: <code>sqlite3 /var/lib/orchestrator/orchestrator.db "INSERT INTO jobs (kind, game_id, platform, state, source) VALUES ('prefill', &lt;epic_game_id&gt;, 'epic', 'queued', 'cli');"</code> (the worker picks it up on its next poll).<br>
+  • <strong>#2/#3 (SEV-3):</strong> a Steam prefill that fails mid-manifest, or whose post-prefill validate hits an unmounted cache, may leave the game showing <code>downloading</code> forever. If you see a stuck <code>downloading</code>, note it on the matching scenario — it's expected and already filed.
+</div>
+
+<div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+<div class="progress-text" id="progress-text">0 / 0 completed</div>
+
+<h2>Feature 5: Steam Prefill (F5)</h2>
+<div class="fixture-ref">
+  <strong>Endpoints:</strong> <code>POST $ORCH/api/v1/platforms/steam/library/sync</code> · <code>POST $ORCH/api/v1/games/{id}/prefill</code> · <code>GET $ORCH/api/v1/games?platform=steam</code><br>
+  Steam session does NOT persist across container restart (steam-next #108) — a fresh deploy needs a fresh 2FA.
+</div>
+<div id="feature5"></div>
+
+<h2>Feature 6: Epic Prefill (F6)</h2>
+<div class="fixture-ref">
+  <strong>Endpoints:</strong> <code>POST $ORCH/api/v1/platforms/epic/auth</code> (body <code>{"code":"&lt;authorizationCode&gt;"}</code> from <code>legendary.gl/epiclogin</code>) · <code>POST $ORCH/api/v1/platforms/epic/library/sync</code> · <code>GET $ORCH/api/v1/games?platform=epic</code><br>
+  No prefill endpoint yet (agent finding #5) — use the manual SQL insert from the banner above for scenarios 11–14.
+</div>
+<div id="feature6"></div>
+
+<div class="bugs-section">
+  <h2>Bugs Found (new — beyond the 11 already filed)</h2>
+  <div id="bugs-list"></div>
+  <button class="add-bug-btn" onclick="addBug()">+ Add Bug</button>
+</div>
+
+<div class="overall-notes">
+  <h2>Overall Notes</h2>
+  <textarea id="overall-notes" placeholder="Free-form observations, UX concerns, real wire-format surprises, anything that felt wrong even if it technically worked..."></textarea>
+</div>
+
+<div class="export-section">
+  <button class="export-btn" onclick="exportResults()">Copy Results to Clipboard</button>
+  <div class="copy-msg" id="copy-msg">Copied! Paste into terminal or save to the submissions folder.</div>
+</div>
+
+<script>
+const scenarios = [
+  {
+    "id": 1, "feature": 5,
+    "title": "Steam auth with 2FA; session established",
+    "steps": "1. Deploy current main on the lancache host (UAT-9 recipe).\n2. From the host, run the Steam auth flow (helper script / POST .../platforms/steam/auth) and enter the Steam Guard 2FA code when prompted.\n3. GET $ORCH/api/v1/platforms -H \"Authorization: Bearer $TOKEN\".",
+    "expected": "Auth succeeds; platforms shows steam auth_status='ok'. The password and any session token NEVER appear in docker logs."
+  },
+  {
+    "id": 2, "feature": 5,
+    "title": "Library sync upserts real owned games",
+    "steps": "1. curl -sX POST $ORCH/api/v1/platforms/steam/library/sync -H \"Authorization: Bearer $TOKEN\"  (returns a job_id; a second call within the window returns the SAME job_id — dedup).\n2. Wait for the job to finish (GET $ORCH/api/v1/jobs?kind=library_sync).\n3. GET $ORCH/api/v1/games?platform=steam&per_page=5.",
+    "expected": "Real owned games (real app_ids/titles, not fixtures) are upserted into games with platform='steam'. Exactly one in-flight library_sync at a time."
+  },
+  {
+    "id": 3, "feature": 5,
+    "title": "Trigger prefill; real manifest fetched + expanded",
+    "steps": "1. Pick a SMALL owned game id from scenario 2.\n2. curl -sX POST $ORCH/api/v1/games/{id}/prefill -H \"Authorization: Bearer $TOKEN\"  -> 202 + job_id.\n3. Watch logs: prefill.started -> (prefill.fetching_manifests if needed) -> chunk activity.",
+    "expected": "A real depot manifest is fetched from Steam and manifest_expand yields real chunk SHAs. Game status moves to 'downloading'. No crash."
+  },
+  {
+    "id": 4, "feature": 5,
+    "title": "Chunks download THROUGH the lancache (retry loop under real load)",
+    "steps": "1. While the prefill job runs, tail the lancache access log AND the orchestrator log.\n2. Confirm requests hit http://<lancache>/depot/{depot}/chunk/{sha} with Host: lancache.steamcontent.com and the Valve User-Agent.\n3. Note any real timeouts/503s and whether they recover.",
+    "expected": "Chunks are requested through the lancache (not direct to Steam). Transient 5xx/timeouts retry and recover; the prefill completes. chunks_failed=0 on a healthy run."
+  },
+  {
+    "id": 5, "feature": 5,
+    "title": "On-disk lancache cache is actually POPULATED",
+    "steps": "1. After prefill completes, on the lancache host inspect the cache dir for the game's chunks at the F7 cache-key path (md5 formula).\n2. Compare cached chunk count to the manifest chunk_count (du / find under the cache).",
+    "expected": "The bytes really landed on the cache SSD — a meaningful fraction of the game's chunks are present on disk (this is the core value-prop)."
+  },
+  {
+    "id": 6, "feature": 5,
+    "title": "Chained validate runs; game reaches a terminal status",
+    "steps": "1. After prefill success, confirm a 'validate' job was enqueued (GET $ORCH/api/v1/jobs?kind=validate).\n2. Wait for it; GET $ORCH/api/v1/games/{id}.",
+    "expected": "Game transitions to 'up_to_date' (fully cached) or 'validation_failed'/'failed' with a real last_error (partial/again). It must NOT remain 'downloading' (see bug #2/#3 — flag if it does)."
+  },
+  {
+    "id": 7, "feature": 5,
+    "title": "Re-request a sample → real cache HIT",
+    "steps": "1. Pick one chunk URL from scenario 4.\n2. Re-request it through the lancache and inspect the cache-status response header.",
+    "expected": "The second request is served from cache (HIT) — proves caching, not just a one-time transfer."
+  },
+  {
+    "id": 8, "feature": 6,
+    "title": "Epic OAuth: submit code, tokens persisted, auto-sync enqueued",
+    "steps": "1. In a browser logged into a real Epic account that owns games, open legendary.gl/epiclogin and copy the authorizationCode JSON value.\n2. From the host: curl -sX POST $ORCH/api/v1/platforms/epic/auth -H \"Authorization: Bearer $TOKEN\" -H 'Content-Type: application/json' -d '{\"code\":\"<CODE>\"}'\n3. GET $ORCH/api/v1/platforms/epic/auth ; on the host, stat the epic_session file.",
+    "expected": "202 with account_id/display_name; NO access/refresh token or code echoed in the response or logs. Refresh token file is mode 0600. epic auth_status='ok'. A library_sync job is auto-enqueued."
+  },
+  {
+    "id": 9, "feature": 6,
+    "title": "Epic library enumerate populates games (with pagination)",
+    "steps": "1. Wait for the auto library_sync (or POST $ORCH/api/v1/platforms/epic/library/sync).\n2. GET $ORCH/api/v1/games?platform=epic&per_page=10.\n3. If the library is large, confirm >1 cursor page was fetched (logs).",
+    "expected": "Real Epic titles populate games with platform='epic' and metadata JSON (namespace, catalog_item_id). Cursor pagination works across multiple pages."
+  },
+  {
+    "id": 10, "feature": 6,
+    "title": "Token refresh works on a later call",
+    "steps": "1. Some time after auth (or after restarting the worker so the cached access token is gone), trigger any Epic operation that needs a token (e.g. a second library sync).\n2. Watch logs for a refresh grant.",
+    "expected": "The refresh grant succeeds, a rotated refresh token is persisted (0600), and the operation proceeds. No token material in logs."
+  },
+  {
+    "id": 11, "feature": 6,
+    "title": "Trigger Epic prefill (manual insert); FRESH manifest fetched + parses",
+    "steps": "1. Pick a SMALL owned Epic game id.\n2. On the host: sqlite3 /var/lib/orchestrator/orchestrator.db \"INSERT INTO jobs (kind, game_id, platform, state, source) VALUES ('prefill', <id>, 'epic', 'queued', 'cli');\"\n3. Watch logs: prefill.epic.started -> manifest fetch -> chunk activity.",
+    "expected": "A FRESH signed manifest is fetched at prefill time and the REAL binary manifest parses without error (real feature-levels/compression/UTF-16 paths the synthetic fixtures don't cover). The size cap does NOT falsely trip on a real manifest. Game status 'downloading'."
+  },
+  {
+    "id": 12, "feature": 6,
+    "title": "Epic chunks download THROUGH the lancache with Host-header routing",
+    "steps": "1. While the epic prefill runs, tail the lancache access log + orchestrator log.\n2. Confirm requests hit http://<lancache>/<cdn_base>/ChunksV5/NN/<b64hash>_<b64guid>.chunk with Host: <real epic cdn host>.",
+    "expected": "Chunks route through the lancache via the Host header. The real CDN host passes the FQDN guard and the real cdn_base passes the '..' guard (a legitimate signed path is NOT falsely rejected)."
+  },
+  {
+    "id": 13, "feature": 6,
+    "title": "On-disk cache populated + verify_cached HIT → up_to_date",
+    "steps": "1. After the epic prefill completes, confirm the cache dir for the Epic CDN host is populated on disk.\n2. GET $ORCH/api/v1/games/{id} ; check logs for prefill.epic.completed and any prefill.epic.low_hit_ratio warning.",
+    "expected": "On-disk cache is populated for the Epic CDN host; verify_cached re-requests yield real X-Upstream-Cache-Status: HIT. Game reaches 'up_to_date' with size_bytes = real sum of chunk file_sizes. (Confirm the real lancache emits the HIT header for the Epic CDN host — it's the only Epic validation gate.)"
+  },
+  {
+    "id": 14, "feature": 6,
+    "title": "Partial CDN failure → failed + last_error (stuck-downloading guard holds)",
+    "steps": "1. (Opportunistic) If any real Epic chunk 404s/500s from the CDN during a prefill, observe the outcome.\n2. Otherwise note N/A.",
+    "expected": "A real partial failure yields status='failed' + a real last_error — the game does NOT remain 'downloading'. (The guard must hold on a real exception, not just the synthetic test case.)"
+  }
+];
+
+function renderScenarios() {
+  scenarios.forEach(s => {
+    const container = document.getElementById('feature' + s.feature);
+    if (!container) return;
+    container.innerHTML += '<div class="scenario" id="scenario-' + s.id + '">' +
+      '<div class="scenario-header">' +
+        '<span class="scenario-num">' + s.id + '</span>' +
+        '<span class="scenario-title">' + s.title + '</span>' +
+        '<button class="toggle-details" onclick="toggleDetails(' + s.id + ')">details</button>' +
+        '<div class="btn-group">' +
+          '<button class="btn pass-btn" onclick="setResult(' + s.id + ',\'pass\',this)">Pass</button>' +
+          '<button class="btn fail-btn" onclick="setResult(' + s.id + ',\'fail\',this)">Fail</button>' +
+          '<button class="btn skip-btn" onclick="setResult(' + s.id + ',\'skip\',this)">Skip</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="scenario-details" id="details-' + s.id + '">' +
+        '<div class="steps"><strong>Steps:</strong><br>' + s.steps.replace(/\n/g,'<br>') + '</div>' +
+        '<div class="steps"><strong>Expected:</strong><br>' + s.expected + '</div>' +
+      '</div>' +
+      '<div class="scenario-notes">' +
+        '<textarea class="notes-input" id="notes-' + s.id + '" placeholder="Notes — observations, issues, anything worth recording"></textarea>' +
+      '</div>' +
+    '</div>';
+  });
+}
+
+const results = {};
+
+function setResult(id, result, btn) {
+  results[id] = result;
+  const sc = document.getElementById('scenario-' + id);
+  sc.className = 'scenario ' + (result === 'skip' ? '' : result);
+  sc.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  updateProgress();
+}
+
+function toggleDetails(id) {
+  document.getElementById('details-' + id).classList.toggle('open');
+}
+
+function updateProgress() {
+  const done = Object.keys(results).length;
+  const pct = (done / scenarios.length * 100).toFixed(0);
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent = done + ' / ' + scenarios.length + ' completed';
+}
+
+var bugCount = 0;
+function addBug() {
+  bugCount++;
+  var n = bugCount;
+  document.getElementById('bugs-list').innerHTML +=
+    '<div class="bug-entry" id="bug-' + n + '">' +
+      '<button class="remove-bug" onclick="document.getElementById(\'bug-' + n + '\').remove()">remove</button>' +
+      '<div class="bug-row">' +
+        '<div class="bug-field"><label>Severity</label><select id="bug-sev-' + n + '">' +
+          '<option>SEV-1 (crash/data loss)</option><option>SEV-2 (broken, workaround exists)</option>' +
+          '<option selected>SEV-3 (minor UX)</option><option>SEV-4 (polish/enhancement)</option>' +
+        '</select></div>' +
+        '<div class="bug-field"><label>Feature</label><select id="bug-feat-' + n + '">' +
+          '<option>5 - Steam Prefill (F5)</option><option>6 - Epic Prefill (F6)</option>' +
+        '</select></div>' +
+      '</div>' +
+      '<div class="bug-field"><label>Description</label><input id="bug-desc-' + n + '" placeholder="What went wrong?"></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Steps to Reproduce</label><textarea id="bug-steps-' + n + '" placeholder="1. ...\n2. ...\n3. ..."></textarea></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Expected vs Actual</label><textarea id="bug-exp-' + n + '" placeholder="Expected: ...\nActual: ..."></textarea></div>' +
+    '</div>';
+}
+
+function exportResults() {
+  var tester = document.getElementById('tester-name').value || 'Unknown';
+  var md = '# ' + document.querySelector('h1').textContent + ' Results\n\n';
+  md += '**Date:** 2026-06-04\n';
+  md += '**Tester:** ' + tester + '\n';
+  md += '**Features:** F5 Steam Prefill, F6 Epic Prefill\n\n';
+
+  var pass = 0, fail = 0, skip = 0;
+  for (var k in results) {
+    if (results[k] === 'pass') pass++;
+    else if (results[k] === 'fail') fail++;
+    else if (results[k] === 'skip') skip++;
+  }
+  var untested = scenarios.length - Object.keys(results).length;
+  md += '**Summary:** ' + pass + ' passed, ' + fail + ' failed, ' + skip + ' skipped, ' + untested + ' not tested\n\n---\n\n';
+
+  md += '## Scenarios\n\n';
+  md += '| # | Scenario | Result | Notes |\n';
+  md += '|---|---|---|---|\n';
+  scenarios.forEach(function(s) {
+    var r = results[s.id] || 'not tested';
+    var icon = r === 'pass' ? 'PASS' : r === 'fail' ? 'FAIL' : r === 'skip' ? 'SKIP' : '-';
+    var el = document.getElementById('notes-' + s.id);
+    var notes = el ? el.value.replace(/\|/g, '/').replace(/\n/g, ' ').replace(/`/g, "'").replace(/\[/g, '(').replace(/\]/g, ')').replace(/\*/g, '-') : '';
+    md += '| ' + s.id + ' | ' + s.title + ' | ' + icon + ' | ' + notes + ' |\n';
+  });
+
+  var bugEntries = document.querySelectorAll('.bug-entry');
+  if (bugEntries.length > 0) {
+    md += '\n---\n\n## Bugs Found (new)\n\n';
+    var i = 0;
+    bugEntries.forEach(function(el) {
+      i++;
+      var id = el.id.split('-')[1];
+      var sev = document.getElementById('bug-sev-' + id);
+      var feat = document.getElementById('bug-feat-' + id);
+      var desc = document.getElementById('bug-desc-' + id);
+      var steps = document.getElementById('bug-steps-' + id);
+      var exp = document.getElementById('bug-exp-' + id);
+      md += '### Bug ' + i + '\n';
+      md += '- **Severity:** ' + (sev ? sev.value : '') + '\n';
+      md += '- **Feature:** ' + (feat ? feat.value : '') + '\n';
+      md += '- **Description:** ' + (desc ? desc.value : '') + '\n';
+      md += '- **Steps:** ' + (steps ? steps.value.replace(/\n/g, '; ') : '') + '\n';
+      md += '- **Expected vs Actual:** ' + (exp ? exp.value.replace(/\n/g, '; ') : '') + '\n\n';
+    });
+  }
+
+  var overall = document.getElementById('overall-notes').value;
+  if (overall) {
+    md += '\n---\n\n## Overall Notes\n\n' + overall + '\n';
+  }
+
+  navigator.clipboard.writeText(md).then(function() {
+    var msg = document.getElementById('copy-msg');
+    msg.style.display = 'block';
+    setTimeout(function() { msg.style.display = 'none'; }, 3000);
+  });
+}
+
+renderScenarios();
+</script>
+</body>
+</html>

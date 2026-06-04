@@ -69,7 +69,15 @@ async def _grant(data: dict[str, str], settings: Settings, *, what: str) -> Auth
             code = str(resp.json().get("errorCode", ""))
         _log.warning("epic.oauth.failed", what=what, status=resp.status_code, error_code=code)
         raise EpicAuthError(f"epic {what} failed: HTTP {resp.status_code} {code}")
-    return _to_tokens(resp.json())
+    # A 200 can still be malformed (proxy/CDN error page, truncated body, schema
+    # change). Surface it as EpicAuthError — the documented contract — so callers
+    # map it to 401/NotAuthenticated rather than leaking a raw KeyError /
+    # JSONDecodeError (UAT-10 #7). Log only what/status — never the body/token.
+    try:
+        return _to_tokens(resp.json())
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        _log.warning("epic.oauth.bad_response", what=what, status=resp.status_code)
+        raise EpicAuthError(f"epic {what} returned a malformed token response") from e
 
 
 async def exchange_code(code: str, settings: Settings) -> AuthTokens:

@@ -145,23 +145,23 @@ async def _queue_library_sync_job_best_effort(pool: Pool) -> None:
     (BL11). Plan P9: failures are logged but do NOT cause the auth response
     to fail — auth succeeded; the operator can manually re-sync.
 
-    Skips if a queued/running `library_sync` job already exists to avoid
-    duplicate work. (Concurrent auth + manual POST can still race; the
-    second handler call is idempotent via UPSERT.)
+    Dedup is DB-enforced by the partial UNIQUE index
+    ``idx_jobs_library_sync_inflight`` (migration 0004): an atomic
+    ``INSERT ... ON CONFLICT DO NOTHING`` permits at most one queued/running
+    library_sync per platform, so a concurrent auth + manual POST can no longer
+    race a SELECT-then-INSERT into a constraint violation (UAT-10 observation;
+    matches the four other call sites).
     """
     try:
-        existing = await pool.read_one(
-            "SELECT id FROM jobs WHERE kind='library_sync' AND platform='steam' "
-            "AND state IN ('queued','running') ORDER BY id LIMIT 1"
-        )
-        if existing is not None:
-            _log.info("auth.auto_sync.dedup_skip", existing_job_id=existing["id"])
-            return
-        await pool.execute_write(
-            "INSERT INTO jobs (kind, platform, state, source) VALUES (?, ?, 'queued', 'api')",
+        inserted = await pool.execute_write(
+            "INSERT INTO jobs (kind, platform, state, source) "
+            "VALUES (?, ?, 'queued', 'api') ON CONFLICT DO NOTHING",
             ("library_sync", "steam"),
         )
-        _log.info("auth.auto_sync.queued")
+        if inserted:
+            _log.info("auth.auto_sync.queued")
+        else:
+            _log.info("auth.auto_sync.dedup_skip")
     except PoolError as e:
         _log.warning("auth.auto_sync.queue_failed", reason=str(e)[:200])
 

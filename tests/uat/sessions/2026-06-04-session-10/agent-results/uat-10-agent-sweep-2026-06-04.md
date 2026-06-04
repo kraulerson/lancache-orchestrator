@@ -1,0 +1,75 @@
+# UAT-10 — Automated Adversarial Sweep (agent results)
+
+**Date:** 2026-06-04
+**Features under test:** F5 (Steam prefill), F6 (Epic prefill) — the two features since UAT-9.
+**Baseline (merged `main` @ aa25597):** 1037 tests pass · `mypy --strict` clean · `ruff check`/`format` clean · `gitleaks` no leaks · `semgrep` custom rules clean. (The lone `pip-licenses` "failure" is a PATH artifact; passes with the venv on PATH, as CI runs it.)
+
+**Method:** A multi-agent Workflow ran 5 independent finder lenses over F5+F6 — (L1) F5 Steam-prefill exploratory, (L2) F6 OAuth + binary-manifest parser, (L3) F6 downloader + CDN routing + handler, (L4) cross-platform integration & regression, (L5) test-quality + coverage + live-scope. **Every candidate finding was then handed to an independent skeptic agent** prompted to refute it by reading the actual code; only code-confirmed findings are kept. 17 agents total.
+
+**Result: 11 confirmed · 1 refuted · 1 low-sev observation (not filed).**
+
+---
+
+## Confirmed findings
+
+| # | Sev | Cat | File | Title |
+|---|-----|-----|------|-------|
+| 1 | **SEV-2** | security | `platform/epic/manifest.py:85` | Manifest zlib body decompressed with no `max_length` — decompression bomb (DoS) bypasses the size cap |
+| 2 | **SEV-3** | stability | `jobs/handlers/prefill.py` `_steam_prefill` | Steam prefill leaves game stuck `downloading` forever on manifest/IPC error (no guard; Epic path has one) |
+| 3 | **SEV-3** | correctness | `jobs/handlers/prefill.py` + `validator/...` | Steam prefill never resolves status when post-prefill `validate` returns `outcome='error'` (cache unmounted) → stuck `downloading` |
+| 4 | **SEV-3** | security | `platform/epic/manifest.py:177-202` | SSRF: Epic manifest GET fires **before** the host/`..` validation (validation runs too late to protect the manifest fetch) |
+| 5 | **SEV-3** | correctness | `jobs/handlers/prefill.py` dispatch | **Epic prefill handler is unreachable** — no production path enqueues `prefill`+`epic` (trigger is steam-hardcoded, 400s non-steam). Blocks the F6 live UAT. |
+| 6 | **SEV-3** | test-quality | `tests/prefill/test_epic_downloader.py` | Epic downloader retry loop untested: no timeout/transport path, no 5xx-retry-then-success |
+| 7 | **SEV-4** | stability | `platform/epic/oauth.py:72` | OAuth 200-success path raises raw `KeyError`/`JSONDecodeError` instead of `EpicAuthError` (becomes a 500, not the documented 401) |
+| 8 | **SEV-4** | test-quality | `tests/prefill/test_epic_downloader.py` | `verify_cached` MISS path + the `hit_ratio<0.5` warning branch never exercised (every test returns ratio 1.0) |
+| 9 | **SEV-4** | test-quality | `tests/platform/epic/test_manifest_fetch.py` | CDN-base `..` path-traversal guard has no dedicated test (its sibling host guard does) |
+| 10 | **SEV-4** | test-quality | `tests/platform/epic/test_oauth.py` | `save_refresh_token` `O_NOFOLLOW` symlink/TOCTOU guard never exercised by a test |
+| 11 | **nit** | test-quality | `tests/platform/epic/test_oauth.py:14` | Two sync OAuth tests carry the module `pytest.mark.asyncio` → `PytestWarning` (delete the marker; `asyncio_mode=auto`) |
+
+### Detail & fixes
+
+**#1 — SEV-2 zlib decompression bomb (security).** `_parse` (`manifest.py:85`): `body = zlib.decompress(body_raw) ...` — single-shot, **no `max_length`**. The only size guard (`fetch_manifest:184`) caps the *compressed* download at 128 MiB; the decompressed `body` is unbounded. `data_size_uncompressed` is read (`:78`) and discarded. The `meta_size <= len(body)` check (`:90`) runs *after* the bomb is already allocated. **Reproduced offline:** a 510 KB raw manifest (well under the 128 MiB compressed cap) inflated to ~500 MB body, peak RSS 1538 MB; a few-MB download → multi-GB → OOM-kills the orchestrator. Attacker surface: a MITM'd/compromised Epic response, or any caller of the public `parse_manifest`. Matches the project's own unenforced threat-model item TM-018. **Fix:** bounded streaming decompress capped at `manifest_size_cap_bytes` — `d=zlib.decompressobj(); body=d.decompress(body_raw, cap); if d.unconsumed_tail or not d.eof: raise EpicManifestError(...)`. Thread the cap into `parse_manifest`/`_parse`. Regression test: feed a small zlib bomb, assert `EpicManifestError` (not a multi-GB allocation).
+
+**#2 — SEV-3 Steam prefill stuck `downloading` on IPC/auth error (stability).** `_steam_prefill` sets `status='downloading'` unconditionally (`:204`) then runs `_load_chunk_uris`→`manifest_expand` and `manifest_fetch` (`:208`,`:220`) with **no enclosing try/except**. Those IPC calls raise (`IPCTimeoutError`, `WorkerDiedError`, `SteamWorkerError(NotAuthenticated)`) — exactly the failures the orchestrator exists to surface. The exception → `worker_loop` → `mark_failed` touches only the **jobs** row; nothing resets `games.status`. The ID6 reaper also only touches jobs. The Epic path wraps the identical logic in a guard ("Never leave the game stuck in 'downloading'", `:96-108`); Steam has no equivalent. **Fix:** extract `_steam_prefill_inner`, wrap in the same `except Exception` → `UPDATE games SET status='failed', last_error=? WHERE id=? AND status='downloading'`; re-raise. Add a test injecting an IPC error and asserting status ends `failed`.
+
+**#3 — SEV-3 post-prefill validate `error` outcome leaves game stuck (correctness).** On full prefill success, `_steam_prefill` enqueues a `validate` job and deliberately leaves `status='downloading'` ("validate sets the final status"). But `validate_handler` only writes status when `_STATUS_FOR.get(outcome)` is non-None, and `_STATUS_FOR` has **no `error` key** (by design, to avoid clobbering real state on re-validate). `validate_game` returns `outcome='error'` **without raising** when `cache_root` isn't a directory / `steam_client` is None / no manifests. So a successful prefill + a validate that hits an infra error (lancache cache unmounted — precisely what the validator should flag) → game permanently `downloading`. **Fix:** when the validate outcome is `error`, clear only the transient state — `UPDATE games SET status='failed', last_error=? WHERE id=? AND status='downloading'` (still never clobbers a real prior classification). Regression test: prefill→validate(error)→assert status ≠ `downloading`.
+
+**#4 — SEV-3 SSRF on Epic manifest fetch (security).** In `fetch_manifest`, `uri` comes from Epic's `/assets/v2` JSON, and `client.get(uri)` (`:181`) fires **before** the `_HOSTNAME_RE` FQDN check and `..` check (`:197-199`), which only run after the GET completes. So the guard hardening the chunk-download path does **not** protect the manifest GET. An adversary who can influence the Epic API response (TLS MITM / compromised CDN edge / DNS poisoning) can point the GET at `http://169.254.169.254/...` or an internal host; the orchestrator fetches up to 128 MiB of it. Bounded (one GET, `follow_redirects=False`, response consumed as opaque bytes) → blind/semi-blind SSRF. **Fix:** validate `parsed.scheme in {http,https}` + `_HOSTNAME_RE.match(host)` + reject `..` **before** the GET; drop the now-redundant post-fetch checks. Defense-in-depth: reject hosts resolving to RFC1918/loopback/link-local, or pin allowed CDN domains.
+
+**#5 — SEV-3 Epic prefill handler unreachable (correctness) — blocks F6 live UAT.** `prefill_handler` dispatches `platform=='epic' → _epic_prefill`, but **no production path ever creates a `prefill` job with `platform='epic'`.** The only prefill INSERT is `prefill_trigger.py:69` (`platform` hardcoded `'steam'`), and that router 400s non-steam first. Epic auth/sync enqueue only `library_sync`; the scheduler enqueues only steam `library_sync`; steam prefill enqueues only steam `validate`. So F6's headline capability can't be driven through any operator interface — `POST /games/{epic_id}/prefill` → 400. **Fix:** generalize `trigger_prefill` to allow `platform in {steam,epic}` and parameterize the INSERT's platform from `game['platform']` (the dedup SELECT/read-back already filter on kind+game_id only, so they work for either platform); or add a dedicated Epic prefill router. Replace `test_non_steam_game_returns_400` with a 202+epic-row assertion and an end-to-end test that the enqueued epic job reaches `_epic_prefill`. **Live-UAT workaround until fixed:** manual `INSERT INTO jobs (kind, game_id, platform, state, source) VALUES ('prefill', <id>, 'epic', 'queued', 'cli')`.
+
+**#6 — SEV-3 Epic downloader retry logic untested (test-quality).** `epic_downloader.py:116-119` (timeout/transport retry) and the 5xx-retry-then-200 branch are never exercised (coverage: `Missing 110, 105->120, 116-119`). The only failure test is `test_4xx_not_retried`. The sibling Steam suite tests 5xx-retry-then-success; Epic doesn't, and neither simulates `TimeoutException`/`TransportError`. A regression that broke transient-error recovery would pass green. **Fix:** add (a) 503-then-200 → `chunks_ok==1`, 2 calls; (b) raise `ConnectError` → retried to `max_attempts` then `chunks_failed==1` (monkeypatch `asyncio.sleep`).
+
+**#7 — SEV-4 OAuth success path raises raw exception (stability).** `oauth.py:72` `return _to_tokens(resp.json())` is unguarded: a 200 with non-JSON body raises `JSONDecodeError`; a 200 missing `access_token` raises `KeyError` (`_to_tokens` uses bracket access). Callers catch only `EpicAuthError` → in the router this becomes a generic 500 instead of the documented 401. **Fix:** wrap the success path, raise `EpicAuthError` on parse/shape errors (log only `what`+status, never the body). Unit-test a 200 with missing `access_token` and a 200 non-JSON body.
+
+**#8 — SEV-4 `verify_cached` MISS path untested (test-quality).** Every test returns `X-Upstream-Cache-Status: HIT` (ratio 1.0) or empty (0.0); no partial ratio. So `epic_downloader.py:159->153` (non-HIT branch) and `prefill.py:165` (`low_hit_ratio` warning) are uncovered, and `verify_cached` — the **only** Epic validation gate (F7-Epic disk-stat deferred) — is only tested at the 100% boundary. **Fix:** mixed HIT/MISS test asserting `ratio==0.5`; handler test where `fake_verify` returns 0.2 asserts status still `up_to_date` (non-gating) **and** the warning fires.
+
+**#9 — SEV-4 CDN-base traversal guard untested (test-quality).** `manifest.py:199-200` (`'..' in cdn_base` → raise) has no test; its sibling host guard does (`test_fetch_manifest_rejects_non_fqdn_host`). Coverage: `manifest.py:200` missing. A refactor of `cdn_base` derivation could silently re-open traversal. **Fix:** feed a manifest `uri` with `..` in the path (dotted host so it passes the host guard), assert `EpicManifestError(match='path traversal')`.
+
+**#10 — SEV-4 `O_NOFOLLOW` symlink guard untested (test-quality).** `oauth.py:96-104` opens the token file with `O_NOFOLLOW` (TOCTOU/arbitrary-truncation guard); the only persistence test checks 0600 + round-trip, never plants a symlink. A refactor back to `Path.write_text`/`open()` would pass every test while re-introducing the vuln. **Fix:** symlink the token path to a victim file, assert `save_refresh_token` raises `OSError` and the target is untouched.
+
+**#11 — nit asyncio marker on sync tests (test-quality).** `test_oauth.py:14` `pytestmark = pytest.mark.asyncio` applies to two sync tests → `PytestWarning` ×2 (confirmed live). Tests still run/assert correctly (verified). `asyncio_mode=auto`, so the marker is redundant even for the async tests. **Fix:** delete the module-level `pytestmark`.
+
+---
+
+## Refuted (1) — kept off the bug list
+
+**Chunk `file_size` parsed as signed `<q>` → negative `total_bytes` (claimed nit).** Code facts accurate, **impact refuted:** both target columns are STRICT-table `CHECK(... >= 0)` (`manifests.total_bytes`, `games.size_bytes`), and the manifest UPSERT runs before the games UPDATE, so a negative total is rejected at the first write → classified `IntegrityViolationError` → caught by `_epic_prefill`'s guard → game `failed`, nothing corrupted. `file_size` is used only to sum `total_bytes` (never for sizing/progress). The DB already enforces the invariant; a hostile manifest fails the job cleanly. *Optional* defense-in-depth nit only: raise `EpicManifestError` on negative sizes at parse time for a domain-specific error.
+
+## Low-sev observation (not filed as SEV)
+
+**Steam auth auto-enqueue not migrated to `ON CONFLICT DO NOTHING`.** `_queue_library_sync_job_best_effort` (`auth.py:143-166`) still does SELECT-then-INSERT straddling an `await` (the pre-0004 pattern). Against the new `idx_jobs_library_sync_inflight` UNIQUE index, a concurrent insert in the gap makes the plain INSERT raise `IntegrityViolationError` — but it subclasses `PoolError`, is caught at `auth.py:165`, logged `auth.auto_sync.queue_failed`, and auth still returns success. Net: rare benign log-noise + a skipped auto-sync (operator can re-sync), not a 500. The Epic auth path already uses the correct pattern. **One-line follow-up:** switch to `ON CONFLICT DO NOTHING` for consistency with the other four call sites.
+
+---
+
+## Live-only scenarios (require real Steam/Epic accounts + a real lancache)
+
+The automated suite mocks every network boundary (`httpx.MockTransport`), stubs the platform clients, and uses synthetic binary manifests — it proves internal logic but **nothing** about real wire formats, signed-URL expiry, chunk-key/Host routing, or on-disk cache population. The following must be verified by hand (see the interactive template `test-session-10-v1.html`):
+
+**F5 Steam prefill:** real 2FA auth + session persist → library_sync upserts real games → `POST /games/{id}/prefill` fetches a real depot manifest, `manifest_expand` yields real SHAs → chunks 200 **through** the lancache (`Host: lancache.steamcontent.com`, Valve UA), exercising the real retry loop → on-disk cache populated at the F7 cache-key path → chained `validate` runs → game `up_to_date` → re-request HITs.
+
+**F6 Epic prefill:** real OAuth code from `legendary.gl/epiclogin` → `POST /platforms/epic/auth` (202, no tokens echoed, refresh token 0600, auto library_sync) → real token refresh on a later call → library enumerate populates `platform='epic'` games (real cursor pagination) → **trigger an Epic prefill** (currently needs the #5 SQL workaround) → FRESH signed manifest fetched + real binary manifest parses (real feature-levels/compression/UTF-16 the fixtures don't cover) → chunks 200 through the lancache with **Host-header routing** to the real Epic CDN host (passes the FQDN + `..` guards) → on-disk cache populated → `verify_cached` re-requests yield real `X-Upstream-Cache-Status: HIT` → game `up_to_date` with real `size_bytes`; a real partial CDN failure yields `failed`+`last_error` (stuck-`downloading` guard holds on a real exception).
+
+## Recommended remediation (after the live pass)
+
+Fix **all 11 confirmed** test-first (most are unit-testable offline), plus the one-line auth.py follow-up. Suggested order: **#1 (SEV-2 bomb) → #4 (SSRF ordering) → #5 (Epic trigger; unblocks F6 live) → #2, #3 (stuck-downloading) → #7 (OAuth contract) → #6, #8, #9, #10 (test-quality) → #11 (nit)**. Then re-green the suite + static gates and close the gate.

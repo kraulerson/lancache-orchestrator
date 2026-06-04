@@ -112,7 +112,7 @@ async def test_partial_marks_validation_failed(pool, cache_root):
     assert g["status"] == "validation_failed"
 
 
-async def test_error_leaves_status_unchanged(pool, tmp_path, monkeypatch):
+async def test_error_does_not_clobber_classified_status(pool, tmp_path, monkeypatch):
     # Point at a non-existent cache root → outcome error.
     monkeypatch.setenv("ORCH_LANCACHE_NGINX_CACHE_PATH", str(tmp_path / "nope"))
     from orchestrator.core.settings import get_settings
@@ -120,14 +120,32 @@ async def test_error_leaves_status_unchanged(pool, tmp_path, monkeypatch):
     get_settings.cache_clear()
     game_id = await _seed_game(pool)
     await _seed_manifest(pool, game_id)
-    # Pre-set a known status to confirm it is NOT clobbered.
+    # A real, already-classified status must NOT be clobbered by an error outcome.
+    await pool.execute_write("UPDATE games SET status='up_to_date' WHERE id=?", (game_id,))
+    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A]}))
+    await validate_handler(_job(game_id), deps)
+    g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
+    assert g["status"] == "up_to_date"  # unchanged
+    vh = await pool.read_one("SELECT outcome FROM validation_history WHERE game_id=?", (game_id,))
+    assert vh["outcome"] == "error"
+    get_settings.cache_clear()
+
+
+async def test_error_unsticks_transient_downloading(pool, tmp_path, monkeypatch):
+    """A post-prefill validate that hits an infra error (cache unmounted) must
+    resolve the transient 'downloading' state to 'failed', not leave it stuck
+    (UAT-10 #3). It still must not clobber a real classified status (above)."""
+    monkeypatch.setenv("ORCH_LANCACHE_NGINX_CACHE_PATH", str(tmp_path / "nope"))
+    from orchestrator.core.settings import get_settings
+
+    get_settings.cache_clear()
+    game_id = await _seed_game(pool)
+    await _seed_manifest(pool, game_id)
     await pool.execute_write("UPDATE games SET status='downloading' WHERE id=?", (game_id,))
     deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A]}))
     await validate_handler(_job(game_id), deps)
     g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
-    assert g["status"] == "downloading"  # unchanged
-    vh = await pool.read_one("SELECT outcome FROM validation_history WHERE game_id=?", (game_id,))
-    assert vh["outcome"] == "error"
+    assert g["status"] == "failed"  # transient 'downloading' resolved, not stuck
     get_settings.cache_clear()
 
 

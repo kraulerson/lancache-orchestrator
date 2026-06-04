@@ -85,15 +85,49 @@ class TestErrors:
         assert r.status_code == 404
         assert "not found" in r.json()["detail"]
 
-    async def test_non_steam_game_returns_400(self, client, populated_pool):
+    async def test_epic_game_queues_epic_prefill_job(self, client, populated_pool):
         row = await populated_pool.read_one("SELECT id FROM games WHERE platform='epic' LIMIT 1")
         assert row is not None
         r = await client.post(
             f"/api/v1/games/{row['id']}/prefill",
             headers={"Authorization": f"Bearer {VALID_TOKEN}"},
         )
+        assert r.status_code == 202
+        jrow = await populated_pool.read_one(
+            "SELECT kind, game_id, platform, state, source FROM jobs WHERE id=?",
+            (r.json()["job_id"],),
+        )
+        assert jrow == {
+            "kind": "prefill",
+            "game_id": row["id"],
+            "platform": "epic",
+            "state": "queued",
+            "source": "api",
+        }
+
+    async def test_unsupported_platform_returns_400(self, unit_app):
+        import httpx
+
+        from orchestrator.api.dependencies import get_pool_dep
+
+        class _GogPool:
+            async def read_one(self, query, *_a, **_kw):
+                if "FROM games" in query:
+                    return {"id": 7, "platform": "gog"}
+                return None
+
+            async def execute_write(self, *_a, **_kw):
+                return 1
+
+        unit_app.dependency_overrides[get_pool_dep] = lambda: _GogPool()
+        transport = httpx.ASGITransport(app=unit_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            r = await c.post(
+                "/api/v1/games/7/prefill",
+                headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            )
         assert r.status_code == 400
-        assert "steam" in r.json()["detail"]
+        assert "gog" in r.json()["detail"]
 
 
 class TestAuthBoundary:

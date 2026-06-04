@@ -1,4 +1,7 @@
-"""POST /api/v1/games/{game_id}/prefill — prefill trigger (F5).
+"""POST /api/v1/games/{game_id}/prefill — prefill trigger (F5 steam, F6 epic).
+
+Supports both steam and epic games; the enqueued job carries the game's own
+platform so the worker dispatches to the right prefill handler.
 
 Handler-side dedup: if a `prefill` job for this game is already queued/running,
 return the existing job_id rather than creating a duplicate. The race window
@@ -29,7 +32,7 @@ router = APIRouter(prefix="/api/v1/games", tags=["prefill"])
     "/{game_id}/prefill",
     responses={
         202: {"description": "Prefill job queued or existing in-flight job returned"},
-        400: {"description": "Game is on a non-steam platform"},
+        400: {"description": "Game is on an unsupported platform (not steam/epic)"},
         401: {"description": "Missing/invalid bearer"},
         404: {"description": "Game not found"},
         503: {"description": "Database unavailable"},
@@ -43,10 +46,11 @@ async def trigger_prefill(
         game = await pool.read_one("SELECT id, platform FROM games WHERE id=?", (game_id,))
         if game is None:
             raise HTTPException(status_code=404, detail=f"game {game_id} not found")
-        if game["platform"] != "steam":
+        platform = game["platform"]
+        if platform not in ("steam", "epic"):
             raise HTTPException(
                 status_code=400,
-                detail=f"prefill only supports steam (got {game['platform']!r})",
+                detail=f"prefill only supports steam/epic (got {platform!r})",
             )
 
         existing = await pool.read_one(
@@ -66,8 +70,8 @@ async def trigger_prefill(
 
         await pool.execute_write(
             "INSERT INTO jobs (kind, game_id, platform, state, source) "
-            "VALUES ('prefill', ?, 'steam', 'queued', 'api')",
-            (game_id,),
+            "VALUES ('prefill', ?, ?, 'queued', 'api')",
+            (game_id, platform),
         )
         new_row = await pool.read_one(
             "SELECT id FROM jobs WHERE kind='prefill' AND game_id=? "
