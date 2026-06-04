@@ -35,6 +35,17 @@ def steam_chunk_uri(depot_id: int, sha_hex: str) -> str:
     return f"/depot/{depot_id}/chunk/{sha_hex}"
 
 
+def epic_chunk_uri(chunk_path: str, cdn_base_path: str) -> str:
+    """URI path of an Epic chunk through the lancache: ``<cdn_base>/<chunk_path>``.
+
+    Staged for the deferred F7-Epic disk-stat validator (F6). The Epic on-disk
+    cache-key derivation (the A4-equivalent for Epic) needs real cached Epic
+    chunks and so is a post-live-UAT follow-up — this helper is not yet wired
+    into ``disk_stat``.
+    """
+    return f"{cdn_base_path.rstrip('/')}/{chunk_path}"
+
+
 def slice_range_zero(slice_size: int) -> str:
     """The first slice's Range value: ``bytes=0-<slice_size-1>``.
 

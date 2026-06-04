@@ -1021,4 +1021,67 @@ unreadable cache files.
 
 ---
 
+## Feature 19: F6 — Epic CDN Prefill (full Epic stack)
+
+**Phase Built:** 2 (Milestone B / F6)
+**Status:** Complete pending live UAT (2026-06-03)
+
+**Summary:** Brings Epic Games to parity with the Steam pipeline — OAuth, library
+enumeration, manifest fetch + parse, chunk prefill through the lancache, and
+sample cache-HIT verification. Entirely **pure-Python / async-httpx in the
+orchestrator process** (no `legendary` runtime dep, no gevent, no worker —
+unlike Steam's ADR-0013). De-risked end-to-end by `spikes/spike_b_epic_prefill.py`
+(PASS). No DB migration (schema was already Epic-ready).
+
+**Key Interfaces:**
+  - `src/orchestrator/platform/epic/` — `models.py`, `manifest.py`
+    (`parse_manifest`/`chunk_path`/`fetch_manifest`), `oauth.py`
+    (`exchange_code`/`refresh`/`save_refresh_token`), `library.py`
+    (`enumerate_library`), `client.py` (`EpicClient`)
+  - `src/orchestrator/prefill/epic_downloader.py` — `prefill_chunks` +
+    `verify_cached` + `EpicPrefillResult`
+  - `src/orchestrator/jobs/handlers/{library_sync,prefill}.py` — Epic branches
+    (dispatch on `job.platform`); `Deps.epic_client`
+  - `src/orchestrator/api/routers/epic_auth.py` —
+    `POST/GET /api/v1/platforms/epic/auth`
+  - `src/orchestrator/api/routers/epic_sync.py` —
+    `POST /api/v1/platforms/epic/library/sync`
+  - `src/orchestrator/core/settings.py` — `epic_token_url`, `epic_library_url`,
+    `epic_manifest_url_template`, `epic_client_id`/`epic_client_secret`,
+    `epic_user_agent`, `epic_manifest_label`, `epic_platform`
+
+**Locked decisions (spike B + spec + ADR-0014):**
+  - **Pure-Python manifest parsing** over vendored `legendary` (ADR-0014;
+    deliberate Manifesto deviation). Parser raises `EpicManifestError`, bounds
+    `chunk_count`, handles v≥22 (ChunksV5/base64) + legacy (hex).
+  - **Signed-URL freshness:** the prefill handler re-fetches a fresh manifest +
+    CDN URL at download time (Epic signed URLs expire); the stored `manifests`
+    row is for size/version/diff.
+  - **Validation = sample cache-HIT now** (`X-Upstream-Cache-Status: HIT`);
+    F7-Epic disk-stat is a deferred follow-up (`epic_chunk_uri` staged). No
+    separate validate job for Epic this round.
+  - **Credentials:** public legendary launcher `client_id`/`secret`; per-user
+    refresh token persisted 0600 at `epic_session_path`, never logged.
+
+**Test Coverage:** ~38 new tests across `tests/platform/epic/`,
+`tests/prefill/test_epic_downloader.py`, `tests/jobs/test_epic_handlers.py`,
+`tests/api/test_epic_{auth,sync}_router.py`, settings + cache_key. Full suite:
+1032 pass. ruff/mypy(strict)/gitleaks clean.
+
+**Related ADRs:** ADR-0014 (pure-Python Epic manifest). Spec:
+`docs/superpowers/specs/2026-06-03-f6-epic-prefill-design.md`; mechanism:
+`spikes/spike_b_epic_prefill.py`.
+
+**Known Limitations:**
+  - **Live UAT pending:** Epic OAuth needs the operator's real Epic account
+    (visit `legendary.gl/epiclogin`, paste the code). The full stack is
+    unit-tested behind stubs; the live prefill of a real title is the stopping
+    point (analogous to F5's Steam 2FA).
+  - **F7-Epic disk-stat validation deferred** — needs the Epic on-disk
+    cache-key derived from real cached chunks (post-live-UAT).
+  - Library auto-scheduling for Epic via the F12 cron is a thin follow-up.
+  - Any single chunk failure fails the whole job (mirrors F5).
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->

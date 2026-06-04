@@ -20,6 +20,7 @@ from orchestrator.jobs.handlers import HANDLERS
 
 if TYPE_CHECKING:
     from orchestrator.db.pool import Pool
+    from orchestrator.platform.epic.client import EpicClient
     from orchestrator.platform.steam.client import SteamWorkerClient
 
 _log = structlog.get_logger(__name__)
@@ -36,6 +37,7 @@ class Deps:
 
     pool: Pool
     steam_client: SteamWorkerClient | None
+    epic_client: EpicClient | None = None
 
 
 async def claim_next_job(pool: Pool) -> dict[str, Any] | None:

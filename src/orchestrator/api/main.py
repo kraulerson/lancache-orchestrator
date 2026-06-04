@@ -27,6 +27,8 @@ from orchestrator.api.middleware import (
 )
 from orchestrator.api.routers.auth import router as auth_router
 from orchestrator.api.routers.auth import set_steam_client_singleton
+from orchestrator.api.routers.epic_auth import router as epic_auth_router
+from orchestrator.api.routers.epic_sync import router as epic_sync_router
 from orchestrator.api.routers.games import router as games_router
 from orchestrator.api.routers.health import router as health_router
 from orchestrator.api.routers.jobs import router as jobs_router
@@ -140,9 +142,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # override the dep still work (they don't call start()).
     set_steam_client_singleton(steam_client)
 
+    # 3b. Epic client (F6). Pure async-httpx facade over Epic OAuth/library/
+    # manifest — no subprocess. Refreshes the access token from the persisted
+    # refresh token on demand; raises EpicNotAuthenticated if none is stored.
+    from orchestrator.platform.epic.client import EpicClient
+
+    epic_client = EpicClient(settings)
+    app.state.epic_client = epic_client
+    log.info("api.boot.epic_client_initialized")
+
     # 4. Jobs worker — spawn the background asyncio task (BL11)
     jobs_shutdown: asyncio.Event = asyncio.Event()
-    jobs_deps = JobsDeps(pool=get_pool(), steam_client=steam_client)
+    jobs_deps = JobsDeps(pool=get_pool(), steam_client=steam_client, epic_client=epic_client)
     jobs_worker_task = asyncio.create_task(
         jobs_worker_loop(
             jobs_deps,
@@ -369,6 +380,8 @@ def create_app() -> FastAPI:
     app.include_router(validate_trigger_router)
     app.include_router(prefill_trigger_router)
     app.include_router(sync_router)
+    app.include_router(epic_sync_router)
+    app.include_router(epic_auth_router)
     app.include_router(status_router)
 
     return app

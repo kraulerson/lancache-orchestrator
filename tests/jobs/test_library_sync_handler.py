@@ -172,10 +172,11 @@ class TestIdempotency:
 
 
 class TestErrorPropagation:
-    async def test_rejects_non_steam_platform(self, pool):
+    async def test_rejects_unsupported_platform(self, pool):
+        # steam + epic are supported (F6); an unknown platform still rejects.
         stub = _StubSteam()
-        with pytest.raises(ValueError, match="library_sync only supports steam"):
-            await library_sync_handler(_job(platform="epic"), Deps(pool=pool, steam_client=stub))
+        with pytest.raises(ValueError, match="unsupported platform"):
+            await library_sync_handler(_job(platform="gog"), Deps(pool=pool, steam_client=stub))
         assert stub.calls == 0  # didn't even ask the worker
 
     async def test_requires_steam_client(self, pool):

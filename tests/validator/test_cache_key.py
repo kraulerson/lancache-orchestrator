@@ -100,3 +100,11 @@ def test_cache_path_always_under_root():
     h = "22e7d56f787714bc78e23495d93da0db"
     p = cache_path(root, h, "2:2")
     assert p.is_relative_to(root)
+
+
+def test_epic_chunk_uri_shape():
+    """F6 staged helper for the deferred F7-Epic disk-stat validator."""
+    from orchestrator.validator.cache_key import epic_chunk_uri
+
+    assert epic_chunk_uri("ChunksV5/00/a_b.chunk", "/base") == "/base/ChunksV5/00/a_b.chunk"
+    assert epic_chunk_uri("ChunksV5/00/a.chunk", "/base/") == "/base/ChunksV5/00/a.chunk"

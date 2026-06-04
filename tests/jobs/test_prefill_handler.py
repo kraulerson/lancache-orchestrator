@@ -105,10 +105,11 @@ async def test_no_manifests_triggers_fetch(pool, monkeypatch):
     assert stub.fetch_calls == 1
 
 
-async def test_non_steam_raises(pool):
+async def test_unsupported_platform_raises(pool):
+    # steam + epic are supported (F6); an unknown platform still rejects.
     game_id = await _seed_game(pool, platform="epic", app_id="fort")
-    with pytest.raises(ValueError, match="steam"):
-        await prefill_handler(_job(game_id, "epic"), Deps(pool=pool, steam_client=_StubSteam()))
+    with pytest.raises(ValueError, match="unsupported platform"):
+        await prefill_handler(_job(game_id, "gog"), Deps(pool=pool, steam_client=_StubSteam()))
 
 
 async def test_unknown_game_raises(pool):

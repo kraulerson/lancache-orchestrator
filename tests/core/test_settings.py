@@ -88,6 +88,18 @@ class TestDefaults:
     def test_default_value(self, settings, field, expected):
         assert getattr(settings, field) == expected
 
+    def test_epic_settings_defaults(self, settings):
+        """F6: Epic OAuth/CDN endpoints + public legendary launcher creds."""
+        assert settings.epic_token_url.startswith("https://account-public-service")
+        assert settings.epic_library_url.startswith("https://library-service")
+        assert "{namespace}" in settings.epic_manifest_url_template
+        assert settings.epic_client_id == "34a02cf8f4414e29b15921876da36f9a"
+        # public legendary launcher secret (not an operator secret) — a 32-hex string
+        assert len(settings.epic_client_secret) == 32
+        assert settings.epic_user_agent.startswith("EpicGamesLauncher/")
+        assert settings.epic_manifest_label == "Live"
+        assert settings.epic_platform == "Windows"
+
 
 # ----------------------------------------------------------------------
 # 3. Field validators
