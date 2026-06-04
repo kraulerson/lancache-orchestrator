@@ -32,10 +32,52 @@ _UPSERT_SQL = (
 
 
 async def library_sync_handler(job: dict[str, Any], deps: Deps) -> None:
-    """Library sync handler.
+    """Library sync handler — dispatches on ``job.platform``."""
+    platform = job.get("platform")
+    if platform == "steam":
+        return await _steam_library_sync(job, deps)
+    if platform == "epic":
+        return await _epic_library_sync(job, deps)
+    raise ValueError(f"library_sync: unsupported platform {platform!r}")
+
+
+async def _epic_library_sync(job: dict[str, Any], deps: Deps) -> None:
+    """Enumerate the owned Epic library and upsert into ``games`` (F6)."""
+    from orchestrator.platform.epic.client import EpicNotAuthenticatedError
+
+    if deps.epic_client is None:
+        raise RuntimeError("epic_client is required for epic library_sync")
+    job_id = job.get("id")
+    _log.info("library_sync.epic.enumerate.started", job_id=job_id)
+    try:
+        items = await deps.epic_client.library_enumerate()
+    except EpicNotAuthenticatedError as e:
+        # Surface the expired session on the platforms row, mirroring Steam.
+        try:
+            await deps.pool.execute_write(
+                "UPDATE platforms SET auth_status='expired', last_error=? WHERE name='epic'",
+                (f"NotAuthenticated: {e}"[:200],),
+            )
+        except Exception as upd_e:  # best-effort mark; we still re-raise below
+            _log.error("library_sync.epic.session_mark_failed", reason=str(upd_e)[:200])
+        raise
+    _log.info("library_sync.epic.enumerate.returned", job_id=job_id, app_count=len(items))
+
+    upserted = 0
+    for item in items:
+        metadata = json.dumps(
+            {"namespace": item.namespace, "catalog_item_id": item.catalog_item_id},
+            separators=(",", ":"),
+        )
+        await deps.pool.execute_write(_UPSERT_SQL, ("epic", item.app_name, item.title, metadata))
+        upserted += 1
+    _log.info("library_sync.epic.upserted", job_id=job_id, upserted=upserted)
+
+
+async def _steam_library_sync(job: dict[str, Any], deps: Deps) -> None:
+    """Steam library sync.
 
     Raises:
-        ValueError — `job.platform` is not 'steam'.
         RuntimeError — `deps.steam_client` is None.
         IPCTimeoutError / WorkerDiedError / WorkerDisabledError — propagate from
             SteamWorkerClient. Worker loop translates to job state=failed.
@@ -46,9 +88,6 @@ async def library_sync_handler(job: dict[str, Any], deps: Deps) -> None:
     """
     from orchestrator.platform.steam.client import SteamWorkerError
 
-    platform = job.get("platform")
-    if platform != "steam":
-        raise ValueError(f"library_sync only supports steam (got {platform!r})")
     if deps.steam_client is None:
         raise RuntimeError("steam_client is required for library_sync handler")
 

@@ -128,6 +128,30 @@ class Settings(BaseSettings):
     epic_refresh_buffer_sec: int = Field(default=600, ge=0)
     steam_upstream_silent_days: int = Field(default=15, ge=1)
 
+    # --- Epic (F6) ---------------------------------------------------
+    # Refresh token persists to epic_session_path (JSON, like steam_session_path).
+    epic_token_url: str = Field(
+        default="https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token"
+    )
+    epic_library_url: str = Field(
+        default="https://library-service.live.use1a.on.epicgames.com/library/api/public/items"
+    )
+    epic_manifest_url_template: str = Field(
+        default=(
+            "https://launcher-public-service-prod06.ol.epicgames.com"
+            "/launcher/api/public/assets/v2/platform/{platform}"
+            "/namespace/{namespace}/catalogItem/{catalog_item_id}"
+            "/app/{app_name}/label/{label}"
+        )
+    )
+    # Public legendary launcher client creds — the well-known EGS launcher app
+    # credentials used by every Epic CLI client; NOT operator secrets.
+    epic_client_id: str = Field(default="34a02cf8f4414e29b15921876da36f9a")
+    epic_client_secret: str = Field(default="daafbccc737745039dffe53d94fc76cf")
+    epic_user_agent: str = Field(default="EpicGamesLauncher/11.0.1-14907503+++Portal+Release-Live")
+    epic_manifest_label: str = Field(default="Live")
+    epic_platform: str = Field(default="Windows")
+
     # --- DB pool & SQLite tuning (BL4) ---
     pool_readers: int = Field(default=8, ge=1, le=32)
     # Floor of 100 ms (SEV-4, code review 2026-06-02): busy_timeout=0 disables
