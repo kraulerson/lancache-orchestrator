@@ -37,6 +37,38 @@ def test_parse_zlib_compressed_body():
     assert m.chunks[1].hash == 101
 
 
+def test_decompression_bomb_is_capped():
+    """A zlib body that inflates beyond the cap must raise EpicManifestError,
+    NOT allocate the full decompressed buffer (DoS guard). The compressed
+    manifest stays tiny — well under any compressed-size cap."""
+    import struct
+    import zlib
+
+    big = b"\x00" * (256 * 1024)  # inflates from a few hundred bytes
+    payload = zlib.compress(big)
+    header = bytearray()
+    header += struct.pack("<I", 0x44BEC00C)  # magic
+    header += struct.pack("<I", 0)  # header_size placeholder
+    header += struct.pack("<I", len(payload))  # data_size_compressed
+    header += struct.pack("<I", len(big))  # data_size_uncompressed
+    header += b"\x00" * 20  # sha
+    header += struct.pack("<B", 0x01)  # stored_as = zlib body
+    header += struct.pack("<I", 22)  # version
+    header[4:8] = struct.pack("<I", len(header))  # real header_size
+    raw = bytes(header) + payload
+
+    with pytest.raises(EpicManifestError, match="cap"):
+        parse_manifest(raw, max_decompressed=1024)
+
+
+def test_compressed_body_within_cap_still_parses():
+    """A normal compressed manifest decompresses fully under the cap."""
+    raw = build_manifest(22, make_chunks(2), compress=True)
+    m = parse_manifest(raw, max_decompressed=4 * 1024 * 1024)
+    assert m.version == 22
+    assert len(m.chunks) == 2
+
+
 def test_parse_legacy_hex_path():
     raw = build_manifest(18, make_chunks(1))
     m = parse_manifest(raw)

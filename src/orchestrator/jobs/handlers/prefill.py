@@ -25,6 +25,7 @@ from orchestrator.validator.disk_stat import _LATEST_PER_DEPOT_SQL
 if TYPE_CHECKING:
     from orchestrator.jobs.worker import Deps
     from orchestrator.platform.epic.client import EpicClient
+    from orchestrator.platform.steam.client import SteamWorkerClient
 
 _log = structlog.get_logger(__name__)
 
@@ -184,12 +185,18 @@ async def _epic_prefill_inner(
 async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
     """Prefill one Steam game's chunks through the lancache (F5).
 
+    Sets the game to 'downloading', then delegates to ``_steam_prefill_inner``
+    inside a guard so any failure (IPC/worker death, expired session, network)
+    marks the game 'failed' rather than leaving it stuck 'downloading' forever
+    (UAT-10 #2; mirrors the Epic path).
+
     Raises:
         ValueError — unknown game or non-steam platform.
         RuntimeError — steam_client is None, or chunks failed to download.
     """
     if deps.steam_client is None:
         raise RuntimeError("steam_client is required for prefill handler")
+    steam_client = deps.steam_client
     game_id = job.get("game_id")
     if game_id is None:
         raise ValueError("prefill job has no game_id")
@@ -203,7 +210,28 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
     job_id = job.get("id")
     await deps.pool.execute_write("UPDATE games SET status='downloading' WHERE id=?", (game_id,))
     _log.info("prefill.started", job_id=job_id, game_id=game_id)
+    try:
+        await _steam_prefill_inner(job_id, game_id, game, deps, steam_client)
+    except Exception as e:
+        # Never leave the game stuck in 'downloading'. The chunk-failure path
+        # already set 'failed' (this then no-ops via the status guard); any other
+        # failure (IPC/worker/network) is marked here before the re-raise.
+        with contextlib.suppress(Exception):
+            await deps.pool.execute_write(
+                "UPDATE games SET status='failed', last_error=? "
+                "WHERE id=? AND status='downloading'",
+                (f"prefill: {type(e).__name__}: {e}"[:200], game_id),
+            )
+        raise
 
+
+async def _steam_prefill_inner(
+    job_id: Any,
+    game_id: int,
+    game: dict[str, Any],
+    deps: Deps,
+    steam_client: SteamWorkerClient,
+) -> None:
     # Ensure manifests exist (fetch once if the game has none).
     uris = await _load_chunk_uris(deps, game_id)
     if not uris:
@@ -217,7 +245,7 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
             except (TypeError, ValueError) as e:
                 raise ValueError(f"game {game_id} app_id not numeric") from e
             _log.info("prefill.fetching_manifests", job_id=job_id, game_id=game_id)
-            await deps.steam_client.manifest_fetch(app_id_int)
+            await steam_client.manifest_fetch(app_id_int)
             uris = await _load_chunk_uris(deps, game_id)
 
     settings = get_settings()

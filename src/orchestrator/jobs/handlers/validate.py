@@ -85,6 +85,16 @@ async def validate_handler(job: dict[str, Any], deps: Deps) -> None:
             "UPDATE games SET status=?, last_validated_at=CURRENT_TIMESTAMP WHERE id=?",
             (new_status, game_id),
         )
+    else:
+        # outcome='error' (infra failure, e.g. cache unmounted). Never clobber an
+        # already-classified status — but a freshly-prefilled game's only prior
+        # state is the transient 'downloading', which would otherwise stay stuck
+        # forever. Resolve only that, scoped by WHERE status='downloading'
+        # (UAT-10 #3).
+        await deps.pool.execute_write(
+            "UPDATE games SET status='failed', last_error=? WHERE id=? AND status='downloading'",
+            ((f"validate: {result.error}"[:200] if result.error else "validate: error"), game_id),
+        )
 
     _log.info(
         "validate.recorded",

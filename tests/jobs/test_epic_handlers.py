@@ -100,6 +100,29 @@ async def test_epic_prefill_downloads_stores_manifest_marks_up_to_date(pool, mon
     assert m["total_bytes"] == 500
 
 
+async def test_epic_prefill_low_hit_ratio_is_non_gating(pool, monkeypatch):
+    """A low post-prefill HIT ratio logs a warning but does NOT fail the job —
+    lancache caches asynchronously, so an immediate re-request can legitimately
+    MISS; download success is the success signal (UAT-10 #8)."""
+    gid = await _seed_epic_game(pool, app_id="AppE")
+    stub = _StubEpic(manifest=_manifest())
+
+    async def fake_prefill(paths, host, base, settings, **kw):
+        return EpicPrefillResult(len(paths), len(paths), 0)
+
+    async def fake_verify(paths, host, base, settings, **kw):
+        return 0.2  # below the 0.5 warning threshold
+
+    monkeypatch.setattr(ph, "epic_prefill_chunks", fake_prefill)
+    monkeypatch.setattr(ph, "epic_verify_cached", fake_verify)
+
+    await prefill_handler(
+        _job("prefill", gid), Deps(pool=pool, steam_client=None, epic_client=stub)
+    )
+    g = await pool.read_one("SELECT status FROM games WHERE id=?", (gid,))
+    assert g["status"] == "up_to_date"  # informational, not a failure
+
+
 async def test_epic_prefill_failed_chunks_marks_failed(pool, monkeypatch):
     gid = await _seed_epic_game(pool, app_id="AppB")
     stub = _StubEpic(manifest=_manifest())

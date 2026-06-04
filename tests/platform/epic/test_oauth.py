@@ -11,7 +11,9 @@ from orchestrator.core.settings import Settings
 from orchestrator.platform.epic import oauth as ep_oauth
 from orchestrator.platform.epic.models import AuthTokens
 
-pytestmark = pytest.mark.asyncio
+# No module-level asyncio marker: asyncio_mode=auto already collects the async
+# tests as coroutines, and the marker spuriously warned on the sync tests below
+# (UAT-10 #11).
 
 VALID_TOKEN = "a" * 32
 
@@ -69,6 +71,30 @@ async def test_refresh_failure_raises_epicauth(monkeypatch):
         await ep_oauth.refresh("BAD", _settings())
 
 
+async def test_malformed_200_missing_access_token_raises_epicauth(monkeypatch):
+    """A 200 whose JSON omits access_token must surface as EpicAuthError, not a
+    raw KeyError (so callers map it to 401/NotAuthenticated) — UAT-10 #7."""
+    monkeypatch.setattr(
+        ep_oauth,
+        "_build_transport",
+        lambda: httpx.MockTransport(lambda r: httpx.Response(200, json={"refresh_token": "x"})),
+    )
+    with pytest.raises(ep_oauth.EpicAuthError):
+        await ep_oauth.exchange_code("CODE", _settings())
+
+
+async def test_malformed_200_non_json_raises_epicauth(monkeypatch):
+    """A 200 with a non-JSON body (proxy/CDN error page) must raise EpicAuthError,
+    not a raw JSONDecodeError — UAT-10 #7."""
+    monkeypatch.setattr(
+        ep_oauth,
+        "_build_transport",
+        lambda: httpx.MockTransport(lambda r: httpx.Response(200, content=b"<html>err</html>")),
+    )
+    with pytest.raises(ep_oauth.EpicAuthError):
+        await ep_oauth.exchange_code("CODE", _settings())
+
+
 def test_persist_and_load_refresh_token(tmp_path):
     path = str(tmp_path / "epic_session.json")
     ep_oauth.save_refresh_token(path, "RT-123")
@@ -78,3 +104,15 @@ def test_persist_and_load_refresh_token(tmp_path):
 
 def test_load_missing_returns_none(tmp_path):
     assert ep_oauth.load_refresh_token(str(tmp_path / "nope.json")) is None
+
+
+def test_save_refresh_token_refuses_symlink(tmp_path):
+    """O_NOFOLLOW must refuse to write through a symlink planted at the token
+    path (TOCTOU / arbitrary-file-truncation guard) — UAT-10 #10 regression."""
+    victim = tmp_path / "victim.txt"
+    victim.write_text("DO-NOT-TRUNCATE")
+    link = tmp_path / "epic_session.json"
+    link.symlink_to(victim)
+    with pytest.raises(OSError):  # ELOOP from O_NOFOLLOW
+        ep_oauth.save_refresh_token(str(link), "RT-123")
+    assert victim.read_text() == "DO-NOT-TRUNCATE"  # target untouched

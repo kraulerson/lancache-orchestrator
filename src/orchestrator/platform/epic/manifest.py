@@ -28,6 +28,12 @@ _log = structlog.get_logger(__name__)
 _MANIFEST_MAGIC = 0x44BEC00C
 _MAX_CHUNKS = 5_000_000  # DoS guard on a corrupt/hostile chunk_count
 _MAX_PREREQ = 100_000  # DoS guard on a corrupt/hostile prereq_count loop
+# Hard cap on the DECOMPRESSED manifest body. zlib.decompress is otherwise
+# unbounded — a tiny compressed body can inflate to gigabytes (decompression
+# bomb / DoS), and the compressed-size cap in fetch_manifest does NOT bound the
+# decompressed output. 256 MiB is far above any real manifest (which is further
+# bounded by _MAX_CHUNKS) yet stops a bomb before it is allocated.
+_MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024
 # A plausible public FQDN (at least one dot). The CDN host comes from Epic's
 # signed manifest response and is used as the lancache Host header (which routes
 # the upstream fetch) — validate it so a hostile/MITM'd response can't point the
@@ -58,17 +64,35 @@ def _read_array(bio: BytesIO, count: int, fmt: str) -> list[int]:
     return [struct.unpack(fmt, bio.read(size))[0] for _ in range(count)]
 
 
-def parse_manifest(raw: bytes) -> EpicManifest:
-    """Parse an Epic binary manifest into version + chunk list."""
+def parse_manifest(raw: bytes, *, max_decompressed: int = _MAX_DECOMPRESSED_BYTES) -> EpicManifest:
+    """Parse an Epic binary manifest into version + chunk list.
+
+    ``max_decompressed`` caps the inflated body to defuse a decompression bomb.
+    """
     try:
-        return _parse(raw)
+        return _parse(raw, max_decompressed)
     except EpicManifestError:
         raise
     except (struct.error, zlib.error, ValueError, IndexError) as e:
         raise EpicManifestError(f"malformed Epic manifest: {type(e).__name__}: {e}") from e
 
 
-def _parse(raw: bytes) -> EpicManifest:
+def _decompress_capped(body_raw: bytes, max_bytes: int) -> bytes:
+    """zlib-inflate ``body_raw`` with a hard output cap (anti-bomb).
+
+    ``decompressobj().decompress(data, max_length)`` stops after ``max_length``
+    output bytes, leaving the remainder in ``unconsumed_tail``; a non-empty tail
+    (or ``not eof``) means the stream exceeds the cap (or is truncated), so we
+    raise instead of allocating an unbounded buffer.
+    """
+    dobj = zlib.decompressobj()
+    body = dobj.decompress(body_raw, max_bytes)
+    if dobj.unconsumed_tail or not dobj.eof:
+        raise EpicManifestError(f"epic manifest decompresses beyond size cap ({max_bytes} bytes)")
+    return body
+
+
+def _parse(raw: bytes, max_decompressed: int) -> EpicManifest:
     bio = BytesIO(raw)
     (magic,) = struct.unpack("<I", bio.read(4))
     if magic != _MANIFEST_MAGIC:
@@ -82,7 +106,7 @@ def _parse(raw: bytes) -> EpicManifest:
 
     bio.seek(header_size)
     body_raw = bio.read()
-    body = zlib.decompress(body_raw) if (stored_as & 0x01) else body_raw
+    body = _decompress_capped(body_raw, max_decompressed) if (stored_as & 0x01) else body_raw
     bb = BytesIO(body)
 
     # ManifestMeta — read meta_size, then skip to its end.
@@ -175,6 +199,18 @@ async def fetch_manifest(
             raise EpicManifestError("no manifest URI in response")
         entry = manifests[0]
         uri = str(entry["uri"])
+        # Validate the signed CDN URI BEFORE fetching it. ``uri`` comes from
+        # Epic's response and is BOTH this GET's target AND the lancache Host
+        # header + URL path. Validating after the GET (the prior bug) left the
+        # manifest fetch itself open to SSRF — a hostile/MITM'd response could
+        # point this GET at an internal host/IP (UAT-10 #4 / adversarial review).
+        parsed = urlparse(uri)
+        cdn_host = parsed.hostname or ""
+        cdn_base = parsed.path.rsplit("/", 1)[0]
+        if not _HOSTNAME_RE.match(cdn_host):
+            raise EpicManifestError(f"implausible CDN host: {cdn_host!r}")
+        if ".." in cdn_base:
+            raise EpicManifestError(f"path traversal in CDN base: {cdn_base!r}")
         params: dict[str, str] | None = None
         if "queryParams" in entry:
             params = {str(p["name"]): str(p["value"]) for p in entry["queryParams"]}
@@ -188,17 +224,7 @@ async def fetch_manifest(
             )
         manifest = parse_manifest(mresp.content)
         manifest.raw = mresp.content
-
-    parsed = urlparse(uri)
-    cdn_host = parsed.hostname or ""
-    cdn_base = parsed.path.rsplit("/", 1)[0]
-    # The CDN host/base come from Epic's signed response — validate before they
-    # become the lancache Host header + URL path (adversarial review).
-    if not _HOSTNAME_RE.match(cdn_host):
-        raise EpicManifestError(f"implausible CDN host: {cdn_host!r}")
-    if ".." in cdn_base:
-        raise EpicManifestError(f"path traversal in CDN base: {cdn_base!r}")
-    manifest.cdn_base = cdn_base
+        manifest.cdn_base = cdn_base
     return manifest, cdn_host, cdn_base
 
 
