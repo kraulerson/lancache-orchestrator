@@ -21,12 +21,12 @@
     "F5-steam-prefill",
     "f6-epic-prefill"
   ],
-  "features_since_last_test": 2,
+  "features_since_last_test": 0,
   "features_since_last_health_check": 3,
   "test_interval": 2,
-  "last_test_session": "2026-05-29",
-  "testing_required": true,
+  "last_test_session": "2026-06-05",
+  "testing_required": false,
   "tester_count": 1,
   "bug_tracker": "github_issues",
-  "sessions_completed": 9
+  "sessions_completed": 10
 }
