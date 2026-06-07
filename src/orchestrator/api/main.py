@@ -179,6 +179,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         pool=get_pool(),
         enabled=settings.scheduler_enabled,
         library_sync_interval_sec=settings.scheduler_library_sync_interval_sec,
+        validation_sweep_enabled=settings.validation_sweep_enabled,
+        validation_sweep_cron=settings.validation_sweep_cron,
     )
     try:
         await scheduler_manager.start()

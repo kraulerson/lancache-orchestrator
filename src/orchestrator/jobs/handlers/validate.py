@@ -13,9 +13,11 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from orchestrator.core.settings import get_settings
-from orchestrator.validator.disk_stat import validate_game
+from orchestrator.validator.disk_stat import ValidationResult, validate_game
 
 if TYPE_CHECKING:
+    from orchestrator.core.settings import Settings
+    from orchestrator.db.pool import Pool
     from orchestrator.jobs.worker import Deps
 
 _log = structlog.get_logger(__name__)
@@ -33,6 +35,49 @@ _STATUS_FOR = {
     "partial": "validation_failed",
     "missing": "validation_failed",
 }
+
+
+async def validate_one_game(
+    pool: Pool, deps: Deps, game_id: int, settings: Settings
+) -> ValidationResult:
+    """Validate one game against the on-disk cache, record a validation_history
+    row, and update games.status. Shared by the validate job handler (F7) and the
+    scheduled sweep (F13). Assumes the caller has confirmed steam_client and the
+    game's steam platform."""
+    started_row = await pool.read_one("SELECT CURRENT_TIMESTAMP AS t")
+    started_at = started_row["t"] if started_row is not None else None
+
+    result = await validate_game(pool, deps, game_id, settings)
+
+    await pool.execute_write(
+        _INSERT_VH,
+        (
+            game_id,
+            result.manifest_version,
+            started_at,
+            result.chunks_total,
+            result.chunks_cached,
+            result.chunks_missing,
+            result.outcome,
+            (result.error[:200] if result.error else None),
+        ),
+    )
+
+    new_status = _STATUS_FOR.get(result.outcome)
+    if new_status is not None:
+        await pool.execute_write(
+            "UPDATE games SET status=?, last_validated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (new_status, game_id),
+        )
+    else:
+        # outcome='error' (infra failure). Never clobber a classified status, but
+        # resolve the transient 'downloading' so a freshly-prefilled game isn't
+        # stuck (UAT-10 #3).
+        await pool.execute_write(
+            "UPDATE games SET status='failed', last_error=? WHERE id=? AND status='downloading'",
+            ((f"validate: {result.error}"[:200] if result.error else "validate: error"), game_id),
+        )
+    return result
 
 
 async def validate_handler(job: dict[str, Any], deps: Deps) -> None:
@@ -58,43 +103,10 @@ async def validate_handler(job: dict[str, Any], deps: Deps) -> None:
         raise ValueError(f"game {game_id} platform is {game['platform']!r}, not steam")
 
     job_id = job.get("id")
-    started_row = await deps.pool.read_one("SELECT CURRENT_TIMESTAMP AS t")
-    started_at = started_row["t"] if started_row is not None else None
     settings = get_settings()
     _log.info("validate.started", job_id=job_id, game_id=game_id)
 
-    result = await validate_game(deps.pool, deps, game_id, settings)
-
-    await deps.pool.execute_write(
-        _INSERT_VH,
-        (
-            game_id,
-            result.manifest_version,
-            started_at,
-            result.chunks_total,
-            result.chunks_cached,
-            result.chunks_missing,
-            result.outcome,
-            (result.error[:200] if result.error else None),
-        ),
-    )
-
-    new_status = _STATUS_FOR.get(result.outcome)
-    if new_status is not None:
-        await deps.pool.execute_write(
-            "UPDATE games SET status=?, last_validated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (new_status, game_id),
-        )
-    else:
-        # outcome='error' (infra failure, e.g. cache unmounted). Never clobber an
-        # already-classified status — but a freshly-prefilled game's only prior
-        # state is the transient 'downloading', which would otherwise stay stuck
-        # forever. Resolve only that, scoped by WHERE status='downloading'
-        # (UAT-10 #3).
-        await deps.pool.execute_write(
-            "UPDATE games SET status='failed', last_error=? WHERE id=? AND status='downloading'",
-            ((f"validate: {result.error}"[:200] if result.error else "validate: error"), game_id),
-        )
+    result = await validate_one_game(deps.pool, deps, game_id, settings)
 
     _log.info(
         "validate.recorded",

@@ -43,6 +43,36 @@ class TestLifespanSchedulerIntegration:
             assert mgr.running is False
             assert mgr.get_registered_job_ids() == []
 
+    async def test_validation_sweep_job_registered_on_boot(self, db_path, monkeypatch):
+        from asgi_lifespan import LifespanManager
+
+        from orchestrator.api.main import create_app
+        from orchestrator.scheduler.manager import VALIDATION_SWEEP_JOB_ID
+
+        monkeypatch.setenv("ORCH_DATABASE_PATH", str(db_path))
+        monkeypatch.setenv("ORCH_SCHEDULER_LIBRARY_SYNC_INTERVAL_SEC", "86400")
+
+        app = create_app()
+        async with LifespanManager(app):
+            mgr = app.state.scheduler_manager
+            assert VALIDATION_SWEEP_JOB_ID in mgr.get_registered_job_ids()
+
+    async def test_validation_sweep_disabled_via_settings(self, db_path, monkeypatch):
+        from asgi_lifespan import LifespanManager
+
+        from orchestrator.api.main import create_app
+        from orchestrator.scheduler.manager import VALIDATION_SWEEP_JOB_ID
+
+        monkeypatch.setenv("ORCH_DATABASE_PATH", str(db_path))
+        monkeypatch.setenv("ORCH_SCHEDULER_LIBRARY_SYNC_INTERVAL_SEC", "86400")
+        monkeypatch.setenv("ORCH_VALIDATION_SWEEP_ENABLED", "false")
+
+        app = create_app()
+        async with LifespanManager(app):
+            ids = app.state.scheduler_manager.get_registered_job_ids()
+            assert VALIDATION_SWEEP_JOB_ID not in ids
+            assert "library_sync_steam" in ids  # scheduler itself still runs
+
     async def test_health_scheduler_running_true_under_lifespan(self, db_path, monkeypatch):
         """End-to-end: /health surfaces scheduler_running=True when the
         scheduler is up in lifespan."""

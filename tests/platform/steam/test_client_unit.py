@@ -342,11 +342,13 @@ class TestManifestExpand:
     """F7 / S2-2: manifest_expand() hands the BLOB off via a temp file path."""
 
     async def test_writes_blob_temp_file_and_returns_result(self):
+        import asyncio
         import os
 
         from orchestrator.platform.steam.client import SteamWorkerClient
 
         client = SteamWorkerClient.__new__(SteamWorkerClient)
+        client._manifest_expand_lock = asyncio.Lock()
         raw = b"\x28\xb5\x2f\xfd_stub_zstd_bytes"
         sha_a = "aa" * 20
         captured: dict = {}
@@ -371,6 +373,31 @@ class TestManifestExpand:
         assert captured["blob"] == raw
         # Client cleans up the temp file after the call (finally unlink).
         assert not os.path.exists(captured["params"]["raw_path"])
+
+    async def test_concurrent_manifest_expand_serialized(self):
+        """The steam worker is strictly serial; manifest_expand single-flights so
+        concurrent callers (the F13 sweep) don't queue head-of-line with their
+        per-request timeout clock already running (F13 adversarial finding 2)."""
+        import asyncio
+
+        from orchestrator.platform.steam.client import SteamWorkerClient
+
+        client = SteamWorkerClient.__new__(SteamWorkerClient)
+        client._manifest_expand_lock = asyncio.Lock()
+        in_flight = 0
+        max_in_flight = 0
+
+        async def fake_send_and_await(op, params):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            return {"depot_id": 1, "chunk_shas": []}
+
+        client._send_and_await = fake_send_and_await  # type: ignore[method-assign]
+        await asyncio.gather(*(client.manifest_expand(b"zstdblob") for _ in range(5)))
+        assert max_in_flight == 1  # serialized by the single-flight lock
 
 
 class TestPerOpTimeoutOverride:

@@ -68,3 +68,41 @@ class TestLibrarySyncInflightUniqueIndex:
             )
         n = await pool.execute_write(_INSERT + " ON CONFLICT DO NOTHING", ("queued", "scheduler"))
         assert n == 1
+
+
+_SWEEP = "INSERT INTO jobs (kind, state, source) VALUES ('sweep', ?, 'scheduler')"
+
+
+class TestSweepInflightUniqueIndex:
+    """F13: migration 0005 — at most one queued/running `sweep` job."""
+
+    async def test_on_conflict_second_inflight_insert_is_noop(self, pool):
+        n1 = await pool.execute_write(_SWEEP + " ON CONFLICT DO NOTHING", ("queued",))
+        n2 = await pool.execute_write(_SWEEP + " ON CONFLICT DO NOTHING", ("queued",))
+        assert n1 == 1
+        assert n2 == 0
+        rows = await pool.read_all(
+            "SELECT id FROM jobs WHERE kind='sweep' AND state IN ('queued','running')"
+        )
+        assert len(rows) == 1
+
+    async def test_queued_then_running_conflicts(self, pool):
+        await pool.execute_write(_SWEEP + " ON CONFLICT DO NOTHING", ("queued",))
+        n = await pool.execute_write(_SWEEP + " ON CONFLICT DO NOTHING", ("running",))
+        assert n == 0
+
+    async def test_raw_duplicate_insert_raises_integrity_error(self, pool):
+        await pool.execute_write(_SWEEP, ("queued",))
+        with pytest.raises(IntegrityViolationError):
+            await pool.execute_write(_SWEEP, ("queued",))
+
+    async def test_terminal_states_not_blocked(self, pool):
+        for state in ("succeeded", "failed", "cancelled"):
+            await pool.execute_write(
+                "INSERT INTO jobs (kind, state, source, started_at, finished_at) "
+                "VALUES ('sweep', ?, 'scheduler', "
+                "'2026-06-07 03:00:00', '2026-06-07 03:05:00')",
+                (state,),
+            )
+        n = await pool.execute_write(_SWEEP + " ON CONFLICT DO NOTHING", ("queued",))
+        assert n == 1

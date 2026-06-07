@@ -19,6 +19,17 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — F13 Scheduled Validation Sweep — 2026-06-07
+
+Implements F13 (Manifesto OQ7) — a scheduled job that re-runs F7 disk-stat validation across the cached Steam library to catch **LRU eviction drift** (games that were `up_to_date` flip to `validation_failed` when evicted) and **recovery** (`validation_failed` → `up_to_date` when re-cached). Keeps `games.status` honest over time with no operator action. Follows the F12 pattern: the scheduler enqueues, the jobs worker executes.
+
+- **Data Model:** migration `0005_jobs_sweep_unique.sql` — partial UNIQUE index `idx_jobs_sweep_inflight` (≤1 queued/running `sweep` job), mirroring the library_sync guard; `CHECKSUMS` updated.
+- **Added:** a second cron job on `SchedulerManager` (`CronTrigger.from_crontab`, default `"0 3 * * 0"` = Sundays 03:00 UTC) firing a thin, never-raises `enqueue_validation_sweep` callback (`ON CONFLICT DO NOTHING`); a new `sweep` job handler that pre-flight-skips on validator-unhealthy / no-steam-client (job succeeds), enumerates steam games with status `up_to_date`+`validation_failed`, validates them 10-at-a-time (`Semaphore(sweep_batch_size)`) with per-game error isolation, and emits a `sweep.completed` summary (total / by-outcome / evicted / recovered / errors).
+- **Changed:** extracted `validate_one_game()` from the validate handler so the F7 validate job and the F13 sweep share identical record/status logic (incl. the UAT-10 #3 transient-`downloading` rule); the validate handler is now a thin wrapper (behaviour unchanged).
+- **Settings:** `validation_sweep_enabled` (default true), `validation_sweep_cron` (default `"0 3 * * 0"`, fail-fast validated via `CronTrigger.from_crontab`), `sweep_batch_size` (default 10, ge 1).
+- **Tests:** settings (cron fail-fast), migration dedup invariant, enqueue callback (never-raises + dedup), scheduler registration (enabled/disabled), `validate_one_game` parity, sweep handler (skip paths, enumeration filter, per-game isolation, registration), and boot wiring (disable via `ORCH_VALIDATION_SWEEP_ENABLED`). Full suite **1074 pass**; mypy(strict)/ruff/gitleaks/semgrep clean. A 4-lens adversarial review caught and fixed in-batch (test-first) two SEV-3 defects: the `evicted` metric miscounting `error` outcomes (now gated on a genuine `partial`/`missing` regression, with `validation_error` surfaced), and the sweep's 10-wide concurrency outrunning the strictly-serial steam worker (now a single-flight `Lock` on `SteamWorkerClient.manifest_expand` so trailing requests don't spuriously time out). Security audit: 0 open findings (`docs/security-audits/f13-scheduled-sweep-security-audit.md`).
+- **Deferred (follow-ups):** Epic disk-stat sweep (F7-Epic), manifest-version pruning (keep latest 3), incremental/changed-manifest-only validation, the `SWEEP_WARN_HOURS` status-page banner.
+
 ### Fixed — UAT-10 remediation (F5/F6 automated sweep) — 2026-06-04
 
 Remediates the 11 confirmed findings (+ 1 observation) from the UAT-10 automated

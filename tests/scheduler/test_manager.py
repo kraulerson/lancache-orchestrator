@@ -87,6 +87,40 @@ class TestSchedulerManager:
         assert mgr.get_registered_job_ids() == []
         await mgr.shutdown()
 
+    async def test_sweep_job_registered_when_enabled(self, pool):
+        from orchestrator.scheduler.manager import VALIDATION_SWEEP_JOB_ID
+
+        mgr = SchedulerManager(
+            pool=pool,
+            enabled=True,
+            library_sync_interval_sec=21600,
+            validation_sweep_enabled=True,
+            validation_sweep_cron="0 3 * * 0",
+        )
+        try:
+            await mgr.start()
+            assert VALIDATION_SWEEP_JOB_ID in mgr.get_registered_job_ids()
+        finally:
+            await mgr.shutdown()
+
+    async def test_sweep_job_absent_when_disabled(self, pool):
+        from orchestrator.scheduler.manager import VALIDATION_SWEEP_JOB_ID
+
+        mgr = SchedulerManager(
+            pool=pool,
+            enabled=True,
+            library_sync_interval_sec=21600,
+            validation_sweep_enabled=False,
+            validation_sweep_cron="0 3 * * 0",
+        )
+        try:
+            await mgr.start()
+            ids = mgr.get_registered_job_ids()
+            assert VALIDATION_SWEEP_JOB_ID not in ids
+            assert "library_sync_steam" in ids  # disabling sweep keeps the scheduler running
+        finally:
+            await mgr.shutdown()
+
     async def test_interval_is_passed_through_to_trigger(self, pool):
         mgr = SchedulerManager(
             pool=pool,

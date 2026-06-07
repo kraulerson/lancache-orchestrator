@@ -1084,4 +1084,61 @@ unlike Steam's ADR-0013). De-risked end-to-end by `spikes/spike_b_epic_prefill.p
 
 ---
 
+## Feature 20: F13 — Scheduled Validation Sweep
+
+**Phase Built:** 2 (Milestone B / F13)
+**Status:** Complete (2026-06-07)
+
+**Summary:** A scheduled job (default Sundays 03:00 UTC) that re-runs F7 disk-stat
+validation across the cached Steam library to catch **LRU eviction drift**
+(`up_to_date` → `validation_failed`) and **recovery** (`validation_failed` →
+`up_to_date`). Follows the F12 pattern — the scheduler enqueues a `sweep` job,
+the jobs worker runs it inline, validating candidates 10-at-a-time. Steam-only
+(F7-Epic disk-stat deferred). No new table.
+
+**Key Interfaces:**
+  - `src/orchestrator/scheduler/manager.py` — second cron job
+    (`CronTrigger.from_crontab`, id `validation_sweep`); `VALIDATION_SWEEP_JOB_ID`
+  - `src/orchestrator/scheduler/jobs.py` — `enqueue_validation_sweep(pool)`
+    (thin, never-raises, `ON CONFLICT DO NOTHING`)
+  - `src/orchestrator/jobs/handlers/sweep.py` — `sweep_handler` (pre-flight skip,
+    enumerate, `Semaphore` batch, per-game isolation, summary)
+  - `src/orchestrator/jobs/handlers/validate.py` — extracted
+    `validate_one_game(pool, deps, game_id, settings) -> ValidationResult`
+    (shared by the validate job + the sweep)
+  - `src/orchestrator/db/migrations/0005_jobs_sweep_unique.sql` —
+    `idx_jobs_sweep_inflight`
+  - `src/orchestrator/core/settings.py` — `validation_sweep_enabled`,
+    `validation_sweep_cron`, `sweep_batch_size`
+
+**Locked decisions (spec 2026-06-06):**
+  - **Inline batch-of-10 in one sweep job** (not N enqueued validate jobs) —
+    matches "in batches of 10" / "per-game errors don't abort the batch", no
+    `/jobs` flooding.
+  - **Candidate set = steam `up_to_date` + `validation_failed`** (drift both
+    ways).
+  - **Pre-flight skip = success:** validator-unhealthy / no-steam-client logs
+    `sweep.skipped` and the job succeeds (no failure storm).
+  - **DB-enforced single in-flight sweep** (migration 0005), mirroring 0004.
+
+**Test Coverage:** settings (cron fail-fast), migration dedup invariant, enqueue
+(never-raises + dedup), scheduler registration (enabled/disabled),
+`validate_one_game` parity, sweep handler (skip/enumerate/isolation/registered),
+boot wiring (`ORCH_VALIDATION_SWEEP_ENABLED`). Full suite: 1072 pass.
+ruff/mypy(strict)/gitleaks/semgrep clean.
+
+**Related ADRs:** None new (APScheduler locked in PROJECT_BIBLE §3.1). Spec:
+`docs/superpowers/specs/2026-06-06-f13-scheduled-sweep-design.md`; plan:
+`docs/superpowers/plans/2026-06-07-f13-scheduled-sweep.md`.
+
+**Known Limitations:**
+  - **Steam-only** — Epic games are skipped (F7-Epic disk-stat deferred).
+  - **Manifest-version pruning** (keep latest 3 per game) deferred to a
+    follow-up despite the 0001 comment tying it to "the F13 sweep."
+  - **Incremental validation** (only changed manifests) deferred — ships only if
+    a full sweep exceeds 30 min on the target hardware (Manifesto §63).
+  - The sweep job occupies the single jobs worker for its run (weekly, 03:00).
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->

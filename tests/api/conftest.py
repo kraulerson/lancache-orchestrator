@@ -129,10 +129,13 @@ async def jobs_pool_seeded(populated_pool):  # noqa: F811
                 payload=_json.dumps({"queued_at": f"2026-05-20T1{i}:00:00Z"}),
             )
 
-        # Running jobs (5)
+        # Running jobs (5). NOTE: only ONE in-flight sweep is allowed
+        # (idx_jobs_sweep_inflight, migration 0005), and a queued sweep already
+        # exists above — so this slot is manifest_fetch (also adds that kind's
+        # coverage, which was previously absent).
         for i in range(5):
             await _ins(
-                kind=["prefill", "prefill", "validate", "library_sync", "sweep"][i],
+                kind=["prefill", "prefill", "validate", "library_sync", "manifest_fetch"][i],
                 state="running",
                 game_id=(i + 1) if i < 4 else None,
                 platform="steam" if i % 2 == 0 else "epic",

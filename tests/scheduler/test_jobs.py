@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from orchestrator.scheduler.jobs import enqueue_library_sync
+from orchestrator.scheduler.jobs import enqueue_library_sync, enqueue_validation_sweep
 
 pytestmark = pytest.mark.asyncio
 
@@ -106,3 +106,41 @@ class TestEnqueueLibrarySync:
         broken_pool.execute_write = AsyncMock(side_effect=PoolError("simulated"))
         n = await enqueue_library_sync(broken_pool)
         assert n == 0  # logged + returned; did not raise
+
+
+class TestEnqueueValidationSweep:
+    async def test_inserts_one_sweep_row(self, pool):
+        n = await enqueue_validation_sweep(pool)
+        assert n == 1
+        row = await pool.read_one(
+            "SELECT kind, platform, state, source FROM jobs WHERE kind='sweep'"
+        )
+        assert row == {
+            "kind": "sweep",
+            "platform": None,  # sweep is not platform-scoped
+            "state": "queued",
+            "source": "scheduler",
+        }
+
+    async def test_dedup_skip_when_inflight(self, pool):
+        assert await enqueue_validation_sweep(pool) == 1
+        assert await enqueue_validation_sweep(pool) == 0  # one in-flight already
+        rows = await pool.read_all(
+            "SELECT id FROM jobs WHERE kind='sweep' AND state IN ('queued','running')"
+        )
+        assert len(rows) == 1
+
+    async def test_concurrent_enqueue_creates_single_row(self, pool):
+        results = await asyncio.gather(
+            enqueue_validation_sweep(pool),
+            enqueue_validation_sweep(pool),
+        )
+        assert sorted(results) == [0, 1]
+
+    async def test_returns_zero_on_pool_error_without_raising(self, pool):
+        from unittest.mock import AsyncMock
+
+        from orchestrator.db.pool import PoolError
+
+        pool.execute_write = AsyncMock(side_effect=PoolError("simulated"))
+        assert await enqueue_validation_sweep(pool) == 0  # never raises

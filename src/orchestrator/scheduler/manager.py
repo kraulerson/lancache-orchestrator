@@ -19,9 +19,10 @@ from typing import TYPE_CHECKING
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from orchestrator.scheduler.jobs import enqueue_library_sync
+from orchestrator.scheduler.jobs import enqueue_library_sync, enqueue_validation_sweep
 
 if TYPE_CHECKING:
     from apscheduler.job import Job
@@ -35,6 +36,7 @@ _log = structlog.get_logger(__name__)
 # consistent ids means `replace_existing=True` lets us re-deploy without
 # orphan jobs if the in-memory store ever gets persisted in a future BL.
 LIBRARY_SYNC_JOB_ID = "library_sync_steam"
+VALIDATION_SWEEP_JOB_ID = "validation_sweep"
 
 
 class SchedulerManager:
@@ -52,10 +54,14 @@ class SchedulerManager:
         pool: Pool,
         enabled: bool,
         library_sync_interval_sec: int,
+        validation_sweep_enabled: bool = True,
+        validation_sweep_cron: str = "0 3 * * 0",
     ) -> None:
         self._pool = pool
         self._enabled = enabled
         self._library_sync_interval_sec = library_sync_interval_sec
+        self._validation_sweep_enabled = validation_sweep_enabled
+        self._validation_sweep_cron = validation_sweep_cron
         self._scheduler: AsyncIOScheduler | None = None
         # Serializes start()/shutdown() so the lifecycle stays atomic even if
         # they are ever called concurrently (e.g. a future restart endpoint).
@@ -110,6 +116,16 @@ class SchedulerManager:
                 name="Enqueue library_sync for steam",
                 replace_existing=True,
             )
+
+            if self._validation_sweep_enabled:
+                scheduler.add_job(
+                    enqueue_validation_sweep,
+                    trigger=CronTrigger.from_crontab(self._validation_sweep_cron, timezone="UTC"),
+                    args=(self._pool,),
+                    id=VALIDATION_SWEEP_JOB_ID,
+                    name="Enqueue validation sweep",
+                    replace_existing=True,
+                )
 
             scheduler.start()
             self._scheduler = scheduler
