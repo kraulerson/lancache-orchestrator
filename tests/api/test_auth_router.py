@@ -78,6 +78,25 @@ class TestAuthBegin:
         )
         assert r.status_code == 400
 
+    async def test_validation_error_does_not_reflect_submitted_password(
+        self, client, stub_steam_client
+    ):
+        """A body validation error (missing username) must NOT echo the
+        submitted password back in the 400 detail. FastAPI's default
+        RequestValidationError payload includes `input` (the raw body), which
+        would reflect the credential to any client/log capturing the response."""
+        from orchestrator.api.routers.auth import get_steam_client_dep
+
+        client._transport.app.dependency_overrides[get_steam_client_dep] = lambda: stub_steam_client
+        secret = "REFLECT_ME_DO_NOT_aa"  # noqa: S105 test sentinel
+        r = await client.post(
+            "/api/v1/platforms/steam/auth",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            json={"password": secret},  # username missing -> validation error
+        )
+        assert r.status_code == 400
+        assert secret not in r.text
+
     async def test_unauth_returns_401(self, client):
         r = await client.post(
             "/api/v1/platforms/steam/auth",
