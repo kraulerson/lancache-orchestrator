@@ -322,6 +322,21 @@ class TestFieldValidators:
         with pytest.raises(ValidationError):
             Settings(orchestrator_token=VALID_TOKEN, scheduler_library_sync_interval_sec=90000)
 
+    def test_sweep_settings_defaults(self):
+        s = Settings(orchestrator_token=VALID_TOKEN)
+        assert s.validation_sweep_enabled is True
+        assert s.validation_sweep_cron == "0 3 * * 0"
+        assert s.sweep_batch_size == 10
+
+    def test_invalid_sweep_cron_fails_fast(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", VALID_TOKEN)
+        with pytest.raises(ValidationError):
+            Settings(validation_sweep_cron="not a cron")
+
+    def test_sweep_batch_size_must_be_ge_1(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, sweep_batch_size=0)
+
     def test_pool_readers_zero_rejects(self):
         with pytest.raises(ValidationError):
             Settings(orchestrator_token=VALID_TOKEN, pool_readers=0)

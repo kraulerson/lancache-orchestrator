@@ -91,6 +91,27 @@ async def test_cached_marks_up_to_date(pool, cache_root):
     assert g["last_validated_at"] is not None
 
 
+async def test_validate_one_game_returns_result_and_records(pool, cache_root):
+    """F13: the extracted helper validates one game, records a validation_history
+    row, updates status, and returns the ValidationResult."""
+    from orchestrator.core.settings import get_settings
+    from orchestrator.jobs.handlers.validate import validate_one_game
+
+    game_id = await _seed_game(pool)
+    await _seed_manifest(pool, game_id)
+    _make_cache_file(cache_root, 731, SHA_A)
+    _make_cache_file(cache_root, 731, SHA_B)
+    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A, SHA_B]}))
+
+    result = await validate_one_game(pool, deps, game_id, get_settings())
+
+    assert result.outcome == "cached"
+    g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
+    assert g["status"] == "up_to_date"
+    vh = await pool.read_one("SELECT outcome FROM validation_history WHERE game_id=?", (game_id,))
+    assert vh["outcome"] == "cached"
+
+
 async def test_missing_marks_validation_failed(pool, cache_root):
     game_id = await _seed_game(pool)
     await _seed_manifest(pool, game_id)

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import structlog
+from apscheduler.triggers.cron import CronTrigger
 from pydantic import (
     AliasChoices,
     Field,
@@ -122,6 +123,10 @@ class Settings(BaseSettings):
     # Bounded [60 s, 86400 s] so operators can tune for testing without
     # accidentally setting a pathological value.
     scheduler_library_sync_interval_sec: int = Field(default=21600, ge=60, le=86400)
+    # F13 — scheduled validation sweep.
+    validation_sweep_enabled: bool = True
+    validation_sweep_cron: str = "0 3 * * 0"  # 5-field cron (min hour dom mon dow), UTC
+    sweep_batch_size: int = Field(default=10, ge=1)
 
     # --- Misc --------------------------------------------------------
     manifest_size_cap_bytes: int = Field(default=134_217_728, gt=0)
@@ -219,6 +224,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"cache_levels widths sum to {sum(widths)} > 32 (md5 hex length): {v!r}"
             )
+        return v
+
+    @field_validator("validation_sweep_cron", mode="after")
+    @classmethod
+    def _validate_sweep_cron(cls, v: str) -> str:
+        """Fail-fast on a malformed cron (IS2) by constructing the trigger now."""
+        try:
+            CronTrigger.from_crontab(v)
+        except Exception as e:  # apscheduler raises ValueError on bad expressions
+            raise ValueError(f"invalid validation_sweep_cron {v!r}: {e}") from e
         return v
 
     @field_validator("orchestrator_token", mode="before")

@@ -1,6 +1,6 @@
 {
   "build_loop": {
-    "feature": "uat10-remediation",
+    "feature": "f13-scheduled-sweep",
     "step": 5,
     "steps_completed": [
       "tests_written",
@@ -9,7 +9,7 @@
       "security_audit",
       "documentation_updated"
     ],
-    "started_at": "2026-06-04T20:25:33Z"
+    "started_at": "2026-06-07T22:05:26Z"
   },
   "uat_session": {
     "session_id": 10,

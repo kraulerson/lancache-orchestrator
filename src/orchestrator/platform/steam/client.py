@@ -105,6 +105,12 @@ class SteamWorkerClient:
         self._reader_task: asyncio.Task[None] | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # The worker handles IPC strictly serially. Single-flight manifest_expand
+        # so concurrent callers (the F13 sweep) serialize here instead of queuing
+        # head-of-line at the worker with their per-request timeout clock already
+        # running — which spuriously timed out trailing requests. Uncontended for
+        # the single-caller paths (F7 validate, F5 prefill).
+        self._manifest_expand_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Spawn the worker subprocess. Idempotent (no-op if already running)."""
@@ -215,14 +221,18 @@ class SteamWorkerClient:
         base64). The worker deletes it after reading; we clean up on the
         error path as a fallback.
         """
-        blob_path = os.path.join(tempfile.gettempdir(), f"orch-expand-{uuid.uuid4().hex}.zst")
-        with open(blob_path, "wb") as fh:
-            fh.write(raw)
-        try:
-            return await self._send_and_await("manifest.expand", {"raw_path": blob_path})
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(blob_path)
+        # Serialize the worker-bound expand (see _manifest_expand_lock). Holding
+        # the lock across the temp-file write also bounds on-disk blobs to one at
+        # a time under a concurrent sweep.
+        async with self._manifest_expand_lock:
+            blob_path = os.path.join(tempfile.gettempdir(), f"orch-expand-{uuid.uuid4().hex}.zst")
+            with open(blob_path, "wb") as fh:
+                fh.write(raw)
+            try:
+                return await self._send_and_await("manifest.expand", {"raw_path": blob_path})
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(blob_path)
 
     # --- internals -----------------------------------------------------
 

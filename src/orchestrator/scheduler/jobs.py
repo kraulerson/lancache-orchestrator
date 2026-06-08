@@ -55,3 +55,34 @@ async def enqueue_library_sync(pool: Pool) -> int:
             reason=str(e)[:200],
         )
         return 0
+
+
+async def enqueue_validation_sweep(pool: Pool) -> int:
+    """Insert a `sweep` job row if none is queued/running (F13).
+
+    Mirrors `enqueue_library_sync`: at most one in-flight sweep, DB-enforced by
+    `idx_jobs_sweep_inflight` (migration 0005) via `ON CONFLICT DO NOTHING`.
+    Returns the rowcount (1 queued / 0 deduped-or-failed). Never raises — a
+    failing scheduler tick must not degrade APScheduler. The sweep is not
+    platform-scoped, so `platform` is left NULL.
+    """
+    try:
+        inserted = await pool.execute_write(
+            "INSERT INTO jobs (kind, state, source) "
+            "VALUES ('sweep', 'queued', 'scheduler') ON CONFLICT DO NOTHING"
+        )
+        if inserted:
+            _log.info("scheduler.sweep.queued")
+        else:
+            _log.info("scheduler.sweep.dedup_skip")
+        return inserted
+    except PoolError as e:
+        _log.error("scheduler.sweep.db_error", reason=str(e)[:200])
+        return 0
+    except Exception as e:
+        _log.error(
+            "scheduler.sweep.unexpected_error",
+            error=type(e).__name__,
+            reason=str(e)[:200],
+        )
+        return 0
