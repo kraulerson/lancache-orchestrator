@@ -19,13 +19,15 @@
     "BL12-manifest-fetcher",
     "F7-cache-validator",
     "F5-steam-prefill",
-    "f6-epic-prefill"
+    "f6-epic-prefill",
+    "f13-scheduled-sweep",
+    "f11-cli"
   ],
-  "features_since_last_test": 0,
-  "features_since_last_health_check": 3,
+  "features_since_last_test": 2,
+  "features_since_last_health_check": 5,
   "test_interval": 2,
   "last_test_session": "2026-06-05",
-  "testing_required": false,
+  "testing_required": true,
   "tester_count": 1,
   "bug_tracker": "github_issues",
   "sessions_completed": 10

@@ -366,9 +366,17 @@ def create_app() -> FastAPI:
     async def _validation_error_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        # Strip `input`/`ctx`/`url` from each error: FastAPI's default payload
+        # echoes the rejected `input` (the raw request body), which would reflect
+        # a submitted credential (e.g. a Steam password on a malformed auth body)
+        # straight back to the client/logs. Keep only type/loc/msg.
+        safe = [
+            {"type": err.get("type"), "loc": err.get("loc"), "msg": err.get("msg")}
+            for err in exc.errors()
+        ]
         return JSONResponse(
             status_code=400,
-            content={"detail": exc.errors()},
+            content={"detail": safe},
         )
 
     # Routers

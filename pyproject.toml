@@ -10,7 +10,7 @@ description = "Orchestrator to verify lancache is updating all games correctly"
 license = "MIT"
 
 [project.scripts]
-orchestrator-cli = "orchestrator.cli.main:cli"
+orchestrator-cli = "orchestrator.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -58,6 +58,9 @@ section-order = ["future", "standard-library", "third-party", "first-party", "lo
 "tests/core/test_logging.py" = ["S101", "S105", "S106"]
 # F6 Epic tests carry fake OAuth tokens as literals (access_token/refresh_token).
 "tests/platform/epic/*.py" = ["S101", "S105", "S106"]
+# F11 CLI tests pass fake bearer tokens as literals + use an `input` kwarg
+# (mirroring CliRunner's API) that harmlessly shadows the builtin.
+"tests/cli/*.py" = ["S101", "S105", "S106", "A002"]
 # F10 status page embeds a single-file HTML+CSS+JS asset as a Python
 # string literal — lines naturally exceed 100 cols. Reformatting would
 # corrupt the HTML structure (CSS selectors, JSX-style attributes).

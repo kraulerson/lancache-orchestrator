@@ -1141,4 +1141,54 @@ ruff/mypy(strict)/gitleaks/semgrep clean.
 
 ---
 
+## Feature 21: F11 — `orchestrator-cli`
+
+**Phase Built:** 2 (Milestone B / F11)
+**Status:** Complete (2026-06-08)
+
+**Summary:** A Click-based operator CLI bundled in the container that drives the
+local REST API with the bearer token — auth, sync, prefill/validate/manifest
+triggers, and inspection — plus two local in-process admin commands. Fills the
+`orchestrator-cli` console entry already declared in `pyproject.toml`.
+
+**Key Interfaces:**
+  - `src/orchestrator/cli/client.py` — `OrchClient` (sync httpx wrapper) +
+    `ApiUnreachableError`/`AuthError`/`ApiError` (carry exit codes 2/3/1)
+  - `src/orchestrator/cli/output.py` — colorblind-safe `status_label`/`table`/
+    `success`/`warn`/`error`
+  - `src/orchestrator/cli/base.py` — `make_client`, `handles_api_errors`
+  - `src/orchestrator/cli/main.py` — root `cli` group + `main()` entry
+  - `src/orchestrator/cli/commands/{auth,library,status,game,jobs,db,config}.py`
+
+**Commands:** `auth steam|epic|status`, `library sync [--platform]`, `status`,
+`game list|show|prefill|validate|manifest`, `jobs [--kind --state --limit]`,
+`db migrate|vacuum` (local), `config show` (local).
+
+**Locked decisions (Manifesto F11 + spec 2026-06-07):**
+  - **Click + HTTP-to-local-API + bearer token**; `db`/`config` local-only
+    (schema/maintenance never exposed over HTTP).
+  - **Colorblind-safe** output: icon + text label, never color alone (Intake §9).
+  - **Exit codes:** API unreachable → 2, auth → 3, other → 1.
+  - **Credentials/codes prompted hidden, never echoed/logged**; `config show`
+    redacts the `SecretStr` token.
+  - `game show` filters the list (no `GET /games/{id}`).
+
+**Test Coverage:** 47 CLI tests (`CliRunner` + `httpx.MockTransport`): exit-code
+mapping, the Steam 2FA two-step (200/202→200) asserting secrets are never
+echoed, `config show` redaction, `db migrate`/`vacuum` on a temp DB, the `limit`
+pagination param, `game show` found/not-found. Full suite: 1121 pass.
+ruff/mypy(strict)/gitleaks/semgrep clean. New deps: none.
+
+**Related ADRs:** None new. Spec:
+`docs/superpowers/specs/2026-06-07-cli-design.md`; plan:
+`docs/superpowers/plans/2026-06-07-f11-cli.md`.
+
+**Known Limitations:**
+  - **No `--json`** (machine output deferred Post-MVP, OQ6).
+  - **`game block|unblock` deferred** — ships with the F8 block-list API.
+  - **`game show` filters the list** (first 500) — pending a `GET /games/{id}`
+    detail endpoint (#141).
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->
