@@ -10,7 +10,7 @@ import aiosqlite
 import click
 
 from orchestrator.cli import output
-from orchestrator.cli.base import handles_db_errors
+from orchestrator.cli.base import handles_local_errors
 from orchestrator.core.settings import get_settings
 from orchestrator.db.migrate import run_migrations
 
@@ -21,7 +21,7 @@ def db() -> None:
 
 
 @db.command("migrate")
-@handles_db_errors
+@handles_local_errors
 def db_migrate() -> None:
     """Apply all pending migrations to the configured database."""
     db_path = str(get_settings().database_path)
@@ -36,7 +36,7 @@ async def _vacuum(db_path: str) -> None:
 
 
 @db.command("vacuum")
-@handles_db_errors
+@handles_local_errors
 def db_vacuum() -> None:
     """Reclaim free pages with VACUUM."""
     db_path = str(get_settings().database_path)

@@ -42,7 +42,15 @@ _HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)
 
 
 class EpicManifestError(Exception):
-    """Malformed or unsupported Epic manifest binary."""
+    """Malformed or unsupported Epic manifest binary.
+
+    ``status_code`` carries the upstream HTTP status when the failure came from
+    the auth-bearing manifest API response (so EpicClient can force a token
+    refresh + retry on 401)."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _read_fstring(bio: BytesIO) -> str:
@@ -190,7 +198,12 @@ async def fetch_manifest(
     async with _client(settings) as client:
         resp = await client.get(url, headers=headers)
         if resp.status_code != 200:
-            raise EpicManifestError(f"epic manifest API failed: HTTP {resp.status_code}")
+            # The auth-bearing API call — carry the status so a 401 forces a
+            # token refresh + retry upstream.
+            raise EpicManifestError(
+                f"epic manifest API failed: HTTP {resp.status_code}",
+                status_code=resp.status_code,
+            )
         elements = resp.json().get("elements", [])
         if not elements:
             raise EpicManifestError("no manifest elements returned")

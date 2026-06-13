@@ -162,3 +162,32 @@ async def test_verify_cached_mixed_hit_miss(monkeypatch):
 async def test_verify_cached_empty_is_zero():
     ratio = await verify_cached([], "h", "/b", _settings(), lancache_base_url="http://127.0.0.1")
     assert ratio == 0.0
+
+
+async def test_decoding_error_records_chunk_failed_not_abort(monkeypatch):
+    """Epic downloader: a mid-stream DecodingError must be one failed chunk, not
+    a whole-run abort that cancels siblings (audit 2026-06-09)."""
+
+    async def _noop_sleep(_seconds):
+        return None
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("bad.chunk"):
+            return httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=b"not-gzip")
+        return httpx.Response(200, content=b"ok")
+
+    monkeypatch.setattr(
+        "orchestrator.prefill.epic_downloader._build_transport",
+        lambda: httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr("orchestrator.prefill.epic_downloader.asyncio.sleep", _noop_sleep)
+    r = await prefill_chunks(
+        ["ChunksV5/00/bad.chunk", "ChunksV5/00/ok.chunk"],
+        "epiccdn.test",
+        "/base",
+        _settings(),
+        lancache_base_url="http://127.0.0.1",
+    )
+    assert r.chunks_total == 2
+    assert r.chunks_ok == 1
+    assert r.chunks_failed == 1

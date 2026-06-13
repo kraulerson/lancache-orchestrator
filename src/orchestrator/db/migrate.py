@@ -145,17 +145,34 @@ def _detect_filesystem_type(path: Path) -> str:
                         best_len = len(mount_point)
             return best
         if sys.platform == "darwin":
-            # Fixed argv; 'target' is a local filesystem path validated upstream.
+            # `stat -f %T` returns the inode file-type sigil ('/', '@', ''), NOT
+            # the filesystem type — it never yields 'nfs'/'smbfs', so it silently
+            # defeats the network-FS guard (audit 2026-06-09). Parse `mount`
+            # instead and longest-prefix match the mount point, mirroring the
+            # Linux mountinfo path. Each line is "<dev> on <mountpoint> (<fstype>, …)".
+            # Fixed argv, absolute path, no shell.
             # nosemgrep: dangerous-subprocess-use
-            result = subprocess.run(  # noqa: S603 — fixed argv, absolute path, no shell
-                ["/usr/bin/stat", "-f", "%T", target],
+            result = subprocess.run(
+                ["/sbin/mount"],
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=2,
             )
             if result.returncode == 0:
-                return result.stdout.strip() or "unknown"
+                best = "unknown"
+                best_len = -1
+                for line in result.stdout.splitlines():
+                    m = re.match(r"^.* on (.+) \(([^,)]+)", line)
+                    if not m:
+                        continue
+                    mount_point, fstype = m.group(1), m.group(2).strip()
+                    if (
+                        target == mount_point or target.startswith(mount_point.rstrip("/") + "/")
+                    ) and len(mount_point) > best_len:
+                        best = fstype
+                        best_len = len(mount_point)
+                return best
     except (OSError, subprocess.SubprocessError):
         return "unknown"
     return "unknown"
@@ -631,7 +648,16 @@ def _run_migrations_locked(
                     continue
                 log.info("migration_applying", migration_id=mig.mid, name=mig.name)
                 for stmt in _split_sql(mig.sql):
-                    conn.execute(stmt)
+                    try:
+                        conn.execute(stmt)
+                    except sqlite3.Error as e:
+                        # Wrap apply-time SQL errors in MigrationError (the
+                        # documented contract + the API lifespan catch depend on
+                        # it) and SCRUB the raw SQLite text so literal values /
+                        # error strings are never reflected (audit 2026-06-09).
+                        raise MigrationError(
+                            f"migration {mig.mid} ({mig.name}) failed to apply: {type(e).__name__}"
+                        ) from None
                 conn.execute(
                     "INSERT INTO schema_migrations (id, name, checksum) VALUES (?, ?, ?)",
                     (mig.mid, f"{mig.mid:04d}_{mig.name}", mig.sha),

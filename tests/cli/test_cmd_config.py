@@ -23,6 +23,22 @@ def test_config_show_redacts_token(monkeypatch):
     assert "database_path" in r.output
 
 
+def test_config_show_malformed_env_exits_1_cleanly(monkeypatch):
+    """A malformed ORCH_* env var makes get_settings() raise a pydantic
+    ValidationError. The in-process command must surface a clean exit 1, not a
+    raw multi-line traceback (audit 2026-06-09)."""
+    monkeypatch.setenv("ORCH_TOKEN", _SECRET)
+    monkeypatch.setenv("ORCH_API_PORT", "notaport")  # int field → ValidationError
+    from orchestrator.core.settings import get_settings
+
+    get_settings.cache_clear()
+    r = CliRunner().invoke(cli, ["config", "show"])
+    get_settings.cache_clear()
+    assert r.exit_code == 1
+    assert isinstance(r.exception, SystemExit)  # handled, not a raw ValidationError
+    assert "✗" in r.stderr
+
+
 def test_config_show_redacts_secret_named_fields(monkeypatch):
     """Any field whose name signals a secret (token/secret/password) must be
     redacted by NAME — not only SecretStr-typed fields. `epic_client_secret` is

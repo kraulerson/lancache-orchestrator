@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import click
 
+from orchestrator.cli.base import handles_local_errors
 from orchestrator.core.settings import get_settings
 
 # Redact by FIELD NAME, not just by type: SecretStr redacts itself, but a
@@ -24,6 +25,7 @@ def config() -> None:
 
 
 @config.command("show")
+@handles_local_errors
 def config_show() -> None:
     """Print the effective settings (secrets redacted)."""
     # model_dump() keeps SecretStr fields as SecretStr objects (str(SecretStr) is

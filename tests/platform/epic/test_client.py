@@ -80,3 +80,59 @@ async def test_expired_cached_token_triggers_refresh(monkeypatch, tmp_path):
     await client.library_enumerate()  # refresh #1
     await client.library_enumerate()  # cached token expired -> refresh #2
     assert calls["n"] == 2
+
+
+async def test_library_enumerate_forces_refresh_and_retries_on_401(monkeypatch, tmp_path):
+    """A 401 from the downstream library call must force a token refresh and
+    retry once — the documented 401-forces-refresh contract (audit 2026-06-09)."""
+    s = _settings(tmp_path)
+    ep_oauth.save_refresh_token(str(s.epic_session_path), "RT")
+
+    refresh_calls: list[str] = []
+
+    async def fake_refresh(rt, settings):
+        refresh_calls.append(rt)
+        # never-expiring access token, so only a 401 (not proactive expiry)
+        # can trigger the second refresh.
+        return AuthTokens(f"AT{len(refresh_calls)}", "RT", "acc", "Karl", "")
+
+    enum_calls: list[str] = []
+
+    async def fake_enum(at, settings):
+        enum_calls.append(at)
+        if len(enum_calls) == 1:
+            raise ep_lib.EpicLibraryError("epic library fetch failed: HTTP 401", status_code=401)
+        return [EpicLibraryItem("A", "ns", "c", "A")]
+
+    monkeypatch.setattr(ep_oauth, "refresh", fake_refresh)
+    monkeypatch.setattr(ep_lib, "enumerate_library", fake_enum)
+
+    client = EpicClient(s)
+    items = await client.library_enumerate()
+
+    assert [i.app_name for i in items] == ["A"]
+    assert len(enum_calls) == 2  # retried after the 401
+    assert len(refresh_calls) == 2  # initial + forced-on-401
+
+
+async def test_library_enumerate_does_not_retry_on_non_401(monkeypatch, tmp_path):
+    """A non-401 downstream error must NOT trigger a refresh/retry loop."""
+    s = _settings(tmp_path)
+    ep_oauth.save_refresh_token(str(s.epic_session_path), "RT")
+
+    refresh_calls: list[str] = []
+
+    async def fake_refresh(rt, settings):
+        refresh_calls.append(rt)
+        return AuthTokens("AT", "RT", "acc", "Karl", "")
+
+    async def fake_enum(at, settings):
+        raise ep_lib.EpicLibraryError("epic library fetch failed: HTTP 503", status_code=503)
+
+    monkeypatch.setattr(ep_oauth, "refresh", fake_refresh)
+    monkeypatch.setattr(ep_lib, "enumerate_library", fake_enum)
+
+    client = EpicClient(s)
+    with pytest.raises(ep_lib.EpicLibraryError):
+        await client.library_enumerate()
+    assert len(refresh_calls) == 1  # no forced refresh on a non-401

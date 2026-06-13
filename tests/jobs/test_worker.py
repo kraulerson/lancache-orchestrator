@@ -99,6 +99,39 @@ class TestMarkSucceededFailed:
         after = await pool.read_one("SELECT state FROM jobs WHERE id=1")
         assert after["state"] == "queued"
 
+    async def test_mark_succeeded_retries_transient_pool_error(self, pool, monkeypatch):
+        """A transient pool error on the status write must be retried — not leave
+        the job stuck 'running' for the next-boot reaper to mislabel 'failed'
+        (audit 2026-06-09)."""
+        import orchestrator.jobs.worker as wk
+        from orchestrator.db.pool import PoolError
+
+        await _queue_job(pool)
+        row = await claim_next_job(pool)
+        assert row is not None
+        job_id = int(row["id"])
+
+        real_write = pool.execute_write
+        calls = {"n": 0}
+
+        async def flaky(sql, params=()):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise PoolError("transient connection loss")
+            return await real_write(sql, params)
+
+        async def _noop(_seconds):
+            return None
+
+        monkeypatch.setattr(pool, "execute_write", flaky)
+        monkeypatch.setattr(wk.asyncio, "sleep", _noop)
+
+        await mark_succeeded(pool, job_id)  # must not raise — retried to success
+        assert calls["n"] == 3
+
+        after = await pool.read_one("SELECT state FROM jobs WHERE id=?", (job_id,))
+        assert after["state"] == "succeeded"
+
 
 class TestWorkerLoopDispatch:
     async def test_dispatches_to_registered_handler(self, pool):

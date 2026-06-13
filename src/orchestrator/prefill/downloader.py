@@ -114,7 +114,12 @@ async def prefill_chunks(
                         reason = f"http {resp.status_code}"
                         if resp.status_code < 500:
                             break  # 4xx won't be fixed by retry
-                except (httpx.TimeoutException, httpx.TransportError) as e:
+                except httpx.RequestError as e:
+                    # RequestError covers timeouts, transport errors AND
+                    # DecodingError (corrupt/mislabeled Content-Encoding from
+                    # lancache/upstream) — record this chunk as failed rather
+                    # than letting it escape gather() and abort the whole run,
+                    # cancelling every sibling chunk download (audit 2026-06-09).
                     reason = type(e).__name__
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(_backoff(attempt))

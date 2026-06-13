@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import aiosqlite  # re-exports sqlite3's exception classes (aiosqlite.Error is sqlite3.Error)
 import click
+from pydantic import ValidationError
 
 from orchestrator.cli import client as _client
 from orchestrator.db.migrate import MigrationError
@@ -49,20 +50,22 @@ def handles_api_errors[F: Callable[..., Any]](fn: F) -> F:
     return cast("F", wrapper)
 
 
-def handles_db_errors[F: Callable[..., Any]](fn: F) -> F:
-    """For the in-process ``db`` commands: turn a local DB failure into a clean
-    exit 1 + ``✗`` message instead of a raw traceback.
+def handles_local_errors[F: Callable[..., Any]](fn: F) -> F:
+    """For the in-process ``db``/``config`` commands: turn a local failure into a
+    clean exit 1 + ``✗`` message instead of a raw traceback.
 
-    These commands don't hit the API, so ``handles_api_errors`` doesn't apply —
-    and ``MigrationError``/``sqlite3.Error``/``OSError`` aren't in its backstop
-    tuple. This decorator honours the same F11 clean-error contract for them.
+    These commands don't hit the API, so ``handles_api_errors`` doesn't apply.
+    They call ``get_settings()`` first (which raises pydantic ``ValidationError``
+    on a malformed ``ORCH_*`` env var) and then run migrations / open SQLite —
+    none of which are in ``handles_api_errors``'s backstop tuple. This decorator
+    honours the same F11 clean-error contract for them.
     """
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return fn(*args, **kwargs)
-        except (MigrationError, aiosqlite.Error, OSError) as e:
+        except (ValidationError, MigrationError, aiosqlite.Error, OSError) as e:
             click.echo(f"✗ {e}", err=True)
             raise SystemExit(1) from e
 

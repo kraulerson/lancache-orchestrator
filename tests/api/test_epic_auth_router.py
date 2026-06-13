@@ -38,6 +38,28 @@ async def test_submit_auth_exchanges_persists_and_enqueues(client, populated_poo
     assert job is not None
 
 
+async def test_submit_auth_save_token_oserror_returns_clean_error(
+    client, populated_pool, monkeypatch
+):
+    """If persisting the refresh token fails (read-only/full FS, symlink at the
+    path), the endpoint must return a clean error — not let the OSError escape as
+    an unhandled 500 — and must never reflect the tokens (audit 2026-06-09)."""
+
+    async def fake_exchange(code, settings):
+        return AuthTokens("AT_SECRET", "RT_SECRET", "acc-123", "Karl", "")
+
+    def boom(_p, _t):
+        raise OSError("[Errno 30] Read-only file system")
+
+    monkeypatch.setattr(ea, "exchange_code", fake_exchange)
+    monkeypatch.setattr(ea, "save_refresh_token", boom)
+
+    r = await client.post("/api/v1/platforms/epic/auth", headers=AUTH, json={"code": "THECODE"})
+    assert r.status_code == 503
+    assert "detail" in r.json()
+    assert "AT_SECRET" not in r.text and "RT_SECRET" not in r.text
+
+
 async def test_submit_auth_bad_code_returns_401(client, monkeypatch):
     async def fake_exchange(code, settings):
         raise EpicAuthError("rejected")

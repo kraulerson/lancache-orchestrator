@@ -64,14 +64,17 @@ async def trigger_validate(
             )
             return JSONResponse(status_code=202, content={"job_id": int(existing["id"])})
 
+        # ON CONFLICT DO NOTHING + the migration-0006 partial UNIQUE index make
+        # this race-safe (audit 2026-06-09): a concurrent in-flight validate for
+        # this game makes our INSERT a no-op and we return the winner's job_id.
         await pool.execute_write(
             "INSERT INTO jobs (kind, game_id, platform, state, source) "
-            "VALUES ('validate', ?, 'steam', 'queued', 'api')",
+            "VALUES ('validate', ?, 'steam', 'queued', 'api') ON CONFLICT DO NOTHING",
             (game_id,),
         )
         new_row = await pool.read_one(
             "SELECT id FROM jobs WHERE kind='validate' AND game_id=? "
-            "AND state='queued' ORDER BY id DESC LIMIT 1",
+            "AND state IN ('queued','running') ORDER BY id LIMIT 1",
             (game_id,),
         )
         if new_row is None:

@@ -272,9 +272,13 @@ async def _steam_prefill_inner(
     # ID5: success → enqueue a validate job (it sets the final status). The
     # jobs.source CHECK allows scheduler/cli/gameshelf/api — use 'scheduler'
     # for this automated enqueue.
+    # ON CONFLICT DO NOTHING (audit 2026-06-09): the migration-0006 in-flight
+    # UNIQUE index dedups against an already queued/running validate for this
+    # game (e.g. an operator-triggered validate, or a duplicate prefill), so we
+    # don't pile up redundant validate rows that burn the serial steam slot.
     await deps.pool.execute_write(
         "INSERT INTO jobs (kind, game_id, platform, state, source) "
-        "VALUES ('validate', ?, 'steam', 'queued', 'scheduler')",
+        "VALUES ('validate', ?, 'steam', 'queued', 'scheduler') ON CONFLICT DO NOTHING",
         (game_id,),
     )
     await deps.pool.execute_write(
