@@ -80,6 +80,39 @@ async def test_reader_release_never_blocks_on_full_queue(db_path: Path) -> None:
         await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
 
 
+async def test_surplus_reader_release_does_not_schedule_double_close(db_path: Path) -> None:
+    """Regression for the 6-hour CI deadlock: the surplus-reader release path must
+    NOT background-close a connection that is still a ``_reader_pool`` member.
+    ``_teardown_connections`` closes ``_reader_pool``, so a concurrent background
+    ``_safe_close`` of the same connection double-closes one aiosqlite connection
+    and deadlocks on its worker thread (it only surfaced under full-suite load,
+    when the background close raced teardown). The surplus reader must instead be
+    LEFT for teardown to close exactly once.
+
+    The `wait_for` around teardown turns any reintroduced double-close into a
+    bounded TimeoutError instead of an infinite hang.
+    """
+    cm = Pool.create(database_path=db_path, readers_count=1)
+    pool = await cm.__aenter__()
+    try:
+        checkout = pool._checkout_reader()
+        reader = await checkout.__aenter__()
+        filler = await pool._open_connection(role="reader")
+        pool._readers.put_nowait(filler)  # queue full (maxsize=1)
+        assert pool._readers.full()
+
+        await checkout.__aexit__(None, None, None)  # surplus release
+
+        # The reader must stay a _reader_pool member (closed once at teardown),
+        # and NO background close was scheduled for it — a bg _safe_close of a
+        # _reader_pool member is exactly what raced teardown into the deadlock.
+        assert reader in pool._reader_pool
+        assert len(pool._bg_tasks) == 0, "surplus release must not schedule a background close"
+    finally:
+        # Bounded so a reintroduced double-close fails the test rather than hanging.
+        await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=5.0)
+
+
 async def test_concurrent_writer_replacement_closes_surplus(db_path: Path, monkeypatch) -> None:
     """Two concurrent writer replacements for the same broken writer must
     install exactly one new connection and CLOSE the surplus — never leak it."""
