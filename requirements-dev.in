@@ -8,5 +8,5 @@ ruff==0.15.16
 pip-licenses==5.5.5
 pip-tools==7.5.3
 bandit==1.9.4
-hypothesis==6.155.1
+hypothesis==6.155.2
 asgi-lifespan==2.1.0
