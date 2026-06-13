@@ -8,6 +8,7 @@ the issue is fixed and the process restarted.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -34,7 +35,17 @@ async def validator_self_test(settings: Settings) -> bool:
             _log.error("validator.self_test.cache_root_missing", path=str(root))
             return False
         # Confirm read access (raises if unreadable).
-        next(iter(root.iterdir()), None)
+        first_entry = next(iter(root.iterdir()), None)
+        # An unmounted Docker bind-mount/volume silently becomes an EMPTY,
+        # non-mountpoint directory (Docker auto-creates the target). is_dir() +
+        # iterdir() both succeed, so the validator would run against the wrong
+        # empty tree and report every cached game as missing — exactly the
+        # operator-confusion this self-test exists to prevent (audit 2026-06-09).
+        # A correctly-mounted-but-fresh cache is still a mountpoint, so only the
+        # empty-AND-not-mounted combination is rejected.
+        if first_entry is None and not os.path.ismount(root):
+            _log.error("validator.self_test.cache_empty_and_unmounted", path=str(root))
+            return False
         # Derivation smoke test — synthetic, never touches disk.
         h = cache_key(settings.steam_cache_identifier, "/depot/0/chunk/" + "0" * 40, "bytes=0-0")
         cache_path(root, h, settings.cache_levels)

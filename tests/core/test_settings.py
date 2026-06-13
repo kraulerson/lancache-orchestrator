@@ -488,6 +488,19 @@ class TestWarnings:
         events = [r.get("event") for r in _json_lines(capsys.readouterr().out)]
         assert "config.secret_shadowed_by_env" in events
 
+    def test_shadow_warning_fires_for_lowercase_env(self, monkeypatch, secrets_dir, capsys):
+        """case_sensitive=False means a lowercase `orch_token` env var also
+        shadows the secrets file and takes precedence — so the shadow warning
+        must fire for it too, not only the uppercase form (audit 2026-06-09)."""
+        log_mod.configure_logging()
+        (secrets_dir / "orchestrator_token").write_text("f" * 32)
+        monkeypatch.setitem(Settings.model_config, "secrets_dir", str(secrets_dir))
+        monkeypatch.delenv("ORCH_TOKEN", raising=False)
+        monkeypatch.setenv("orch_token", "e" * 32)  # lowercase alias
+        Settings()
+        events = [r.get("event") for r in _json_lines(capsys.readouterr().out)]
+        assert "config.secret_shadowed_by_env" in events
+
     def test_non_loopback_host_warning_fires(self, capsys):
         log_mod.configure_logging()
         Settings(orchestrator_token=VALID_TOKEN, api_host="0.0.0.0")  # noqa: S104 — test confirms warning fires for non-loopback

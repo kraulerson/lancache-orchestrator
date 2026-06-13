@@ -13,6 +13,9 @@ VALID_TOKEN = "a" * 32
 
 
 async def test_true_when_cache_dir_ok(tmp_path):
+    # A real cache has content; an empty non-mount dir is now treated as the
+    # unmounted-misconfiguration case (see test_false_when_empty_and_not_a_mountpoint).
+    (tmp_path / "ab").mkdir()
     s = Settings(orchestrator_token=VALID_TOKEN, lancache_nginx_cache_path=tmp_path)
     assert await validator_self_test(s) is True
 
@@ -27,3 +30,27 @@ async def test_false_when_cache_path_is_a_file(tmp_path):
     f.write_bytes(b"x")
     s = Settings(orchestrator_token=VALID_TOKEN, lancache_nginx_cache_path=f)
     assert await validator_self_test(s) is False
+
+
+async def test_false_when_empty_and_not_a_mountpoint(tmp_path):
+    """An unmounted Docker bind-mount/volume silently becomes an empty, non-mount
+    directory — the self-test must catch it rather than report healthy and then
+    flag every cached game as missing (audit 2026-06-09)."""
+    s = Settings(orchestrator_token=VALID_TOKEN, lancache_nginx_cache_path=tmp_path)
+    assert await validator_self_test(s) is False  # empty + not a mountpoint
+
+
+async def test_true_when_empty_but_is_a_mountpoint(tmp_path, monkeypatch):
+    """A correctly-mounted but freshly-empty cache (a real mountpoint) is fine."""
+    import orchestrator.validator.self_test as st
+
+    monkeypatch.setattr(st.os.path, "ismount", lambda _p: True)
+    s = Settings(orchestrator_token=VALID_TOKEN, lancache_nginx_cache_path=tmp_path)
+    assert await validator_self_test(s) is True
+
+
+async def test_true_when_non_empty_cache(tmp_path):
+    """A non-empty cache directory passes regardless of mount detection."""
+    (tmp_path / "ab").mkdir()
+    s = Settings(orchestrator_token=VALID_TOKEN, lancache_nginx_cache_path=tmp_path)
+    assert await validator_self_test(s) is True

@@ -329,7 +329,12 @@ class Settings(BaseSettings):
         secrets_dir = self.model_config.get("secrets_dir")
         if isinstance(secrets_dir, (str, Path)):
             secret_file = Path(secrets_dir) / "orchestrator_token"
-            if "ORCH_TOKEN" in os.environ and secret_file.is_file():
+            # case_sensitive=False means a lowercase `orch_token` env var also
+            # shadows the secrets file and takes precedence — match os.environ
+            # keys case-insensitively so the warning fires for it too, not only
+            # the conventional uppercase form (audit 2026-06-09).
+            env_has_token = any(k.upper() == "ORCH_TOKEN" for k in os.environ)
+            if env_has_token and secret_file.is_file():
                 log.warning(
                     "config.secret_shadowed_by_env",
                     secret_file=str(secret_file),
