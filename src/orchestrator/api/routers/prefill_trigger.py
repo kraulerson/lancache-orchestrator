@@ -68,14 +68,18 @@ async def trigger_prefill(
             )
             return JSONResponse(status_code=202, content={"job_id": int(existing["id"])})
 
+        # ON CONFLICT DO NOTHING + the migration-0006 partial UNIQUE index make
+        # this race-safe (audit 2026-06-09): if a concurrent POST already queued
+        # an in-flight prefill for this game, our INSERT is a no-op and we return
+        # the winner's job_id below — no duplicate prefill row, no duplicate work.
         await pool.execute_write(
             "INSERT INTO jobs (kind, game_id, platform, state, source) "
-            "VALUES ('prefill', ?, ?, 'queued', 'api')",
+            "VALUES ('prefill', ?, ?, 'queued', 'api') ON CONFLICT DO NOTHING",
             (game_id, platform),
         )
         new_row = await pool.read_one(
             "SELECT id FROM jobs WHERE kind='prefill' AND game_id=? "
-            "AND state='queued' ORDER BY id DESC LIMIT 1",
+            "AND state IN ('queued','running') ORDER BY id LIMIT 1",
             (game_id,),
         )
         if new_row is None:

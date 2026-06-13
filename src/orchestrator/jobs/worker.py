@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from orchestrator.db.pool import PoolError
 from orchestrator.jobs.handlers import HANDLERS
 
 if TYPE_CHECKING:
@@ -63,8 +64,28 @@ async def claim_next_job(pool: Pool) -> dict[str, Any] | None:
         )
 
 
+# A terminal status write that silently fails leaves the job stuck 'running';
+# the next-boot reaper then mislabels a job that actually succeeded as 'failed'
+# (audit 2026-06-09). Retry transient pool errors a few times to shrink that
+# window before giving up.
+_MARK_RETRY_ATTEMPTS = 3
+_MARK_RETRY_BASE_DELAY_SEC = 0.2
+
+
+async def _write_job_status_with_retry(pool: Pool, sql: str, params: tuple[Any, ...]) -> None:
+    for attempt in range(_MARK_RETRY_ATTEMPTS):
+        try:
+            await pool.execute_write(sql, params)
+            return
+        except PoolError:
+            if attempt == _MARK_RETRY_ATTEMPTS - 1:
+                raise  # exhausted retries — let the caller log it
+            await asyncio.sleep(_MARK_RETRY_BASE_DELAY_SEC * (2**attempt))
+
+
 async def mark_succeeded(pool: Pool, job_id: int) -> None:
-    await pool.execute_write(
+    await _write_job_status_with_retry(
+        pool,
         "UPDATE jobs SET state='succeeded', finished_at=CURRENT_TIMESTAMP, error=NULL "
         "WHERE id=? AND state='running'",
         (job_id,),
@@ -73,7 +94,8 @@ async def mark_succeeded(pool: Pool, job_id: int) -> None:
 
 async def mark_failed(pool: Pool, job_id: int, error: str) -> None:
     truncated = error[:JOB_ERROR_TRUNCATE]
-    await pool.execute_write(
+    await _write_job_status_with_retry(
+        pool,
         "UPDATE jobs SET state='failed', finished_at=CURRENT_TIMESTAMP, error=? "
         "WHERE id=? AND state='running'",
         (truncated, job_id),

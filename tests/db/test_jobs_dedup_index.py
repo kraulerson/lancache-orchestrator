@@ -106,3 +106,78 @@ class TestSweepInflightUniqueIndex:
             )
         n = await pool.execute_write(_SWEEP + " ON CONFLICT DO NOTHING", ("queued",))
         assert n == 1
+
+
+# Audit 2026-06-09: migration 0006 — at most one queued/running prefill, and at
+# most one queued/running validate, per game.
+
+
+async def _make_game(pool, *, platform: str = "steam", app_id: str = "440") -> int:
+    await pool.execute_write(
+        "INSERT INTO games (platform, app_id, title) VALUES (?, ?, 'G')",
+        (platform, app_id),
+    )
+    row = await pool.read_one(
+        "SELECT id FROM games WHERE platform=? AND app_id=?", (platform, app_id)
+    )
+    return int(row["id"])
+
+
+_PREFILL = (
+    "INSERT INTO jobs (kind, game_id, platform, state, source) "
+    "VALUES ('prefill', ?, 'steam', ?, 'api')"
+)
+
+
+class TestPrefillInflightUniqueIndex:
+    async def test_raw_duplicate_insert_raises_integrity_error(self, pool):
+        gid = await _make_game(pool)
+        await pool.execute_write(_PREFILL, (gid, "queued"))
+        with pytest.raises(IntegrityViolationError):
+            await pool.execute_write(_PREFILL, (gid, "queued"))
+
+    async def test_on_conflict_second_inflight_insert_is_noop(self, pool):
+        gid = await _make_game(pool)
+        n1 = await pool.execute_write(_PREFILL + " ON CONFLICT DO NOTHING", (gid, "queued"))
+        n2 = await pool.execute_write(_PREFILL + " ON CONFLICT DO NOTHING", (gid, "running"))
+        assert n1 == 1
+        assert n2 == 0
+
+    async def test_different_games_not_blocked(self, pool):
+        g1 = await _make_game(pool, app_id="1")
+        g2 = await _make_game(pool, app_id="2")
+        await pool.execute_write(_PREFILL, (g1, "queued"))
+        n = await pool.execute_write(_PREFILL + " ON CONFLICT DO NOTHING", (g2, "queued"))
+        assert n == 1
+
+    async def test_terminal_states_not_blocked(self, pool):
+        gid = await _make_game(pool)
+        await pool.execute_write(
+            "INSERT INTO jobs (kind, game_id, platform, state, source, started_at, finished_at) "
+            "VALUES ('prefill', ?, 'steam', 'succeeded', 'api', "
+            "'2026-06-09 09:00:00', '2026-06-09 09:05:00')",
+            (gid,),
+        )
+        n = await pool.execute_write(_PREFILL + " ON CONFLICT DO NOTHING", (gid, "queued"))
+        assert n == 1
+
+
+_VALIDATE = (
+    "INSERT INTO jobs (kind, game_id, platform, state, source) "
+    "VALUES ('validate', ?, 'steam', ?, 'api')"
+)
+
+
+class TestValidateInflightUniqueIndex:
+    async def test_raw_duplicate_insert_raises_integrity_error(self, pool):
+        gid = await _make_game(pool)
+        await pool.execute_write(_VALIDATE, (gid, "queued"))
+        with pytest.raises(IntegrityViolationError):
+            await pool.execute_write(_VALIDATE, (gid, "queued"))
+
+    async def test_on_conflict_second_inflight_insert_is_noop(self, pool):
+        gid = await _make_game(pool)
+        n1 = await pool.execute_write(_VALIDATE + " ON CONFLICT DO NOTHING", (gid, "queued"))
+        n2 = await pool.execute_write(_VALIDATE + " ON CONFLICT DO NOTHING", (gid, "running"))
+        assert n1 == 1
+        assert n2 == 0

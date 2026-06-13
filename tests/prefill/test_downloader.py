@@ -116,3 +116,26 @@ async def test_progress_callback(monkeypatch):
     uris = [f"/depot/1/chunk/{'a' * 40}", f"/depot/1/chunk/{'b' * 40}"]
     await prefill_chunks(uris, _settings(), on_progress=lambda d, t: seen.append((d, t)))
     assert seen[-1] == (2, 2)
+
+
+async def test_decoding_error_records_chunk_failed_not_abort(monkeypatch):
+    """A mid-stream DecodingError (corrupt/mislabeled Content-Encoding) must be
+    recorded as one failed chunk — not escape gather() and abort the whole run,
+    cancelling every sibling chunk download (audit 2026-06-09)."""
+
+    def handler(request):
+        if request.url.path.endswith("a" * 40):
+            # Content-Encoding: gzip + non-gzip body → DecodingError on stream.
+            return httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=b"not-gzip")
+        return httpx.Response(200, content=b"ok")
+
+    monkeypatch.setattr(
+        "orchestrator.prefill.downloader._build_transport",
+        lambda: httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr("orchestrator.prefill.downloader.asyncio.sleep", _noop_sleep)
+    uris = [f"/depot/1/chunk/{'a' * 40}", f"/depot/1/chunk/{'b' * 40}"]
+    result = await prefill_chunks(uris, _settings(prefill_chunk_max_attempts=1))
+    assert result.chunks_total == 2
+    assert result.chunks_ok == 1  # the sibling completed (not cancelled)
+    assert result.chunks_failed == 1

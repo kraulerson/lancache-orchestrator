@@ -132,12 +132,16 @@ async def jobs_pool_seeded(populated_pool):  # noqa: F811
         # Running jobs (5). NOTE: only ONE in-flight sweep is allowed
         # (idx_jobs_sweep_inflight, migration 0005), and a queued sweep already
         # exists above — so this slot is manifest_fetch (also adds that kind's
-        # coverage, which was previously absent).
+        # coverage, which was previously absent). Likewise migration 0006 allows
+        # at most one in-flight prefill/validate per game, so the running prefill
+        # game_ids must not collide with the queued prefill (game 1) above — the
+        # first running prefill uses game 5 instead of 1.
+        running_game_ids = [5, 2, 3, 4, None]
         for i in range(5):
             await _ins(
                 kind=["prefill", "prefill", "validate", "library_sync", "manifest_fetch"][i],
                 state="running",
-                game_id=(i + 1) if i < 4 else None,
+                game_id=running_game_ids[i],
                 platform="steam" if i % 2 == 0 else "epic",
                 progress=0.1 + i * 0.2,
                 source=["scheduler", "scheduler", "cli", "gameshelf", "api"][i],
