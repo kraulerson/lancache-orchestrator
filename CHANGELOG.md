@@ -25,6 +25,11 @@ Remediation of the confirmed (2-skeptic verified) findings from the multi-agent 
 
 - **Fixed (db migrate, SEV-3):** apply-time SQL errors are now wrapped in `MigrationError` with a **scrubbed** message (`type(e).__name__` only) instead of escaping as a raw `sqlite3` exception. The previous behaviour broke the documented contract and the API-lifespan `except MigrationError`, and reflected SQLite's raw error text (including literals) into operator output.
 - **Fixed (db migrate, SEV-3):** macOS filesystem-type detection now parses `mount` (the real fstype — `nfs`/`smbfs`/`apfs`) instead of `stat -f %T`, which returns the inode file-type *sigil* and never a network-FS name — silently defeating the WAL-on-network-FS corruption guard on darwin.
+- **Security (steam, SEV-3):** the Steam worker now sweeps expired 2FA challenges on every `auth.begin`, so an abandoned login flow's cleartext password no longer lingers in worker-process memory past its 5-minute TTL.
+- **Security (steam, SEV-3):** the steam-next credential directory (holds the long-lived refresh token) is created `0700` + chmod'd, not left at the umask default — it was world-traversable, weaker than the non-secret session metadata.
+- **Fixed (steam, SEV-3):** `library.enumerate` now waits a configurable, much longer interval for the Steam license list (default 60s vs. the old hardcoded 10s) and **signals a retryable `LicenseListTimeout`** when it never populates — instead of returning a false empty library that the orchestrator recorded as a green zero-game sync.
+- **Fixed (steam, SEV-4):** `manifest.fetch` now tracks every BLOB temp file it writes and deletes them on a mid-loop failure — previously, a depot raising after earlier depots wrote temp files leaked those files permanently (the orchestrator never learns their paths on the error path), accumulating on the container FS.
+- **Tests:** first unit coverage for the gevent worker via a `sys.modules` steam-next stub harness (`tests/platform/steam/test_worker_audit.py`).
 
 Implements F11 (Manifesto §50) — a Click-based operator CLI bundled in the container that drives the local REST API with the bearer token. The console entry `orchestrator-cli` was already declared in `pyproject.toml`; this fills it in.
 

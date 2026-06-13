@@ -90,12 +90,29 @@ def _ensure_client(credential_dir: str | None = None) -> SteamClient:
         # Argument override is for tests that want to inject a tmp_path.
         path = credential_dir or os.environ.get("ORCH_STEAM_SESSION_DIR", _DEFAULT_SESSION_DIR)
         _client = SteamClient()
-        Path(path).mkdir(parents=True, exist_ok=True)
+        # The credential dir holds the long-lived Steam refresh token (account
+        # access without 2FA). Create it 0700 — mkdir's mode is masked by umask,
+        # so chmod explicitly to guarantee it is not world-traversable
+        # (audit 2026-06-09).
+        Path(path).mkdir(parents=True, exist_ok=True, mode=0o700)
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o700)
         _client.set_credential_location(path)
     return _client
 
 
+def _sweep_expired_challenges() -> None:
+    """Evict expired 2FA challenges so an abandoned flow's cleartext password
+    does not linger in worker memory past its TTL (audit 2026-06-09). Mirrors the
+    orchestrator-side sweep; without it an orphaned challenge_id is never
+    revisited and its password lives for the whole process lifetime."""
+    now = time.time()
+    for cid in [c for c, ch in _challenges.items() if now > ch["expires_at"]]:
+        _challenges.pop(cid, None)
+
+
 def _handle_auth_begin(msg_id: str, params: dict[str, str]) -> None:
+    _sweep_expired_challenges()  # don't let abandoned-flow passwords linger
     username = params.get("username")
     password = params.get("password")
     if not username or not password:
@@ -214,7 +231,21 @@ def _handle_library_enumerate(msg_id: str, _params: dict[str, str]) -> None:
 
     try:
         # Wait for the asynchronous license list to arrive before enumerating.
-        enumerate_module.wait_for_licenses(_client, timeout=10.0)
+        # The wait is configurable and defaults well above the old hardcoded 10s
+        # (audit 2026-06-09): a slow CM connection could lag past 10s, leaving
+        # client.licenses empty and yielding a false "empty library" success.
+        wait_sec = float(os.environ.get("ORCH_STEAM_LICENSE_WAIT_SEC", "60"))
+        count = enumerate_module.wait_for_licenses(_client, timeout=wait_sec)
+        if count == 0:
+            # Distinguish "licenses never arrived" from a real enumeration:
+            # signal a retryable timeout rather than recording a green zero-game
+            # sync that silently drops the operator's whole library.
+            _err(
+                msg_id,
+                "LicenseListTimeout",
+                f"no licenses populated within {wait_sec}s — retry",
+            )
+            return
         apps = enumerate_module.enumerate_apps(_client)
         _ok(msg_id, {"apps": apps})
     except Exception as e:
@@ -275,40 +306,56 @@ def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
 
         payload: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
-        for depot_id, gid in depot_gids:
-            try:
-                code = _cdn_client.get_manifest_request_code(app_id, depot_id, gid)
-                mfst = _cdn_client.get_manifest(
-                    app_id, depot_id, gid, decrypt=True, manifest_request_code=code
+        # Track every BLOB temp file written so a mid-loop failure can clean them
+        # up (audit 2026-06-09): on the outer-except path the orchestrator never
+        # receives the raw_path values, so the worker (producer) must delete them
+        # or they accumulate on the container FS across every failed fetch.
+        written_blobs: list[Path] = []
+        try:
+            for depot_id, gid in depot_gids:
+                try:
+                    code = _cdn_client.get_manifest_request_code(app_id, depot_id, gid)
+                    mfst = _cdn_client.get_manifest(
+                        app_id, depot_id, gid, decrypt=True, manifest_request_code=code
+                    )
+                except Exception as e:
+                    skipped.append(
+                        {"depot_id": depot_id, "reason": f"{type(e).__name__}: {e}"[:120]}
+                    )
+                    continue
+
+                data = mfst.serialize()  # raw protobuf bytes
+                compressed = compressor.compress(data)
+
+                # S2-1: write the BLOB to a temp file on the shared container FS
+                # and send its PATH, not the bytes. A 50+ depot game's combined
+                # base64 response would otherwise exceed the 10 MiB IPC line cap
+                # and kill the worker. The orchestrator reads + deletes the file.
+                blob_path = _blob_temp_path("manifest")
+                blob_path.write_bytes(compressed)
+                written_blobs.append(blob_path)
+
+                chunk_count = 0
+                for mapping in mfst.payload.mappings:
+                    chunk_count += len(mapping.chunks)
+
+                payload.append(
+                    {
+                        "depot_id": int(mfst.depot_id),
+                        "manifest_gid": int(mfst.gid),
+                        "name": str(getattr(mfst, "name", "") or ""),
+                        "total_bytes": int(mfst.metadata.cb_disk_original or 0),
+                        "chunk_count": chunk_count,
+                        "raw_path": str(blob_path),
+                    }
                 )
-            except Exception as e:
-                skipped.append({"depot_id": depot_id, "reason": f"{type(e).__name__}: {e}"[:120]})
-                continue
-
-            data = mfst.serialize()  # raw protobuf bytes
-            compressed = compressor.compress(data)
-
-            # S2-1: write the BLOB to a temp file on the shared container FS
-            # and send its PATH, not the bytes. A 50+ depot game's combined
-            # base64 response would otherwise exceed the 10 MiB IPC line cap
-            # and kill the worker. The orchestrator reads + deletes the file.
-            blob_path = _blob_temp_path("manifest")
-            blob_path.write_bytes(compressed)
-
-            chunk_count = 0
-            for mapping in mfst.payload.mappings:
-                chunk_count += len(mapping.chunks)
-
-            payload.append(
-                {
-                    "depot_id": int(mfst.depot_id),
-                    "manifest_gid": int(mfst.gid),
-                    "name": str(getattr(mfst, "name", "") or ""),
-                    "total_bytes": int(mfst.metadata.cb_disk_original or 0),
-                    "chunk_count": chunk_count,
-                    "raw_path": str(blob_path),
-                }
-            )
+        except Exception:
+            # Failure mid-fetch: the orchestrator gets _err (no manifests list),
+            # so it can never clean these up. Delete them here before re-raising.
+            for bp in written_blobs:
+                with contextlib.suppress(OSError):
+                    bp.unlink()
+            raise
 
         _ok(msg_id, {"manifests": payload, "skipped": skipped})
     except Exception as e:
