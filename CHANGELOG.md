@@ -19,6 +19,15 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — DB pool concurrency (full-codebase audit) — 2026-06-09
+
+A multi-agent codebase audit surfaced three `db/pool.py` concurrency defects (each 2-skeptic verified); all fixed test-first.
+
+- **Security/Stability (SEV-2):** the reader heal path was an unsynchronized check-then-act on `_lost_reader_slots` — under a reader deficit plus concurrent reads, two acquirers both passed the `> 0` guard before either decremented, both minted a reader, over-healed past `readers_count`, drove the deficit negative (suppressing all future heals), and the surplus reader's release `put()` into the bounded queue **blocked forever** (connection leak + hung request). This reopened the previously-fixed reader-exhaustion deadlock on the heal side. Fixed by serializing the heal check-then-act under a new `_heal_lock`, so the deficit strictly bounds the number of heals and can never go negative.
+- **Stability:** the reader release and replacement paths now use `put_nowait` + close-the-surplus instead of a blocking `put()`, so a release can never hang even if the queue is unexpectedly full (defense in depth for the overflow above).
+- **Stability (SEV-4):** two concurrent writer replacements for the same broken connection both assigned `self._writer`, leaking the first. Fixed with a compare-and-swap under `_writer_lock` (`if self._writer is old_conn`); the loser closes the connection it opened instead of leaking it.
+- **Tests:** `tests/db/test_pool_concurrency_audit.py` (3 regression tests — concurrent over-heal, release-never-blocks-on-full-queue, concurrent-writer-surplus-closed). Full suite **1139 pass**; mypy(strict)/ruff/gitleaks/semgrep clean.
+
 ### Added — F11 `orchestrator-cli` — 2026-06-08
 
 Implements F11 (Manifesto §50) — a Click-based operator CLI bundled in the container that drives the local REST API with the bearer token. The console entry `orchestrator-cli` was already declared in `pyproject.toml`; this fills it in.

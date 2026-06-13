@@ -572,6 +572,11 @@ class Pool:
 
         self._writer: aiosqlite.Connection | None = None
         self._writer_lock = asyncio.Lock()
+        # Serializes the reader heal check-then-act (audit 2026-06-09): without
+        # it, two acquirers both pass the `_lost_reader_slots > 0` guard before
+        # either decrements, over-heal past readers_count, drive the deficit
+        # negative, and overflow the bounded queue on release.
+        self._heal_lock = asyncio.Lock()
         self._readers: asyncio.Queue[aiosqlite.Connection] = asyncio.Queue(maxsize=readers_count)
         self._reader_pool: list[aiosqlite.Connection] = []  # for index lookup
         # id() of every reader connection currently checked out. health_check
@@ -824,18 +829,26 @@ class Pool:
             # Only open a replacement if a slot was genuinely lost — never
             # exceed readers_count just because all readers are momentarily
             # busy (that would overflow the bounded queue on release).
-            if self._lost_reader_slots > 0:
-                try:
-                    new_conn = await self._open_connection(role="reader")
-                except Exception as e:
-                    raise PoolError(
-                        "reader pool exhausted: replacement connection could not "
-                        f"be opened ({type(e).__name__})"
-                    ) from e
-                self._adopt_reader(new_conn)
-                self._lost_reader_slots -= 1
-                _log.warning("pool.reader_slot_healed", remaining_deficit=self._lost_reader_slots)
-                return new_conn
+            #
+            # The guard + decrement run under _heal_lock so concurrent acquirers
+            # cannot both heal the same lost slot (audit 2026-06-09): the lock
+            # serializes the check-then-act, so the deficit bounds the number of
+            # heals and can never go negative.
+            async with self._heal_lock:
+                if self._lost_reader_slots > 0:
+                    try:
+                        new_conn = await self._open_connection(role="reader")
+                    except Exception as e:
+                        raise PoolError(
+                            "reader pool exhausted: replacement connection could not "
+                            f"be opened ({type(e).__name__})"
+                        ) from e
+                    self._adopt_reader(new_conn)
+                    self._lost_reader_slots -= 1
+                    _log.warning(
+                        "pool.reader_slot_healed", remaining_deficit=self._lost_reader_slots
+                    )
+                    return new_conn
             raise PoolError(
                 f"reader pool exhausted: no reader available within {self._reader_acquire_timeout}s"
             ) from exc
@@ -881,7 +894,14 @@ class Pool:
         finally:
             self._inuse_readers.discard(id(reader))
             if healthy_after:
-                await self._readers.put(reader)
+                # Never block the releasing coroutine forever (audit 2026-06-09):
+                # if the queue is unexpectedly full, this reader is surplus —
+                # close and discard it rather than hanging on a bounded put().
+                try:
+                    self._readers.put_nowait(reader)
+                except asyncio.QueueFull:
+                    _log.warning("pool.reader_release_surplus_discarded")
+                    self._spawn_bg(self._safe_close(reader, role="reader"))
 
     @asynccontextmanager
     async def _checkout_writer(self) -> AsyncIterator[aiosqlite.Connection]:
@@ -966,14 +986,31 @@ class Pool:
 
         # Atomic swap
         if role == "writer":
-            self._writer = new_conn
-            self._writer_healthy = True
+            # CAS under the writer lock (audit 2026-06-09): two concurrent
+            # writer replacements for the same broken connection would both
+            # assign self._writer, leaking the first. Only the replacement whose
+            # old_conn is still installed wins; the loser closes the connection
+            # it opened instead of leaking it.
+            async with self._writer_lock:
+                if self._writer is old_conn:
+                    self._writer = new_conn
+                    self._writer_healthy = True
+                else:
+                    self._spawn_bg(self._safe_close(new_conn, role=role))
+                    return
         else:
             if reader_index is None:
                 raise PoolError("reader replacement requires reader_index")
-            # Replace in reader_pool and add to queue
+            # Replace in reader_pool and add to queue. put_nowait + close-surplus
+            # so a late replacement racing a heal can never overflow the bounded
+            # queue / block forever (audit 2026-06-09).
             self._reader_pool[reader_index] = new_conn
-            await self._readers.put(new_conn)
+            try:
+                self._readers.put_nowait(new_conn)
+            except asyncio.QueueFull:
+                _log.warning("pool.reader_replacement_surplus_discarded")
+                self._spawn_bg(self._safe_close(new_conn, role="reader"))
+                return
             self._reader_healthy[reader_index] = True
 
         self._replacement_count[role] += 1
