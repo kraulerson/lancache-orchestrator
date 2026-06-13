@@ -159,6 +159,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             jobs_deps,
             shutdown=jobs_shutdown,
             poll_interval_sec=settings.jobs_worker_poll_interval_sec,
+            job_max_runtime_sec=settings.job_max_runtime_sec,
         ),
         name="jobs_worker",
     )

@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — jobs worker operability (eval quick-wins) — 2026-06-13
+
+Two operability improvements to the jobs worker, from the post-audit codebase eval.
+
+- **Logging:** each job now runs inside its own `correlation_id` (plus `job_id`/`job_kind`) bound into contextvars — the job-side analogue of the HTTP `request_context()`. Every log line a job emits (worker → handler → validator → pool) now carries the same `correlation_id`, so a job's full lifecycle is greppable by one ID. Previously only the HTTP path had correlation IDs; job logs could only be tied together by manually-passed `job_id`.
+- **Self-recovery:** a configurable per-job wall-clock budget (`job_max_runtime_sec`, default 6h, `0` disables) wraps each handler in `asyncio.wait_for`. A wedged handler (e.g. a hung steam-IPC call) is cancelled and the job marked failed with a `jobs.handler.timed_out` log — so it can no longer hold the single worker loop forever, and the system self-heals **without a process restart**. Chosen over a standalone periodic reaper because, in the single-worker topology, timing out the handler also frees the worker (a reaper can't). A false timeout on a genuinely-long prefill is non-catastrophic: the partial cache persists and a retry resumes from it.
+- **Tests:** `test_job_logs_share_a_correlation_id`, `test_hung_handler_times_out_and_marks_failed`. Full suite **1165 pass**; mypy(strict)/ruff/semgrep clean.
+
 ### Fixed — full-codebase audit remediation — 2026-06-09
 
 Remediation of the confirmed (2-skeptic verified) findings from the multi-agent full-codebase audit. The `db/pool.py` concurrency findings shipped separately; the rest are collected here, each fixed test-first.

@@ -227,6 +227,78 @@ class TestWorkerLoopDispatch:
         assert "RuntimeError" in row1["error"]
         assert row2["state"] == "succeeded"
 
+    async def test_job_logs_share_a_correlation_id(self, pool, capsys):
+        """Every log line emitted during a job (worker + handler) must carry the
+        same correlation_id, so a job's full lifecycle is greppable by one ID."""
+        import json
+
+        import structlog
+
+        from orchestrator.core.logging import configure_logging
+
+        configure_logging()
+        handler_log = structlog.get_logger("test.handler")
+
+        async def my_handler(row, deps):
+            handler_log.info("test.handler.did_work")
+
+        clear()
+        register("library_sync", my_handler)
+        await _queue_job(pool)
+
+        shutdown = asyncio.Event()
+        deps = Deps(pool=pool, steam_client=None)
+
+        async def stopper():
+            for _ in range(300):
+                r = await pool.read_one("SELECT state FROM jobs WHERE id=1")
+                if r and r["state"] == "succeeded":
+                    break
+                await asyncio.sleep(0.01)
+            shutdown.set()
+
+        await asyncio.gather(
+            worker_loop(deps, shutdown=shutdown, poll_interval_sec=0.02),
+            stopper(),
+        )
+
+        lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+        claimed = next(line for line in lines if line.get("event") == "jobs.worker.claimed_job")
+        did_work = next(line for line in lines if line.get("event") == "test.handler.did_work")
+        assert "correlation_id" in claimed
+        assert claimed["correlation_id"] == did_work["correlation_id"]
+        assert claimed.get("job_id") == 1
+
+    async def test_hung_handler_times_out_and_marks_failed(self, pool):
+        """A wedged handler must be cancelled at the per-job runtime budget and the
+        job marked failed — self-heals a stuck job without a process restart."""
+
+        async def hung(row, deps):
+            await asyncio.Event().wait()  # never returns
+
+        clear()
+        register("library_sync", hung)
+        await _queue_job(pool)
+
+        shutdown = asyncio.Event()
+        deps = Deps(pool=pool, steam_client=None)
+
+        async def stopper():
+            for _ in range(300):
+                r = await pool.read_one("SELECT state FROM jobs WHERE id=1")
+                if r and r["state"] == "failed":
+                    break
+                await asyncio.sleep(0.01)
+            shutdown.set()
+
+        await asyncio.gather(
+            worker_loop(deps, shutdown=shutdown, poll_interval_sec=0.02, job_max_runtime_sec=0.1),
+            stopper(),
+        )
+        row = await pool.read_one("SELECT state, error FROM jobs WHERE id=1")
+        assert row["state"] == "failed"
+        assert "max runtime" in (row["error"] or "").lower()
+
     async def test_loop_exits_promptly_on_shutdown(self, pool):
         """Empty queue + shutdown.set() should exit within one poll interval."""
         clear()
