@@ -19,7 +19,12 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
-### Added — F11 `orchestrator-cli` — 2026-06-08
+### Fixed — full-codebase audit remediation — 2026-06-09
+
+Remediation of the confirmed (2-skeptic verified) findings from the multi-agent full-codebase audit. The `db/pool.py` concurrency findings shipped separately; the rest are collected here, each fixed test-first.
+
+- **Fixed (db migrate, SEV-3):** apply-time SQL errors are now wrapped in `MigrationError` with a **scrubbed** message (`type(e).__name__` only) instead of escaping as a raw `sqlite3` exception. The previous behaviour broke the documented contract and the API-lifespan `except MigrationError`, and reflected SQLite's raw error text (including literals) into operator output.
+- **Fixed (db migrate, SEV-3):** macOS filesystem-type detection now parses `mount` (the real fstype — `nfs`/`smbfs`/`apfs`) instead of `stat -f %T`, which returns the inode file-type *sigil* and never a network-FS name — silently defeating the WAL-on-network-FS corruption guard on darwin.
 
 Implements F11 (Manifesto §50) — a Click-based operator CLI bundled in the container that drives the local REST API with the bearer token. The console entry `orchestrator-cli` was already declared in `pyproject.toml`; this fills it in.
 

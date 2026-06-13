@@ -141,6 +141,49 @@ def test_atomic_failure_allows_clean_retry(migs_dir: Path, db_path: Path) -> Non
     conn.close()
 
 
+def test_apply_sql_error_raises_migration_error_scrubbed(migs_dir: Path, db_path: Path) -> None:
+    """A SQL error while applying a migration must surface as MigrationError with
+    a SCRUBBED message — not a raw sqlite3 exception reflecting SQLite's literal
+    error text (audit 2026-06-09). The documented contract and the API lifespan
+    catch both depend on the MigrationError type.
+    """
+    bad_sql = "CREATE TABLE zzz;\n"  # missing column list — hard syntax error
+    _write_migration(migs_dir, 1, "initial", bad_sql)
+    _write_checksums(migs_dir, [(1, _sha256(bad_sql), "0001_initial.sql")])
+
+    with pytest.raises(migrate.MigrationError) as ei:
+        migrate.run_migrations(db_path, migrations_dir=migs_dir)
+
+    # The raw SQLite error text must not be reflected into the message.
+    msg = str(ei.value).lower()
+    assert "syntax error" not in msg
+    assert "near" not in msg
+
+
+def test_detect_filesystem_type_darwin_parses_mount_not_stat_sigil(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On darwin, FS-type detection must parse `mount` (the real fstype), NOT
+    `stat -f %T` which returns the inode file-type sigil and never a network-FS
+    name — defeating the WAL-on-network-FS guard (audit 2026-06-09)."""
+    from pathlib import Path as _Path
+    from subprocess import CompletedProcess
+
+    monkeypatch.setattr(migrate.sys, "platform", "darwin")
+    mount_output = (
+        "/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n"
+        "nas:/export on /mnt/db (nfs, nodev, nosuid, mounted by karl)\n"
+    )
+
+    def fake_run(argv, **kwargs):
+        return CompletedProcess(argv, 0, stdout=mount_output, stderr="")
+
+    monkeypatch.setattr(migrate.subprocess, "run", fake_run)
+
+    # /mnt/db/orch.db (new DB → parent /mnt/db, which is the nfs mount point).
+    assert migrate._detect_filesystem_type(_Path("/mnt/db/orch.db")) == "nfs"
+
+
 # ---------------------------------------------------------------------------
 # Issue #4 SEV-1 — gap migrations
 # ---------------------------------------------------------------------------
