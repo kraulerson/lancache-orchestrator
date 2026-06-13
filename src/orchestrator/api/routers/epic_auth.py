@@ -54,7 +54,17 @@ async def submit_epic_auth(
         _log.warning("epic_auth.exchange_rejected")
         return JSONResponse(status_code=401, content={"detail": "epic authentication failed"})
 
-    save_refresh_token(str(settings.epic_session_path), tokens.refresh_token)
+    try:
+        save_refresh_token(str(settings.epic_session_path), tokens.refresh_token)
+    except OSError as e:
+        # The OAuth code is now consumed, but we couldn't persist the refresh
+        # token (read-only/full FS, symlink at the path, perms). Surface a clean
+        # 503 instead of leaking an unhandled OSError as a 500 — and never
+        # reflect the tokens (audit 2026-06-09).
+        _log.error("epic_auth.persist_failed", error_type=type(e).__name__)
+        return JSONResponse(
+            status_code=503, content={"detail": "could not persist Epic credentials"}
+        )
     try:
         await pool.execute_write(
             "UPDATE platforms SET auth_status='ok', auth_expires_at=?, last_error=NULL "

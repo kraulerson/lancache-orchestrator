@@ -20,7 +20,14 @@ _log = structlog.get_logger(__name__)
 
 
 class EpicLibraryError(Exception):
-    """Epic library enumeration failed."""
+    """Epic library enumeration failed.
+
+    ``status_code`` carries the upstream HTTP status when the failure came from a
+    response (so EpicClient can force a token refresh + retry on 401)."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _build_transport() -> httpx.AsyncBaseTransport | None:
@@ -63,7 +70,10 @@ async def enumerate_library(access_token: str, settings: Settings) -> list[EpicL
         while True:
             resp = await client.get(settings.epic_library_url, headers=headers, params=params)
             if resp.status_code != 200:
-                raise EpicLibraryError(f"epic library fetch failed: HTTP {resp.status_code}")
+                raise EpicLibraryError(
+                    f"epic library fetch failed: HTTP {resp.status_code}",
+                    status_code=resp.status_code,
+                )
             data = resp.json()
             for rec in data.get("records", []):
                 item = _to_item(rec)
