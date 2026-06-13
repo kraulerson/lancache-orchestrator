@@ -201,6 +201,12 @@ class Settings(BaseSettings):
     steam_worker_max_restart_attempts: int = Field(default=3, ge=0, le=10)
     steam_session_dir: Path = Path("/var/lib/orchestrator/steam_session")
     jobs_worker_poll_interval_sec: float = Field(default=1.0, gt=0.0, le=60.0)
+    # Per-job wall-clock budget. A handler that wedges past this is cancelled and
+    # the job marked failed, so it can't hold the single worker loop forever
+    # (self-heals without a process restart). Generous by default — a prefill of
+    # a large game through lancache is long but resumes from cache on retry, so a
+    # rare false timeout is not catastrophic. `0` disables the budget.
+    job_max_runtime_sec: float = Field(default=21600.0, ge=0.0)
 
     @field_validator("cors_origins")
     @classmethod

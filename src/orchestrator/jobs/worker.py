@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from orchestrator.core.logging import new_correlation_id
 from orchestrator.db.pool import PoolError
 from orchestrator.jobs.handlers import HANDLERS
 
@@ -102,12 +103,25 @@ async def mark_failed(pool: Pool, job_id: int, error: str) -> None:
     )
 
 
-async def worker_loop(deps: Deps, *, shutdown: asyncio.Event, poll_interval_sec: float) -> None:
+async def worker_loop(
+    deps: Deps,
+    *,
+    shutdown: asyncio.Event,
+    poll_interval_sec: float,
+    job_max_runtime_sec: float = 0.0,
+) -> None:
     """Single-loop dispatcher. Runs until `shutdown` is set.
 
     - Unknown `kind` → job marked failed; loop continues.
     - Handler exception → job marked failed; loop continues.
     - `claim_next_job` failure (DB outage) → log + back off + retry.
+    - `job_max_runtime_sec > 0` → each handler is bounded by `asyncio.wait_for`;
+      a wedged handler is cancelled and the job marked failed, so it can't hold
+      the single worker loop forever (self-heals without a process restart).
+
+    Each job runs inside its own `correlation_id` (+ `job_id`/`job_kind`) bound
+    into contextvars, so every log line it emits — worker, handler, validator,
+    pool — is greppable by one ID.
     """
     _log.info("jobs.worker.started", poll_interval=poll_interval_sec)
     while not shutdown.is_set():
@@ -126,52 +140,71 @@ async def worker_loop(deps: Deps, *, shutdown: asyncio.Event, poll_interval_sec:
 
         job_id = int(row["id"])
         kind = str(row["kind"])
-        _log.info("jobs.worker.claimed_job", job_id=job_id, kind=kind)
+        # Bind a correlation_id (+ job_id/kind) for the whole job, so every log
+        # line it emits is greppable by one ID — the job-side analogue of the
+        # HTTP request_context(). bound_contextvars resets all of them on exit,
+        # including on `continue`.
+        with structlog.contextvars.bound_contextvars(
+            correlation_id=new_correlation_id(), job_id=job_id, job_kind=kind
+        ):
+            _log.info("jobs.worker.claimed_job", job_id=job_id, kind=kind)
 
-        handler = HANDLERS.get(kind)
-        if handler is None:
-            await mark_failed(deps.pool, job_id, f"no handler for kind {kind!r}")
-            _log.warning("jobs.handler.no_handler", kind=kind, job_id=job_id)
-            continue
+            handler = HANDLERS.get(kind)
+            if handler is None:
+                await mark_failed(deps.pool, job_id, f"no handler for kind {kind!r}")
+                _log.warning("jobs.handler.no_handler", kind=kind, job_id=job_id)
+                continue
 
-        t0 = time.monotonic()
-        _log.info("jobs.handler.started", kind=kind, job_id=job_id)
-        try:
-            await handler(row, deps)
-        except Exception as e:
-            err = f"{type(e).__name__}: {str(e)[: JOB_ERROR_TRUNCATE - 50]}"
+            t0 = time.monotonic()
+            _log.info("jobs.handler.started", kind=kind, job_id=job_id)
             try:
-                await mark_failed(deps.pool, job_id, err)
-            except Exception as mark_e:
-                _log.error(
-                    "jobs.handler.mark_failed_failed",
+                if job_max_runtime_sec > 0:
+                    await asyncio.wait_for(handler(row, deps), timeout=job_max_runtime_sec)
+                else:
+                    await handler(row, deps)
+            except Exception as e:
+                # A TimeoutError under an active budget means wait_for cancelled a
+                # wedged handler — label it distinctly. (TimeoutError is an
+                # Exception, so it lands here.)
+                timed_out = isinstance(e, TimeoutError) and job_max_runtime_sec > 0
+                if timed_out:
+                    err = f"job exceeded max runtime of {job_max_runtime_sec}s (cancelled)"
+                    event = "jobs.handler.timed_out"
+                else:
+                    err = f"{type(e).__name__}: {str(e)[: JOB_ERROR_TRUNCATE - 50]}"
+                    event = "jobs.handler.failed"
+                try:
+                    await mark_failed(deps.pool, job_id, err)
+                except Exception as mark_e:
+                    _log.error(
+                        "jobs.handler.mark_failed_failed",
+                        job_id=job_id,
+                        original_error=err,
+                        reason=str(mark_e)[:JOB_ERROR_TRUNCATE],
+                    )
+                _log.warning(
+                    event,
+                    kind=kind,
                     job_id=job_id,
-                    original_error=err,
-                    reason=str(mark_e)[:JOB_ERROR_TRUNCATE],
+                    kind_error=type(e).__name__,
+                    elapsed_ms=int((time.monotonic() - t0) * 1000),
                 )
-            _log.warning(
-                "jobs.handler.failed",
+                continue
+
+            try:
+                await mark_succeeded(deps.pool, job_id)
+            except Exception as e:
+                _log.error(
+                    "jobs.handler.mark_succeeded_failed",
+                    job_id=job_id,
+                    reason=str(e)[:JOB_ERROR_TRUNCATE],
+                )
+                continue
+            _log.info(
+                "jobs.handler.completed",
                 kind=kind,
                 job_id=job_id,
-                kind_error=type(e).__name__,
                 elapsed_ms=int((time.monotonic() - t0) * 1000),
             )
-            continue
-
-        try:
-            await mark_succeeded(deps.pool, job_id)
-        except Exception as e:
-            _log.error(
-                "jobs.handler.mark_succeeded_failed",
-                job_id=job_id,
-                reason=str(e)[:JOB_ERROR_TRUNCATE],
-            )
-            continue
-        _log.info(
-            "jobs.handler.completed",
-            kind=kind,
-            job_id=job_id,
-            elapsed_ms=int((time.monotonic() - t0) * 1000),
-        )
 
     _log.info("jobs.worker.stopped")
