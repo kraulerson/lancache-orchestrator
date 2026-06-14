@@ -236,6 +236,7 @@ class TestReadLoopLargeResponse:
         client._max_restart_attempts = 3
         client._disabled = False
         client._reader_task = None
+        client._recent_stderr = __import__("collections").deque(maxlen=50)
 
         # Simulate a process whose stdout is a real StreamReader with tiny
         # limit; feed it a line that overflows.
@@ -460,6 +461,115 @@ class TestPerOpTimeoutOverride:
         assert "0.05" in str(exc.value)
 
 
+class TestWorkerStderrDrain:
+    """The worker subprocess is opaque: its stderr (gevent/steam-next tracebacks,
+    native crash messages like 'Segmentation fault') is the ONLY diagnostic when
+    it dies. It must be drained continuously — both so the pipe never fills and
+    stalls the worker (64 KiB OS buffer), and so a crash leaves a breadcrumb.
+    The last lines must surface in the steam_worker.died log (UAT-11: a worker
+    crashed mid manifest.fetch with reason=stdout_closed and zero diagnostics)."""
+
+    async def test_drain_stderr_captures_worker_lines_into_ring(self):
+        import asyncio
+        import collections
+
+        from orchestrator.platform.steam.client import SteamWorkerClient
+
+        client = SteamWorkerClient.__new__(SteamWorkerClient)
+        client._recent_stderr = collections.deque(maxlen=50)
+
+        loop = asyncio.get_event_loop()
+        stderr = asyncio.StreamReader(loop=loop)
+        stderr.feed_data(b"Traceback (most recent call last):\n")
+        stderr.feed_data(b"RuntimeError: greenlet boom\n")
+        stderr.feed_eof()
+
+        class _FakeProcess:
+            returncode = None
+
+        proc = _FakeProcess()
+        proc.stderr = stderr
+        client._process = proc
+
+        await client._drain_stderr()
+
+        captured = list(client._recent_stderr)
+        assert "RuntimeError: greenlet boom" in captured
+        assert "Traceback (most recent call last):" in captured
+
+    async def test_worker_death_log_includes_recent_stderr(self):
+        import collections
+        from unittest.mock import MagicMock, patch
+
+        from orchestrator.platform.steam.client import SteamWorkerClient
+
+        client = SteamWorkerClient.__new__(SteamWorkerClient)
+        client._max_restart_attempts = 3
+        client._restart_attempts = 0
+        client._disabled = False
+        client._writer = None
+        client._reader_task = None
+        client._pending = {}
+        client._recent_stderr = collections.deque(["Segmentation fault (core dumped)"], maxlen=50)
+
+        # Patch the module logger directly: structlog.capture_logs is defeated by
+        # the project's cache_logger_on_first_use config once the logger is cached
+        # earlier in the suite, so assert on the call kwargs instead.
+        fake_log = MagicMock()
+        with patch("orchestrator.platform.steam.client._log", fake_log):
+            client._on_worker_died(reason="stdout_closed")
+
+        fake_log.warning.assert_called_once()
+        _, kwargs = fake_log.warning.call_args
+        # The crash breadcrumb must travel with the death event.
+        assert "Segmentation fault (core dumped)" in str(kwargs.get("recent_stderr"))
+
+    async def test_start_creates_stderr_drain_task(self, monkeypatch):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from orchestrator.core.settings import get_settings
+        from orchestrator.platform.steam.client import SteamWorkerClient
+
+        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+        get_settings.cache_clear()
+
+        client = SteamWorkerClient()
+
+        eof_stderr = asyncio.StreamReader()
+        eof_stderr.feed_eof()
+        eof_stdout = asyncio.StreamReader()
+        eof_stdout.feed_eof()
+
+        class _FakeProcess:
+            pid = 4321
+            returncode = None
+            stdin = None
+
+        async def _fake_create(*_args, **_kwargs):
+            proc = _FakeProcess()
+            proc.stdout = eof_stdout
+            proc.stderr = eof_stderr
+            return proc
+
+        with patch(
+            "orchestrator.platform.steam.client.asyncio.create_subprocess_exec",
+            new=AsyncMock(side_effect=_fake_create),
+        ):
+            await client.start()
+
+        try:
+            assert isinstance(client._stderr_task, asyncio.Task), (
+                "start() must drain the worker's stderr so it can't fill the pipe "
+                "and so crashes leave a diagnostic breadcrumb"
+            )
+        finally:
+            if client._reader_task is not None:
+                client._reader_task.cancel()
+            if client._stderr_task is not None:
+                client._stderr_task.cancel()
+
+
 class TestRestartStormGuard:
     async def test_max_restart_attempts_exhausted_marks_disabled(self):
         from orchestrator.platform.steam.client import SteamWorkerClient
@@ -471,6 +581,7 @@ class TestRestartStormGuard:
         client._writer = None
         client._reader_task = None
         client._pending = {}
+        client._recent_stderr = __import__("collections").deque(maxlen=50)
 
         for _ in range(3):
             client._on_worker_died(reason="crash")

@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Steam worker stderr is now drained + captured — 2026-06-14
+
+Caught during the UAT-11 live leg: the Steam worker subprocess crashed ~25s into an `app_id=211` manifest fetch with `steam_worker.died reason=stdout_closed` and **zero diagnostics** — the worker's `stderr` was a `PIPE` that nothing ever consumed, so its traceback (the only window into the opaque gevent/steam-next subprocess) was discarded.
+
+- The orchestrator now runs a dedicated task that drains the worker's `stderr` line-by-line for the worker's lifetime, logging each as `steam_worker.stderr` and retaining the last 50 lines in a ring buffer. The `steam_worker.died` (and restart-storm-guard) breadcrumb now carries the last 10 stderr lines, so a crash is self-explaining (Python traceback, or a native `Segmentation fault` line).
+- Also closes a latent stall: an undrained `stderr` PIPE fills its ~64 KiB OS buffer under a chatty worker and blocks the next write — freezing the whole gevent hub mid-fetch. Draining removes that failure mode.
+- **Tests:** `TestWorkerStderrDrain` (ring capture, death-log breadcrumb, drain task wired in `start()`). Full suite **1188 pass**; mypy(strict)/ruff/semgrep clean.
+
 ### Fixed — Docker image entrypoint + console-script shebangs — 2026-06-13
 
 Caught during the UAT-11 live deploy: the runtime container failed to start (`sh: exec: uvicorn: not found`).

@@ -12,6 +12,7 @@ orchestrator's asyncio process.
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import os
 import tempfile
@@ -35,6 +36,13 @@ from orchestrator.platform.steam.protocol import (
 # 10 MiB protocol-level cap (protocol.py) is what enforces, not asyncio's
 # arbitrary internal default. F-UAT6-1.
 _STDOUT_READ_LIMIT = MAX_IPC_LINE_BYTES + 1024
+
+# How many of the worker's most-recent stderr lines to retain for the
+# steam_worker.died breadcrumb. The worker subprocess is opaque (separate
+# gevent venv); its stderr — Python tracebacks, native "Segmentation fault"
+# messages — is the only diagnostic when it dies. Bounded so a chatty worker
+# can't grow this without limit.
+_STDERR_RING_SIZE = 50
 
 _log = structlog.get_logger(__name__)
 
@@ -103,6 +111,10 @@ class SteamWorkerClient:
 
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
+        # Ring of the worker's most-recent stderr lines, so a crash (stdout EOF)
+        # carries the traceback/native-fault message that caused it.
+        self._recent_stderr: collections.deque[str] = collections.deque(maxlen=_STDERR_RING_SIZE)
         self._writer: asyncio.StreamWriter | None = None
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         # The worker handles IPC strictly serially. Single-flight manifest_expand
@@ -152,6 +164,10 @@ class SteamWorkerClient:
         self._writer = self._process.stdin
         # asyncio.subprocess returns Process whose stdin is StreamWriter
         self._reader_task = asyncio.create_task(self._read_loop())
+        # Continuously drain stderr: (1) so the OS pipe buffer (~64 KiB) never
+        # fills and blocks the worker mid-fetch, and (2) so worker tracebacks and
+        # native crash messages are logged and retained for the death breadcrumb.
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
         _log.info("steam_worker.spawned", pid=self._process.pid)
 
     async def stop(self) -> None:
@@ -178,6 +194,8 @@ class SteamWorkerClient:
                 await self._process.wait()
         if self._reader_task is not None:
             self._reader_task.cancel()
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
 
     async def auth_begin(self, username: str, password: str) -> dict[str, Any]:
         return await self._send_and_await(
@@ -262,6 +280,37 @@ class SteamWorkerClient:
         timeout = self._op_timeout_overrides.get(op)
         return await self._await_response(msg_id, timeout=timeout)
 
+    async def _drain_stderr(self) -> None:
+        """Read the worker's stderr line-by-line until EOF.
+
+        Without this the stderr PIPE is never consumed: a chatty worker would
+        fill the ~64 KiB OS buffer and block on its next write (stalling the
+        whole gevent hub), and — worse — when the worker dies we'd have no record
+        of the traceback or native fault that killed it. Each line is logged and
+        kept in `_recent_stderr` so `_on_worker_died` can attach the tail.
+        """
+        if self._process is None or self._process.stderr is None:
+            return
+        stderr = self._process.stderr
+        try:
+            while True:
+                try:
+                    raw = await stderr.readline()
+                except (ValueError, asyncio.LimitOverrunError):
+                    # An over-long stderr line (no newline within the buffer
+                    # limit). Drop it rather than letting the drain task die,
+                    # which would re-expose the pipe-fill stall.
+                    continue
+                if not raw:
+                    return
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line:
+                    continue
+                self._recent_stderr.append(line)
+                _log.warning("steam_worker.stderr", line=line[:500])
+        except asyncio.CancelledError:
+            return
+
     async def _read_loop(self) -> None:
         if self._process is None:
             raise WorkerDiedError("_read_loop called with no process")
@@ -329,9 +378,15 @@ class SteamWorkerClient:
                 "steam_worker.restart_storm_guard_fired",
                 attempts=self._restart_attempts,
                 max=self._max_restart_attempts,
+                recent_stderr=list(self._recent_stderr)[-10:],
             )
         else:
-            _log.warning("steam_worker.died", reason=reason, attempts=self._restart_attempts)
+            _log.warning(
+                "steam_worker.died",
+                reason=reason,
+                attempts=self._restart_attempts,
+                recent_stderr=list(self._recent_stderr)[-10:],
+            )
         # Fail all pending futures so awaiters don't hang.
         for fut in self._pending.values():
             if not fut.done():
