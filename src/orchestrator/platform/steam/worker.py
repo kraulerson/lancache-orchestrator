@@ -33,6 +33,12 @@ from typing import Any, TypedDict  # noqa: E402
 _DEFAULT_SESSION_DIR = "/var/lib/orchestrator/steam_session"
 
 # Steam-next imports (post-monkey-patch).
+# gevent.Timeout subclasses BaseException (by design, so a stack-unwinding
+# timeout can't be swallowed by a bare `except Exception`). steam-next's CDN/CM
+# calls raise it when a depot is slow; left uncaught it escapes every handler and
+# kills the worker process (UAT-11: a 15s CDN timeout → steam_worker.died
+# reason=stdout_closed). We catch it explicitly. Available post-monkey-patch.
+from gevent import Timeout as GeventTimeout  # noqa: E402
 from steam.client import SteamClient  # type: ignore[import-not-found]  # noqa: E402
 from steam.enums import EResult  # type: ignore[import-not-found]  # noqa: E402
 
@@ -349,15 +355,22 @@ def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
                         "raw_path": str(blob_path),
                     }
                 )
-        except Exception:
-            # Failure mid-fetch: the orchestrator gets _err (no manifests list),
-            # so it can never clean these up. Delete them here before re-raising.
+        except (Exception, GeventTimeout):
+            # Failure mid-fetch (including a gevent.Timeout from a slow CDN
+            # depot): the orchestrator gets _err (no manifests list), so it can
+            # never clean these up. Delete them here before re-raising.
             for bp in written_blobs:
                 with contextlib.suppress(OSError):
                     bp.unlink()
             raise
 
         _ok(msg_id, {"manifests": payload, "skipped": skipped})
+    except GeventTimeout as e:
+        # A CDN/CM operation exceeded steam-next's internal timeout. Report a
+        # retryable error rather than silently recording a partial manifest set
+        # as success (the false-empty-library lesson, #109) — and crucially,
+        # never let the BaseException escape and crash the worker.
+        _err(msg_id, "SteamCDNTimeout", f"manifest fetch timed out (app {app_id}): {e}"[:200])
     except Exception as e:
         _err(msg_id, "SteamAPIError", str(e)[:200])
 
@@ -437,7 +450,17 @@ def main() -> int:
         if handler is None:
             _err(msg_id, "UnknownOp", op)
             continue
-        handler(msg_id, req.get("params") or {})
+        try:
+            handler(msg_id, req.get("params") or {})
+        except GeventTimeout as e:
+            # Defense in depth: a gevent.Timeout (BaseException) from any handler
+            # would otherwise unwind past this loop and kill the worker — failing
+            # every subsequent job until a restart. Convert to a retryable error
+            # and keep serving (UAT-11: a 15s CDN timeout crashed the worker).
+            _err(msg_id, "SteamCDNTimeout", f"steam operation timed out: {e}"[:200])
+        except Exception as e:
+            # Last-resort guard: no handler bug may take the worker down.
+            _err(msg_id, "SteamAPIError", f"{type(e).__name__}: {e}"[:200])
     return 0
 
 
