@@ -59,12 +59,22 @@ def worker(monkeypatch):
     client_mod.SteamClient = _FakeSteamClient  # type: ignore[attr-defined]
     enums_mod = types.ModuleType("steam.enums")
     enums_mod.EResult = _EResult  # type: ignore[attr-defined]
+    # gevent stub. gevent.Timeout subclasses BaseException (NOT Exception) by
+    # design, so a bare `except Exception` can't swallow it — faithfully
+    # reproduce that so tests prove the worker catches it explicitly.
+    gevent_mod = types.ModuleType("gevent")
+
+    class _Timeout(BaseException):
+        pass
+
+    gevent_mod.Timeout = _Timeout  # type: ignore[attr-defined]
 
     for name, mod in [
         ("steam", steam),
         ("steam.monkey", monkey),
         ("steam.client", client_mod),
         ("steam.enums", enums_mod),
+        ("gevent", gevent_mod),
     ]:
         monkeypatch.setitem(sys.modules, name, mod)
 
@@ -194,3 +204,67 @@ def test_manifest_fetch_cleans_temp_blobs_on_failure(worker, monkeypatch, tmp_pa
     assert resp["ok"] is False  # the run failed
     leaked = list(tmp_path.glob("blob-*.zst"))
     assert leaked == [], f"leaked temp BLOB files on failure: {leaked}"
+
+
+def test_manifest_fetch_gevent_timeout_does_not_crash_worker(
+    worker, monkeypatch, tmp_path: Path
+) -> None:
+    """UAT-11 live: a slow CDN depot raised gevent.Timeout (a BaseException), which
+    escaped the handler's `except Exception` and KILLED the worker process
+    (steam_worker.died reason=stdout_closed). The handler must catch it and report
+    a clean, retryable SteamCDNTimeout — never let it propagate."""
+    zstd_mod = types.ModuleType("zstandard")
+    zstd_mod.ZstdCompressor = lambda level=3: None  # type: ignore[attr-defined]
+    cdn_mod = types.ModuleType("steam.client.cdn")
+    cdn_mod.CDNClient = lambda client: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "zstandard", zstd_mod)
+    monkeypatch.setitem(sys.modules, "steam.client.cdn", cdn_mod)
+
+    worker._client = _FakeSteamClient()
+
+    class _TimingOutCdn:
+        def get_app_depot_info(self, app_id):
+            return {}
+
+        def get_manifest_request_code(self, app_id, depot_id, gid):
+            # steam-next's internal AsyncResult.get() 15s budget elapsing.
+            raise worker.GeventTimeout(15)
+
+        def get_manifest(self, *a, **k):  # pragma: no cover - never reached
+            raise AssertionError("should not be called")
+
+    worker._cdn_client = _TimingOutCdn()
+    monkeypatch.setattr(
+        worker.enumerate_module, "manifest_gids_for_app", lambda depots, branch: [(1, 11)]
+    )
+    monkeypatch.setattr(worker, "_blob_temp_path", lambda prefix: tmp_path / f"blob-{prefix}.zst")
+
+    # Must NOT raise — that is the crash this test pins.
+    worker._handle_manifest_fetch("m4", {"app_id": "340"})
+
+    resp = worker._sent[-1]
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "SteamCDNTimeout", resp
+
+
+def test_dispatch_loop_survives_handler_gevent_timeout(worker, monkeypatch) -> None:
+    """Defense in depth: even if some handler lets a gevent.Timeout escape, the
+    worker's main() dispatch loop must convert it to an IPC error and keep
+    serving — a single slow op must never take down the worker for every
+    subsequent job until a restart."""
+    import io
+    import json
+
+    def _boom(msg_id, _params):
+        raise worker.GeventTimeout(15)
+
+    monkeypatch.setitem(worker._HANDLERS, "boom.timeout", _boom)
+    line = json.dumps({"msg_id": "m5", "op": "boom.timeout", "params": {}}) + "\n"
+    monkeypatch.setattr(worker.sys, "stdin", io.StringIO(line))
+
+    rc = worker.main()  # must return cleanly, not propagate the BaseException
+
+    assert rc == 0
+    resp = worker._sent[-1]
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "SteamCDNTimeout", resp

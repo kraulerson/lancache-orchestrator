@@ -19,6 +19,22 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Steam worker crash on slow-CDN `gevent.Timeout` — 2026-06-14
+
+Root-caused via the new stderr drain (below) during the UAT-11 live leg: a manifest fetch for a Steam app with a slow CDN depot crashed the worker process (`steam_worker.died reason=stdout_closed`), failing that job **and every subsequent job until restart**. The captured stderr showed `gevent.timeout.Timeout: 15 seconds`.
+
+- **Root cause:** `gevent.Timeout` subclasses `BaseException` (by gevent's design, so a stack-unwinding timeout can't be swallowed by a bare `except Exception`). steam-next's CDN/CM calls raise it when a depot is slow, so it escaped every `except Exception` in the worker handlers **and** the dispatch loop, terminating the process. This is intermittent and CDN-timing-dependent — which is why the same app (211) succeeded in 4s on one attempt and a different app (340) crashed at 15s on another, and why it was never the `#15` manifest-cleanup change (a `BaseException` bypasses try/except regardless of wrapping).
+- **Fix (defense in depth):** `worker.py` now imports `gevent.Timeout` and (1) the `manifest.fetch` handler catches it → clean **retryable** `SteamCDNTimeout` error (it fails the job rather than recording a partial manifest set as success — the `#109` false-empty lesson — and cleans its temp BLOBs), and (2) the worker's `main()` dispatch loop wraps every handler so **no** op's `gevent.Timeout` (or any unexpected exception) can take the worker down.
+- **Tests:** `test_manifest_fetch_gevent_timeout_does_not_crash_worker`, `test_dispatch_loop_survives_handler_gevent_timeout` (the `gevent` stub's `Timeout` subclasses `BaseException` to faithfully reproduce the escape). Full suite **1190 pass**; mypy(strict)/ruff/semgrep clean.
+
+### Fixed — Steam worker stderr is now drained + captured — 2026-06-14
+
+Caught during the UAT-11 live leg: the Steam worker subprocess crashed ~25s into an `app_id=211` manifest fetch with `steam_worker.died reason=stdout_closed` and **zero diagnostics** — the worker's `stderr` was a `PIPE` that nothing ever consumed, so its traceback (the only window into the opaque gevent/steam-next subprocess) was discarded.
+
+- The orchestrator now runs a dedicated task that drains the worker's `stderr` line-by-line for the worker's lifetime, logging each as `steam_worker.stderr` and retaining the last 50 lines in a ring buffer. The `steam_worker.died` (and restart-storm-guard) breadcrumb now carries the last 10 stderr lines, so a crash is self-explaining (Python traceback, or a native `Segmentation fault` line).
+- Also closes a latent stall: an undrained `stderr` PIPE fills its ~64 KiB OS buffer under a chatty worker and blocks the next write — freezing the whole gevent hub mid-fetch. Draining removes that failure mode.
+- **Tests:** `TestWorkerStderrDrain` (ring capture, death-log breadcrumb, drain task wired in `start()`). Full suite **1188 pass**; mypy(strict)/ruff/semgrep clean.
+
 ### Fixed — Docker image entrypoint + console-script shebangs — 2026-06-13
 
 Caught during the UAT-11 live deploy: the runtime container failed to start (`sh: exec: uvicorn: not found`).

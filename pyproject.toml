@@ -75,7 +75,10 @@ warn_unused_configs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["apscheduler.*", "aiosqlite.*"]
+# gevent: installed in the worker venv (stub-less) but not in CI's mypy env, so
+# the missing-import error code differs by environment (import-untyped vs
+# import-not-found). ignore_missing_imports covers both deterministically.
+module = ["apscheduler.*", "aiosqlite.*", "gevent.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
