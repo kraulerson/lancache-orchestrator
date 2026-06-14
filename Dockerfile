@@ -41,6 +41,13 @@ RUN groupadd -r -g 1000 orchestrator \
     && chown orchestrator:orchestrator /var/lib/orchestrator
 
 COPY --from=builder /build/.venv /app/.venv
+# pip console scripts hardcode the build-stage shebang
+# (#!/build/.venv/bin/python), which doesn't exist in the runtime image — so
+# uvicorn AND the bundled `orchestrator-cli` console script fail with ENOENT.
+# Rewrite the shebang of every text script to the final venv path. (Restricting
+# to grep-matched files avoids touching the `python` symlinks / binaries.)
+RUN grep -rlI '^#!/build/\.venv/bin/python' /app/.venv/bin/ \
+    | xargs -r sed -i '1s|/build/\.venv/bin/python|/app/.venv/bin/python|'
 COPY --from=builder /build/src /app/src
 # Steam worker venv at the path Settings.steam_worker_python_path expects.
 COPY --from=builder /build/.venv-steam-worker /opt/orchestrator/venv-steam-worker
@@ -67,4 +74,7 @@ EXPOSE 8765
 # trigger endpoints are NOT exposed to the LAN by default and the non-loopback
 # boot warning only fires when an operator deliberately opts in (UAT-11 F-INT-3).
 # For LAN access, run with host networking or set ORCH_API_HOST=0.0.0.0.
-ENTRYPOINT ["sh", "-c", "exec uvicorn orchestrator.api.main:app --host \"${ORCH_API_HOST:-127.0.0.1}\" --port \"${ORCH_API_PORT:-8765}\""]
+# `python -m uvicorn` (not the `uvicorn` console script) so the entrypoint is
+# independent of the console-script shebang; binds ORCH_API_HOST, default
+# loopback (UAT-11 F-INT-3).
+ENTRYPOINT ["sh", "-c", "exec python -m uvicorn orchestrator.api.main:app --host \"${ORCH_API_HOST:-127.0.0.1}\" --port \"${ORCH_API_PORT:-8765}\""]

@@ -19,6 +19,13 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Docker image entrypoint + console-script shebangs — 2026-06-13
+
+Caught during the UAT-11 live deploy: the runtime container failed to start (`sh: exec: uvicorn: not found`).
+
+- The venv is built at `/build/.venv` and `COPY`'d to `/app/.venv`, so every pip console script hardcodes a `#!/build/.venv/bin/python` shebang that doesn't exist in the runtime image — breaking both the `uvicorn` entrypoint and the **bundled `orchestrator-cli` console script** (it would `ENOENT` inside the container). The Dockerfile now rewrites those shebangs to `/app/.venv/bin/python` after the copy.
+- The entrypoint now runs `python -m uvicorn` (shebang-independent) rather than the `uvicorn` console script, while keeping the `ORCH_API_HOST` loopback default from F-INT-3.
+
 ### Fixed — UAT-11 remediation — 2026-06-13
 
 Remediation of the UAT-11 findings (automated PASS; exploratory + integration legs). All fixed test-first.
