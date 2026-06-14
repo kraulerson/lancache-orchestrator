@@ -70,3 +70,23 @@ def test_entrypoint_defaults_to_loopback_not_hardcoded_0_0_0_0():
     assert '"--host", "0.0.0.0"' not in entry
     assert "ORCH_API_HOST" in entry
     assert "127.0.0.1" in entry  # the secure default
+
+
+def test_entrypoint_uses_python_m_uvicorn_not_console_script():
+    """The venv is copied build->runtime, so the `uvicorn` console-script shebang
+    is broken; the entrypoint must invoke `python -m uvicorn` (shebang-independent)
+    so the container actually starts (caught live, UAT-11)."""
+    text = _dockerfile_text()
+    entry = next(line for line in text.splitlines() if "uvicorn" in line and "ENTRYPOINT" in line)
+    assert "python -m uvicorn" in entry
+
+
+def test_venv_console_script_shebangs_rewritten_to_runtime_path():
+    """The copied venv's console scripts (incl. the bundled `orchestrator-cli`)
+    hardcode the build-stage `#!/build/.venv/bin/python` shebang, which doesn't
+    exist in the runtime image. The Dockerfile must rewrite them to /app/.venv so
+    `orchestrator-cli` works inside the container (caught live, UAT-11)."""
+    text = _dockerfile_text()
+    assert "/build/.venv/bin/python" in text  # the broken shebang it rewrites
+    # rewritten to the runtime path via sed over the matching scripts
+    assert "sed" in text and "/app/.venv/bin/python" in text
