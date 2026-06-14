@@ -102,3 +102,37 @@ class TestReaper:
         own 200-char truncation convention (jobs.error). The constant
         itself is well under, but assert the contract."""
         assert len(REAPER_ERROR_MESSAGE) <= 200
+
+
+async def _insert_game(pool, *, status="downloading", app_id="1"):
+    await pool.execute_write(
+        "INSERT INTO games (platform, app_id, title, status) VALUES ('steam', ?, 'G', ?)",
+        (app_id, status),
+    )
+    row = await pool.read_one("SELECT id FROM games ORDER BY id DESC LIMIT 1")
+    return row["id"]
+
+
+class TestGameStatusReaper:
+    """UAT-11 F-INT-1: a prefill cancelled by the per-job timeout (CancelledError
+    bypasses the handler's `except Exception` reset) or killed by a crash leaves
+    the game stuck 'downloading' forever. The boot reaper recovers it."""
+
+    async def test_reaps_orphaned_downloading_game(self, pool):
+        from orchestrator.jobs.reaper import reap_orphaned_game_status
+
+        gid = await _insert_game(pool, status="downloading")
+        n = await reap_orphaned_game_status(pool)
+        assert n == 1
+        row = await pool.read_one("SELECT status, last_error FROM games WHERE id=?", (gid,))
+        assert row["status"] == "failed"
+        assert row["last_error"]
+
+    async def test_leaves_non_transient_statuses_untouched(self, pool):
+        from orchestrator.jobs.reaper import reap_orphaned_game_status
+
+        gid = await _insert_game(pool, status="up_to_date", app_id="2")
+        n = await reap_orphaned_game_status(pool)
+        assert n == 0
+        row = await pool.read_one("SELECT status FROM games WHERE id=?", (gid,))
+        assert row["status"] == "up_to_date"

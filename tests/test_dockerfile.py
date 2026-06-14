@@ -58,3 +58,15 @@ def test_worker_venv_copied_to_settings_path():
         f"(Settings.steam_worker_python_path={worker_python})"
     )
     assert "/opt/orchestrator/venv-steam-worker" in text
+
+
+def test_entrypoint_defaults_to_loopback_not_hardcoded_0_0_0_0():
+    """UAT-11 F-INT-3: the image must not hardcode --host 0.0.0.0 (which exposes
+    the trigger endpoints to the LAN and fires the non-loopback warning every
+    boot). It binds ORCH_API_HOST, defaulting to loopback; operators opt into
+    0.0.0.0 explicitly."""
+    text = _dockerfile_text()
+    entry = next(line for line in text.splitlines() if "uvicorn" in line and "ENTRYPOINT" in line)
+    assert '"--host", "0.0.0.0"' not in entry
+    assert "ORCH_API_HOST" in entry
+    assert "127.0.0.1" in entry  # the secure default

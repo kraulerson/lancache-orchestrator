@@ -15,6 +15,7 @@ for the full design rationale.
 from __future__ import annotations
 
 import os
+import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -384,7 +385,14 @@ def get_settings() -> Settings:
     calls return the cached instance. Tests clear via
     `get_settings.cache_clear()` in the `_isolated_env` autouse fixture.
     """
-    return Settings()
+    # The Docker-secrets dir is expected to be absent off the deployment host
+    # (e.g. a dev laptop or the CLI). pydantic-settings warns about the missing
+    # `secrets_dir` on every construction — noise that makes an operator think
+    # something is wrong. Suppress just that warning (UAT-11 S11-E-07); a genuine
+    # missing token still surfaces as a clean error.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r'directory ".*" does not exist')
+        return Settings()
 
 
 def reload_settings() -> Settings:

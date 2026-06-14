@@ -118,3 +118,25 @@ def test_get_health_tolerates_503_degraded_body():
 
     body = _client(handler).get_health()
     assert body["status"] == "degraded"
+
+
+def test_401_surfaces_server_detail_not_just_token_hint():
+    """A 401 during `auth steam` (valid ORCH_TOKEN, wrong Steam password) returns
+    the server's detail; the CLI must surface it, not the misleading hardcoded
+    'check ORCH_TOKEN' (UAT-11 S11-E-03)."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "authentication failed: bad_credentials"})
+
+    with pytest.raises(AuthError, match="bad_credentials"):
+        _client(handler).get("/api/v1/platforms")
+
+
+def test_401_without_detail_falls_back_to_token_hint():
+    """A bare 401 (no detail) still hints at ORCH_TOKEN."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    with pytest.raises(AuthError, match="ORCH_TOKEN"):
+        _client(handler).get("/api/v1/games")

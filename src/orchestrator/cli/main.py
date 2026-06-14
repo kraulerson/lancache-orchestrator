@@ -44,3 +44,9 @@ cli.add_command(config.config)
 def main() -> None:
     """Console-script entry point (`orchestrator-cli`)."""
     cli()
+
+
+if __name__ == "__main__":
+    # So `python -m orchestrator.cli.main ...` works too, not just the installed
+    # console script (UAT-11 S11-E-09).
+    main()

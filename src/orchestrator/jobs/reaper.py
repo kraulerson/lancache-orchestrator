@@ -45,3 +45,29 @@ async def reap_running_jobs(pool: Pool) -> int:
     else:
         _log.info("jobs.reaper.no_orphans")
     return rowcount
+
+
+GAME_REAPER_ERROR_MESSAGE = (
+    "prefill interrupted (orchestrator restart or job timeout) — re-run prefill"
+)
+
+
+async def reap_orphaned_game_status(pool: Pool) -> int:
+    """Reset games stuck in the transient ``'downloading'`` status to ``'failed'``.
+
+    A prefill sets the game ``'downloading'`` and resets it on completion or
+    failure — but the per-job max-runtime timeout cancels the handler via
+    ``CancelledError`` (a ``BaseException``), which bypasses the handler's
+    ``except Exception`` reset, and a hard crash skips it entirely. Either way the
+    game is left ``'downloading'`` forever with nothing to recover it (UAT-11
+    F-INT-1). Run this at boot AFTER ``reap_running_jobs`` — no prefill is in
+    flight then, so any ``'downloading'`` game is genuinely orphaned. Returns the
+    number of rows touched.
+    """
+    rowcount = await pool.execute_write(
+        "UPDATE games SET status='failed', last_error=? WHERE status='downloading'",
+        (GAME_REAPER_ERROR_MESSAGE,),
+    )
+    if rowcount > 0:
+        _log.warning("jobs.reaper.reaped_orphan_downloading_games", count=rowcount)
+    return rowcount

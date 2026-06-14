@@ -6,8 +6,8 @@
     "started_at": null
   },
   "uat_session": {
-    "session_id": 10,
-    "step": 9,
+    "session_id": 11,
+    "step": 7,
     "steps_completed": [
       "agents_dispatched",
       "template_generated",
@@ -15,11 +15,9 @@
       "results_received",
       "completeness_verified",
       "bugs_consolidated",
-      "triage_complete",
-      "remediation_complete",
-      "gate_passed"
+      "triage_complete"
     ],
-    "started_at": "2026-06-04T19:27:54Z"
+    "started_at": "2026-06-13T23:18:30Z"
   },
   "phase3_validation": {
     "steps_completed": [],

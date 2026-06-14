@@ -19,6 +19,19 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — UAT-11 remediation — 2026-06-13
+
+Remediation of the UAT-11 findings (automated PASS; exploratory + integration legs). All fixed test-first.
+
+- **Fixed (cli, SEV-2):** a missing `ORCH_TOKEN` produced a raw ~15-frame traceback from the in-process `config`/`db` commands — `handles_local_errors` caught `ValidationError` but not the scrubbed plain `ValueError` that `Settings.__init__` re-raises for the missing token. Now catches `ValueError` (which subsumes `ValidationError`). (S11-E-01)
+- **Fixed (jobs, F-INT-1 — regression from the per-job timeout):** the max-runtime timeout cancels the handler via `CancelledError` (a `BaseException`), which bypasses the prefill/validate "never leave the game `downloading`" guard — leaving the game stuck. Now the worker (which is *not* cancelled) resets the game on timeout, and a new boot-time `reap_orphaned_game_status` reaper recovers any game left `downloading` by a crash. (F-INT-1)
+- **Data Model:** migration `0007_jobs_manifest_fetch_unique` adds the in-flight UNIQUE index `manifest_fetch` was missing (the last job kind without one); `manifest_trigger` now `INSERT ... ON CONFLICT DO NOTHING`. (F-INT-5)
+- **Security/Deploy (F-INT-3):** the Dockerfile no longer hardcodes `--host 0.0.0.0` — it binds `ORCH_API_HOST`, defaulting to loopback (`127.0.0.1`), so the trigger endpoints aren't exposed to the LAN by default and the non-loopback boot warning only fires when intentionally opted in.
+- **Fixed (cli, UX):** wrong Steam/Epic credentials now surface the server's 401 detail instead of the misleading "check ORCH_TOKEN" (S11-E-03); `--state`/`--kind`/`--status` are `click.Choice`-validated so a typo is rejected up front instead of silently returning an empty table (S11-E-04); `game <id>` rejects non-positive ids with an actionable message (S11-E-05); `config show` no longer over-redacts URL fields like `epic_token_url` and auto-sizes the key column (S11-E-06/10); the noisy `/run/secrets does not exist` warning is suppressed on the operator path (S11-E-07); `db vacuum` errors name the DB path (S11-E-08); `python -m orchestrator.cli.main` works via a `__main__` guard (S11-E-09); `--limit` help documents the 500 cap (S11-E-11).
+- **Documentation:** new **Operator CLI** section in the README (invocation, `ORCH_TOKEN`, commands, exit-code contract) and the env-var table now lists the validation-sweep, `ORCH_JOB_MAX_RUNTIME_SEC`, and `ORCH_STEAM_LICENSE_WAIT_SEC` settings. (F-INT-4 + CLI-undocumented gap)
+- **Deferred to follow-up issues:** F-INT-2 (writer-connection self-heal — surfaces via health→503) and F-INT-6 (free the serial steam worker on a timeout-cancel).
+- **Tests:** regression tests across `tests/cli/`, `tests/jobs/`, `tests/db/`, `tests/test_dockerfile.py`. Full suite **1183 pass**; mypy(strict)/ruff/gitleaks/semgrep clean.
+
 ### Added — jobs worker operability (eval quick-wins) — 2026-06-13
 
 Two operability improvements to the jobs worker, from the post-audit codebase eval.

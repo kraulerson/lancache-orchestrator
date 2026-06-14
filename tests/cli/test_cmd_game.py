@@ -65,3 +65,17 @@ def test_game_manifest_triggers(mock):
 
     r = mock(["game", "manifest", "5"], handler)
     assert r.exit_code == 0 and "52" in r.output
+
+
+def test_list_invalid_status_rejected_with_choices(cli_invoke):
+    """Invalid --status must be rejected client-side, not silently empty (S11-E-04)."""
+    r = cli_invoke(["game", "list", "--status", "uptodate"])  # valid is 'up_to_date'
+    assert r.exit_code == 2
+    assert "up_to_date" in (r.output + (r.stderr or ""))
+
+
+def test_show_rejects_non_positive_id(cli_invoke):
+    """game show 0 must give an actionable 'positive integer' message (S11-E-05)."""
+    r = cli_invoke(["game", "show", "0"])
+    assert r.exit_code == 2
+    assert "positive" in (r.output + (r.stderr or "")).lower()

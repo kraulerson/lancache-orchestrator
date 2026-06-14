@@ -12,7 +12,6 @@ from typing import Any, cast
 
 import aiosqlite  # re-exports sqlite3's exception classes (aiosqlite.Error is sqlite3.Error)
 import click
-from pydantic import ValidationError
 
 from orchestrator.cli import client as _client
 from orchestrator.db.migrate import MigrationError
@@ -55,17 +54,22 @@ def handles_local_errors[F: Callable[..., Any]](fn: F) -> F:
     clean exit 1 + ``✗`` message instead of a raw traceback.
 
     These commands don't hit the API, so ``handles_api_errors`` doesn't apply.
-    They call ``get_settings()`` first (which raises pydantic ``ValidationError``
-    on a malformed ``ORCH_*`` env var) and then run migrations / open SQLite —
-    none of which are in ``handles_api_errors``'s backstop tuple. This decorator
-    honours the same F11 clean-error contract for them.
+    They call ``get_settings()`` first — which raises pydantic ``ValidationError``
+    on a malformed ``ORCH_*`` env var, OR a scrubbed plain ``ValueError`` when the
+    required ``ORCH_TOKEN`` is missing (``Settings.__init__`` re-raises it as a
+    ``ValueError`` to keep the secret out of the message) — and then run
+    migrations / open SQLite. None of these are in ``handles_api_errors``'s
+    backstop tuple. This decorator honours the same F11 clean-error contract for
+    them. ``ValueError`` covers the missing-token case (UAT-11 S11-E-01).
     """
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return fn(*args, **kwargs)
-        except (ValidationError, MigrationError, aiosqlite.Error, OSError) as e:
+        except (ValueError, MigrationError, aiosqlite.Error, OSError) as e:
+            # ValidationError is a subclass of ValueError in pydantic v2, so
+            # ValueError covers both the malformed-value and missing-token paths.
             click.echo(f"✗ {e}", err=True)
             raise SystemExit(1) from e
 

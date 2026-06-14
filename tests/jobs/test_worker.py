@@ -299,6 +299,45 @@ class TestWorkerLoopDispatch:
         assert row["state"] == "failed"
         assert "max runtime" in (row["error"] or "").lower()
 
+    async def test_timed_out_prefill_resets_game_from_downloading(self, pool):
+        """UAT-11 F-INT-1: when the timeout cancels a prefill handler, the game it
+        left 'downloading' must be reset by the worker (which is NOT cancelled, so
+        the write completes) — not left stuck forever."""
+        await pool.execute_write(
+            "INSERT INTO games (platform, app_id, title, status) "
+            "VALUES ('steam', '77', 'G', 'downloading')"
+        )
+        gid = int((await pool.read_one("SELECT id FROM games ORDER BY id DESC LIMIT 1"))["id"])
+        await pool.execute_write(
+            "INSERT INTO jobs (kind, game_id, platform, state, source) "
+            "VALUES ('prefill', ?, 'steam', 'queued', 'api')",
+            (gid,),
+        )
+
+        async def hung(row, deps):
+            await asyncio.Event().wait()  # never returns
+
+        clear()
+        register("prefill", hung)
+
+        shutdown = asyncio.Event()
+        deps = Deps(pool=pool, steam_client=None)
+
+        async def stopper():
+            for _ in range(300):
+                g = await pool.read_one("SELECT status FROM games WHERE id=?", (gid,))
+                if g and g["status"] != "downloading":
+                    break
+                await asyncio.sleep(0.02)
+            shutdown.set()
+
+        await asyncio.gather(
+            worker_loop(deps, shutdown=shutdown, poll_interval_sec=0.02, job_max_runtime_sec=0.1),
+            stopper(),
+        )
+        g = await pool.read_one("SELECT status FROM games WHERE id=?", (gid,))
+        assert g["status"] == "failed"  # not stuck 'downloading'
+
     async def test_loop_exits_promptly_on_shutdown(self, pool):
         """Empty queue + shutdown.set() should exit within one poll interval."""
         clear()

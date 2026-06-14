@@ -62,6 +62,11 @@ The bearer token (`orchestrator_token`) is the only required field. Every other 
 | `ORCH_LANCACHE_PROBE_CACHE_TTL_SEC` | float (0..600) | `30.0` | TTL for cached probe result; 0 disables cache |
 | `ORCH_SCHEDULER_ENABLED` | bool | `true` | Disable scheduler subsystem (`/health.scheduler_running` reports `false`, 503) |
 | `ORCH_SCHEDULER_LIBRARY_SYNC_INTERVAL_SEC` | int (60..86400) | `21600` | Library_sync schedule cadence (default 6 h) |
+| `ORCH_VALIDATION_SWEEP_ENABLED` | bool | `true` | Weekly F13 validation sweep (eviction-drift detection) |
+| `ORCH_VALIDATION_SWEEP_CRON` | 5-field cron (UTC) | `0 3 * * 0` | Sweep schedule (default Sundays 03:00 UTC) |
+| `ORCH_SWEEP_BATCH_SIZE` | int (≥1) | `10` | Games validated per batch during a sweep |
+| `ORCH_JOB_MAX_RUNTIME_SEC` | float (≥0) | `21600` (6 h) | Per-job wall-clock budget; a wedged handler is cancelled + the job failed (self-heal). `0` disables |
+| `ORCH_STEAM_LICENSE_WAIT_SEC` | float | `60` | How long the worker waits for the Steam license list before signalling a retryable timeout |
 
 **DB pool memory baseline:** `(pool_readers + 1) × db_cache_size_kib + db_mmap_size_bytes`. Default config = `9 × 16 MiB + 256 MiB ≈ 400 MiB` resident. On memory-constrained hardware (e.g. DXP4800 NAS at 4 GB total), halve `ORCH_POOL_READERS` and `ORCH_DB_CACHE_SIZE_KIB` together — yields a `5 × 8 MiB + 256 MiB ≈ 296 MiB` profile. See [`FEATURES.md` — Feature 4](FEATURES.md) and [ADR-0011](docs/ADR%20documentation/0011-db-pool-architecture.md).
 
@@ -88,6 +93,33 @@ The `"*"` wildcard is **accepted but warned** at boot (`config.cors_wildcard` lo
 ### Production secret handling
 
 The bearer token should be deployed as a **Docker secret** mounted at `/run/secrets/orchestrator_token`, not as an env var. The settings module also supports `ORCH_TOKEN` as an env var for development; if both are set in production, a `config.secret_shadowed_by_env` warning is logged so you can diagnose.
+
+## Operator CLI (`orchestrator-cli`)
+
+A Click-based CLI (installed as the `orchestrator-cli` console script, bundled in the container image) drives the loopback REST API with the bearer token. It is the supported way for an operator to authenticate platforms and trigger/inspect work without crafting HTTP calls.
+
+**Setup** — the CLI reads the same `ORCH_TOKEN` the server uses, plus an optional `ORCH_API_URL`:
+
+```bash
+export ORCH_TOKEN='<your 32+ char token>'      # required — same token as the server
+export ORCH_API_URL='http://127.0.0.1:8765'    # optional, this is the default
+orchestrator-cli status                         # or: python -m orchestrator.cli.main status
+```
+
+**Commands**
+
+| Command | What it does |
+|---------|--------------|
+| `status` | Overall health + per-platform auth (colorblind-safe icon+text) |
+| `config show` | Effective settings, secrets redacted (in-process) |
+| `auth steam` / `auth epic` / `auth status` | Interactive Steam (2FA) / Epic (OAuth code) login; password/codes are prompted hidden and never echoed |
+| `library sync [--platform steam\|epic]` | Enqueue a library sync |
+| `game list [--platform --status --limit]` | List games (filters are validated against the closed enum sets) |
+| `game show <id>` / `game prefill\|validate\|manifest <id>` | Inspect or act on one game (ids are positive integers) |
+| `jobs [--kind --state --limit]` | List jobs |
+| `db migrate` / `db vacuum` | Local DB maintenance (in-process; not exposed over HTTP) |
+
+**Exit codes** (for scripting): `0` success · `2` API unreachable · `3` authentication failed · `1` any other error. Operator errors surface as a single `✗ <message>` line, never a raw traceback.
 
 ## Running the API (BL5+)
 
