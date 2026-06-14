@@ -66,3 +66,19 @@ def test_db_vacuum_on_non_sqlite_file_exits_1_cleanly(tmp_path, monkeypatch):
     assert r.exit_code == 1
     assert isinstance(r.exception, SystemExit)
     assert "✗" in r.stderr
+
+
+def test_db_vacuum_error_names_the_path(tmp_path, monkeypatch):
+    """db vacuum errors must name the offending DB path (like db migrate), not
+    just the bare sqlite message (UAT-11 S11-E-08)."""
+    notdb = tmp_path / "garbage.db"
+    notdb.write_text("this is not a sqlite database")
+    monkeypatch.setenv("ORCH_DATABASE_PATH", str(notdb))
+    monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
+    from orchestrator.core.settings import get_settings
+
+    get_settings.cache_clear()
+    r = CliRunner().invoke(cli, ["db", "vacuum"])
+    get_settings.cache_clear()
+    assert r.exit_code == 1
+    assert str(notdb) in r.stderr

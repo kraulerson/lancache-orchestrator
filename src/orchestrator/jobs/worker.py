@@ -170,6 +170,17 @@ async def worker_loop(
                 if timed_out:
                     err = f"job exceeded max runtime of {job_max_runtime_sec}s (cancelled)"
                     event = "jobs.handler.timed_out"
+                    # The handler was cancelled mid-flight — CancelledError
+                    # bypasses its own 'downloading' -> 'failed' reset. The worker
+                    # is NOT cancelled, so reset the game here (UAT-11 F-INT-1).
+                    game_id = row.get("game_id")
+                    if game_id is not None:
+                        with contextlib.suppress(Exception):
+                            await deps.pool.execute_write(
+                                "UPDATE games SET status='failed', last_error=? "
+                                "WHERE id=? AND status='downloading'",
+                                (err, game_id),
+                            )
                 else:
                     err = f"{type(e).__name__}: {str(e)[: JOB_ERROR_TRUNCATE - 50]}"
                     event = "jobs.handler.failed"

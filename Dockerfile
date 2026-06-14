@@ -63,4 +63,8 @@ USER orchestrator
 
 EXPOSE 8765
 
-ENTRYPOINT ["uvicorn", "orchestrator.api.main:app", "--host", "0.0.0.0", "--port", "8765"]
+# Bind ORCH_API_HOST, defaulting to loopback (matches Settings.api_host) so the
+# trigger endpoints are NOT exposed to the LAN by default and the non-loopback
+# boot warning only fires when an operator deliberately opts in (UAT-11 F-INT-3).
+# For LAN access, run with host networking or set ORCH_API_HOST=0.0.0.0.
+ENTRYPOINT ["sh", "-c", "exec uvicorn orchestrator.api.main:app --host \"${ORCH_API_HOST:-127.0.0.1}\" --port \"${ORCH_API_PORT:-8765}\""]

@@ -40,5 +40,10 @@ async def _vacuum(db_path: str) -> None:
 def db_vacuum() -> None:
     """Reclaim free pages with VACUUM."""
     db_path = str(get_settings().database_path)
-    asyncio.run(_vacuum(db_path))
+    try:
+        asyncio.run(_vacuum(db_path))
+    except (aiosqlite.Error, OSError) as e:
+        # Name the offending path, like `db migrate` does (UAT-11 S11-E-08) —
+        # the bare sqlite "unable to open database file" omits it.
+        raise OSError(f"failed to vacuum database at {db_path}: {e}") from e
     output.success(f"vacuum complete ({db_path}).")

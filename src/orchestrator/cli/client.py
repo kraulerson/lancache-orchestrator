@@ -66,7 +66,15 @@ class OrchClient:
             # too so a fat-fingered --url is a clean exit 2, not a raw traceback.
             raise ApiUnreachableError(f"orchestrator API not reachable at {self._base_url}") from e
         if resp.status_code == 401:
-            raise AuthError("authentication failed — check ORCH_TOKEN")
+            # Surface the server's detail when present (e.g. a wrong Steam/Epic
+            # credential during `auth`), not the misleading hardcoded ORCH_TOKEN
+            # hint — the bearer token was accepted in that case (UAT-11 S11-E-03).
+            detail = ""
+            try:
+                detail = str(resp.json().get("detail", ""))
+            except Exception:
+                detail = ""
+            raise AuthError(detail or "authentication failed — check ORCH_TOKEN")
         if not (200 <= resp.status_code < 300) and resp.status_code not in ok_extra:
             detail = ""
             try:
