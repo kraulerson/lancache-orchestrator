@@ -927,6 +927,30 @@ class Pool:
         async with self._writer_lock:
             if self._writer is None:
                 raise PoolClosedError(state="closed")
+            if not self._writer_healthy:
+                # Heal-on-checkout (#152 / F-INT-2): a replacement storm or a
+                # failed replacement open leaves `self._writer` pointing at a dead
+                # connection with `_writer_healthy=False` and nothing ever
+                # re-opens it — so every write failed until a process restart.
+                # Mirror the reader heal-on-acquire: open a fresh writer here so
+                # writes recover once the fault clears. If the open itself fails,
+                # raise PoolError (loud → 503) rather than yielding a dead
+                # connection. Safe under `_writer_lock` (held for the whole
+                # checkout, so a concurrent `_replace_connection` writer swap
+                # can't race this).
+                try:
+                    new_conn = await self._open_connection(role="writer")
+                except Exception as e:
+                    raise PoolError(
+                        "writer unavailable: replacement connection could not be "
+                        f"opened ({type(e).__name__})"
+                    ) from e
+                old = self._writer
+                self._writer = new_conn
+                self._writer_healthy = True
+                # Best-effort close of the old (possibly already-closed) writer.
+                self._spawn_bg(self._safe_close(old, role="writer"))
+                _log.warning("pool.writer_healed")
             try:
                 yield self._writer
             except (aiosqlite.OperationalError, ConnectionLostError) as e:
