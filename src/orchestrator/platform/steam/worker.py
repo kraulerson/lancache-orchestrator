@@ -262,8 +262,8 @@ def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
     """Fetch ALL depot manifests for a Steam app (BL12, post-spike-a3).
 
     Constructs a CDNClient lazily, calls `cdn.get_manifests(app_id)`,
-    extracts {depot_id, manifest_gid, name, total_bytes, chunk_count,
-    raw_b64} per manifest, returns the list.
+    extracts {depot_id, manifest_gid, total_bytes, chunk_count, raw_path}
+    per manifest, returns the list.
 
     Per spike-a3:
     - `CDNDepotManifest.cdn_client` back-reference prevents pickle —
@@ -341,17 +341,34 @@ def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
                 blob_path.write_bytes(compressed)
                 written_blobs.append(blob_path)
 
-                chunk_count = 0
-                for mapping in mfst.payload.mappings:
-                    chunk_count += len(mapping.chunks)
+                # #121: report the manifest's UNIQUE chunk count (protobuf
+                # ContentManifestMetadata.unique_chunks) — what F7's SHA-deduped
+                # validate counts — not the sum of per-file mapping refs, which
+                # double-counts content-deduped chunks (operator saw "1820" here
+                # vs the validator's "1100"). `unique_chunks` legitimately being 0
+                # (an empty depot) is distinct from the field being ABSENT (a
+                # steam-next rename / older protobuf): only the latter falls back
+                # to the summed refs, and it warns to stderr so a silent revert to
+                # the double-counting bug is visible rather than masked.
+                raw_unique = getattr(mfst.metadata, "unique_chunks", None)
+                if raw_unique is None:
+                    unique_chunks = sum(len(mapping.chunks) for mapping in mfst.payload.mappings)
+                    print(  # noqa: T201 — surfaced via the orchestrator's stderr drain
+                        f"manifest_fetch: metadata.unique_chunks missing for depot "
+                        f"{mfst.depot_id}; chunk_count fell back to summed mapping refs",
+                        file=sys.stderr,
+                    )
+                else:
+                    unique_chunks = int(raw_unique or 0)
 
+                # #123.2: `name` was sent over IPC but the orchestrator handler
+                # never consumes it — drop the dead field.
                 payload.append(
                     {
                         "depot_id": int(mfst.depot_id),
                         "manifest_gid": int(mfst.gid),
-                        "name": str(getattr(mfst, "name", "") or ""),
                         "total_bytes": int(mfst.metadata.cb_disk_original or 0),
-                        "chunk_count": chunk_count,
+                        "chunk_count": unique_chunks,
                         "raw_path": str(blob_path),
                     }
                 )
