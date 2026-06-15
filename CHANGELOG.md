@@ -19,6 +19,13 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — `GET /api/v1/manifests` now exposes `depot_id` (#127) — 2026-06-15
+
+UAT-9 live finding. Migration `0003` added `manifests.depot_id` (populated correctly by the BL12 manifest fetch — verified live), but the BL9 read endpoint's `SELECT` and `ManifestResponse` model predated the column, so every row came back `depot_id: null`. The DB was correct; this was purely a read-side exposure gap (F7's validator reads the DB directly, so it was unaffected).
+
+- `depot_id` is now in the manifests `SELECT`, the `ManifestResponse` model (`int | None` — nullable for rows written before the column existed), and the row mapping.
+- **Tests:** `TestManifestDepotIdExposure` (a stored `depot_id` is returned; a NULL one stays `null`); the per-manifest field-set test now includes `depot_id`. Full suite **1191 pass**; mypy(strict)/ruff/semgrep clean.
+
 ### Fixed — Steam worker crash on slow-CDN `gevent.Timeout` — 2026-06-14
 
 Root-caused via the new stderr drain (below) during the UAT-11 live leg: a manifest fetch for a Steam app with a slow CDN depot crashed the worker process (`steam_worker.died reason=stdout_closed`), failing that job **and every subsequent job until restart**. The captured stderr showed `gevent.timeout.Timeout: 15 seconds`.
