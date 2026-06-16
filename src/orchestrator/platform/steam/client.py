@@ -108,6 +108,13 @@ class SteamWorkerClient:
         self._max_restart_attempts = settings.steam_worker_max_restart_attempts
         self._restart_attempts = 0
         self._disabled = False
+        # #153: an op that times out / is cancelled leaves the serial worker
+        # wedged on the abandoned op. We respawn it before the NEXT op so that op
+        # starts clean. `_intentional_restart` suppresses the EOF death callback
+        # during that deliberate SIGKILL so a wedge-restart doesn't trip the
+        # restart-storm guard.
+        self._needs_restart = False
+        self._intentional_restart = False
 
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
@@ -123,6 +130,14 @@ class SteamWorkerClient:
         # running — which spuriously timed out trailing requests. Uncontended for
         # the single-caller paths (F7 validate, F5 prefill).
         self._manifest_expand_lock = asyncio.Lock()
+        # #153: serialize the wedge-restart + send. The client is shared between
+        # the jobs-worker loop and the API auth endpoints (one event loop), so
+        # restart-on-wedge mutates shared state (`_process`/`_writer`/`_pending`/
+        # `_needs_restart`) that two concurrent ops could otherwise race —
+        # double-killing, sending to a torn-down writer, or skipping a restart.
+        # Held only around the restart-check + `_send`, NOT the long
+        # `_await_response`, so responses still correlate concurrently by msg_id.
+        self._ipc_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Spawn the worker subprocess. Idempotent (no-op if already running)."""
@@ -276,9 +291,86 @@ class SteamWorkerClient:
             self._pending.pop(msg_id, None)
 
     async def _send_and_await(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
-        msg_id = await self._send(op, params)
-        timeout = self._op_timeout_overrides.get(op)
-        return await self._await_response(msg_id, timeout=timeout)
+        # #153: serialize the restart-check + send under `_ipc_lock` so two
+        # concurrent ops (e.g. an API auth racing a job) can't race the wedge
+        # restart's shared-state teardown. The lock is released before the long
+        # `_await_response`, so multiple ops still await concurrently (correlated
+        # by msg_id) — matching the worker's serial processing.
+        msg_id: str | None = None
+        try:
+            async with self._ipc_lock:
+                # `shutdown` is exempt: stop() routes it through here, and a
+                # wedged worker mustn't restart itself during teardown.
+                if op != "shutdown" and self._needs_restart:
+                    await self._restart_after_wedge()
+                msg_id = await self._send(op, params)
+            timeout = self._op_timeout_overrides.get(op)
+            return await self._await_response(msg_id, timeout=timeout)
+        except (IPCTimeoutError, asyncio.CancelledError):
+            # The op timed out (IPC budget) or was cancelled (job-runtime
+            # timeout) — anywhere, including mid-send under the lock. The worker
+            # may now be wedged on the abandoned op, so flag it for a clean
+            # respawn before the next op (#153). `shutdown` is exempt. Also drop
+            # the pending future if `_await_response` never ran to pop it (cancel
+            # during `_send`), so it doesn't leak.
+            if op != "shutdown":
+                self._needs_restart = True
+            if msg_id is not None:
+                self._pending.pop(msg_id, None)
+            raise
+
+    async def _restart_after_wedge(self) -> None:
+        """Respawn the worker after a wedge (#153). Call ONLY while holding
+        `_ipc_lock`.
+
+        SIGKILLs the wedged subprocess and starts a fresh one. Per the operator
+        decision this LOSES the logged-in Steam session (the worker doesn't
+        auto-relogin), so the next credentialed op returns NotAuthenticated and
+        the orchestrator's auth-flip prompts a re-auth — an accepted cost vs. a
+        worker stuck behind an unkillable op. The deliberate kill is NOT counted
+        against the restart-storm guard (`_intentional_restart`).
+        """
+        # Double-check under the lock: a second caller that queued behind the
+        # first's restart must NOT restart again (the first already cleared it).
+        if not self._needs_restart:
+            return
+        proc = self._process
+        _log.warning("steam_worker.restart_after_wedge", pid=getattr(proc, "pid", None))
+        self._intentional_restart = True
+        try:
+            if proc is not None and proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                # Bounded: a truly unkillable (D-state) process must not hang the
+                # restart forever (and, under the lock, every other op behind it).
+                with contextlib.suppress(TimeoutError, Exception):
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+            # Cancel + await the old reader/stderr tasks BEFORE clearing the
+            # intentional-restart flag, so their EOF handling can't race the
+            # reset and spuriously fire _on_worker_died.
+            for task in (self._reader_task, self._stderr_task):
+                if task is not None:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await task
+            self._process = None
+            self._writer = None
+            # Fail every future bound to the now-killed worker — they can never
+            # get a response from it. `list()` guards against mutation during
+            # iteration by a racing release. (Serialized by `_ipc_lock`, but the
+            # await points above can interleave other tasks' `_await_response`.)
+            for fut in list(self._pending.values()):
+                if not fut.done():
+                    fut.set_exception(WorkerDiedError("worker restarted after wedge"))
+            self._pending.clear()
+            await self.start()
+            # Clear ONLY after a confirmed respawn: if start() raises (disabled /
+            # binary missing) or a step above is cancelled, the worker stays
+            # flagged so the next op retries the restart rather than using a dead
+            # one.
+            self._needs_restart = False
+        finally:
+            self._intentional_restart = False
 
     async def _drain_stderr(self) -> None:
         """Read the worker's stderr line-by-line until EOF.
@@ -333,7 +425,11 @@ class SteamWorkerClient:
                     self._on_worker_died(reason="response_too_large")
                     return
                 if not line:
-                    self._on_worker_died(reason="stdout_closed")
+                    # #153: a deliberate restart-on-wedge SIGKILLs the worker; its
+                    # EOF here is expected, not a crash, so don't count it against
+                    # the restart-storm guard.
+                    if not self._intentional_restart:
+                        self._on_worker_died(reason="stdout_closed")
                     return
                 await self._on_response_line(line)
         except asyncio.CancelledError:
