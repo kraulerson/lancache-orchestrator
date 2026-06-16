@@ -13,6 +13,7 @@ strings, and filesystem paths.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -54,6 +55,39 @@ class ValidationResult:
     error: str | None = None
 
 
+# #123.4: a DEDICATED, bounded thread pool for cache stat I/O. The validate
+# batch loop awaits each batch sequentially and the jobs worker is serial, so
+# one active worker suffices — the bound's purpose is ISOLATION, not parallelism.
+# `run_in_executor(None, ...)` would use the shared default pool, which asyncio
+# also uses for stdlib offloads like getaddrinfo (DNS). A hung NFS cache mount
+# stalling stat() threads would then starve that pool and freeze the
+# orchestrator's HTTP probes (lancache heartbeat, Epic API). With a dedicated
+# pool, a hung mount can stall at most validation.
+_CACHE_STAT_WORKERS = 2
+_cache_stat_executor: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _get_cache_stat_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _cache_stat_executor
+    if _cache_stat_executor is None:
+        _cache_stat_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=_CACHE_STAT_WORKERS,
+            thread_name_prefix="cache-stat",
+        )
+    return _cache_stat_executor
+
+
+def shutdown_cache_stat_executor() -> None:
+    """Tear down the dedicated cache-stat pool (idempotent; called from the app
+    lifespan shutdown). `wait=False, cancel_futures=True` drops any queued
+    batches so a hung-mount backlog can't block shutdown; in-flight stat threads
+    can't be force-killed, but normal shutdown won't wait on them."""
+    global _cache_stat_executor
+    if _cache_stat_executor is not None:
+        _cache_stat_executor.shutdown(wait=False, cancel_futures=True)
+        _cache_stat_executor = None
+
+
 def _stat_batch(paths: list[Path]) -> tuple[int, int]:
     """Count (cached, errors) for a batch. Runs in a thread.
 
@@ -89,16 +123,18 @@ def _stat_batch(paths: list[Path]) -> tuple[int, int]:
 async def validate_chunks(paths: list[Path], *, batch_size: int = 256) -> tuple[int, int]:
     """Return (cached, missing). Cached = a regular, non-empty file.
 
-    Stats are offloaded to the default executor in batches so a large
-    chunk list never blocks the event loop. Per-file stat errors (EACCES
-    etc.) count as missing and are aggregated into a single WARN per run.
+    Stats are offloaded to a dedicated, bounded executor (#123.4) in batches so
+    a large chunk list never blocks the event loop AND a hung cache mount can't
+    starve the shared default pool. Per-file stat errors (EACCES etc.) count as
+    missing and are aggregated into a single WARN per run.
     """
     loop = asyncio.get_running_loop()
+    executor = _get_cache_stat_executor()
     cached = 0
     errors = 0
     for i in range(0, len(paths), batch_size):
         batch = paths[i : i + batch_size]
-        batch_cached, batch_errors = await loop.run_in_executor(None, _stat_batch, batch)
+        batch_cached, batch_errors = await loop.run_in_executor(executor, _stat_batch, batch)
         cached += batch_cached
         errors += batch_errors
     if errors:
