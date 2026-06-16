@@ -25,6 +25,14 @@ The #123.3 concern (a trigger endpoint's `ORDER BY id DESC LIMIT 1` re-read retu
 
 - Added `test_concurrent_triggers_across_games_return_correct_per_game_id` — fires concurrent validate POSTs across distinct games and asserts each response's `job_id` belongs to *its* game, locking the invariant in so a future regression to a global re-select is caught.
 
+### Infrastructure — dedicated bounded executor for cache stat I/O (#123.4) — 2026-06-15
+
+`validate_chunks` offloaded its `stat()` batches to the **shared default** thread pool (`run_in_executor(None, ...)`). asyncio also uses that pool for stdlib offloads such as `getaddrinfo` (DNS), so a hung NFS cache mount filling it with blocked `stat()` threads could starve the pool and stall the orchestrator's own HTTP probes (lancache heartbeat, Epic API) — a cross-subsystem failure from one bad mount.
+
+- Cache stat I/O now runs on a **dedicated, bounded `ThreadPoolExecutor`** (`thread_name_prefix="cache-stat"`, 2 workers — the batch loop is sequential and the jobs worker is serial, so the bound is for isolation, not parallelism). A hung mount now stalls at most validation, never DNS/HTTP.
+- The pool is created lazily (on the event-loop thread, so no creation race) and torn down in the app-lifespan shutdown (`shutdown_cache_stat_executor()`, idempotent; `cancel_futures=True` so a hung-mount backlog can't block shutdown). Ordering: the jobs worker is already stopped before the executor shuts down, so no validation is in flight.
+- **Tests:** `test_validate_chunks_uses_dedicated_cache_stat_pool` (stats run on a `cache-stat` thread, not the default pool), `test_shutdown_cache_stat_executor_is_idempotent_and_recreates`. Full suite **1192 pass**; mypy(strict)/ruff/semgrep clean.
+
 ### Fixed — manifest `chunk_count` is now unique chunks, not summed refs (#121, #123.2) — 2026-06-15
 
 `_handle_manifest_fetch` stored `chunk_count` as `sum(len(mapping.chunks))` across all file mappings, which double-counts content-deduped chunks (Steam shares one chunk across many files). F7's `manifest.expand` + `validate` dedup by SHA, so the operator saw e.g. "1820 chunks" (BL12) vs the validator's "1100" for the same depot — confusing, and the "all cached" arithmetic looked inconsistent.
