@@ -55,6 +55,7 @@ from orchestrator.jobs.worker import worker_loop as jobs_worker_loop
 from orchestrator.lancache.heartbeat import LancacheProbe
 from orchestrator.platform.steam.client import SteamWorkerClient
 from orchestrator.scheduler.manager import SchedulerManager
+from orchestrator.validator.disk_stat import shutdown_cache_stat_executor
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -280,6 +281,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await close_pool()
             except PoolError as e:
                 log.error("api.shutdown.pool_close_failed", reason=str(e))
+        # Tear down the dedicated cache-stat thread pool (#123.4). Idempotent and
+        # safe even if validation never ran (the executor is created lazily).
+        shutdown_cache_stat_executor()
         log.info("api.shutdown.complete")
 
 

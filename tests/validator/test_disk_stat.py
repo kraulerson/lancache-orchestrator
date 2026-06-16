@@ -84,6 +84,56 @@ async def test_symlink_not_counted_cached(tmp_path):
     assert (cached, missing) == (0, 1)
 
 
+async def test_validate_chunks_uses_dedicated_cache_stat_pool(tmp_path, monkeypatch):
+    """#123.4: cache stat I/O must run on a dedicated bounded executor, NOT the
+    shared default ThreadPoolExecutor. asyncio also uses the default pool for
+    stdlib offloads like getaddrinfo (DNS), so a hung NFS cache mount filling the
+    default pool would stall the orchestrator's HTTP probes (lancache heartbeat,
+    Epic API). Isolating cache stats bounds the blast radius to validation."""
+    import threading
+
+    from orchestrator.validator import disk_stat
+
+    seen_threads: list[str] = []
+    real_stat_batch = disk_stat._stat_batch
+
+    def recording_stat_batch(paths):
+        seen_threads.append(threading.current_thread().name)
+        return real_stat_batch(paths)
+
+    monkeypatch.setattr(disk_stat, "_stat_batch", recording_stat_batch)
+    f = tmp_path / "chunk"
+    f.write_bytes(b"data")
+
+    await validate_chunks([f])
+
+    assert seen_threads, "no stat batch ran"
+    assert all(name.startswith("cache-stat") for name in seen_threads), (
+        f"stats ran on the shared default pool, not the dedicated one: {seen_threads}"
+    )
+
+
+async def test_shutdown_cache_stat_executor_is_idempotent_and_recreates(tmp_path):
+    """#123.4: the lifespan teardown calls shutdown_cache_stat_executor(); it must
+    be safe to call when the pool was never created and twice in a row, and a
+    later validation must transparently re-create the pool."""
+    from orchestrator.validator import disk_stat
+
+    # Never-created + double shutdown: no error.
+    disk_stat.shutdown_cache_stat_executor()
+    disk_stat.shutdown_cache_stat_executor()
+    assert disk_stat._cache_stat_executor is None
+
+    # A validation after shutdown re-creates the pool and still works.
+    f = tmp_path / "chunk"
+    f.write_bytes(b"data")
+    cached, missing = await validate_chunks([f])
+    assert (cached, missing) == (1, 0)
+    assert disk_stat._cache_stat_executor is not None
+
+    disk_stat.shutdown_cache_stat_executor()
+
+
 # --- validate_game helpers ---------------------------------------------
 
 
