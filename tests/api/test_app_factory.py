@@ -14,12 +14,13 @@ class TestAppFactory:
         assert isinstance(app, FastAPI)
 
     def test_health_route_mounted(self):
+        # Assert via the OpenAPI schema, not `app.routes`: FastAPI 0.137+ no
+        # longer flattens included-router endpoints into `app.routes` (they're
+        # nested inside internal `_IncludedRouter` objects), so walking
+        # `app.routes` can't see `/api/v1/health`. The OpenAPI paths are the
+        # authoritative, version-stable list of mounted endpoints.
         app = create_app()
-        # Not every entry in app.routes is a path-bearing Route: FastAPI 0.137+
-        # adds internal `_IncludedRouter` objects (and Mounts) without a `.path`.
-        # Guard with getattr so route introspection survives FastAPI internals.
-        paths = {getattr(route, "path", None) for route in app.routes}
-        assert "/api/v1/health" in paths
+        assert "/api/v1/health" in app.openapi()["paths"]
 
     def test_openapi_security_scheme_registered(self):
         """Spec §3.3 + §5.4: even with auth-as-middleware, the OpenAPI
