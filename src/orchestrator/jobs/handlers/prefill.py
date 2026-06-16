@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections import Counter
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -28,6 +29,23 @@ if TYPE_CHECKING:
     from orchestrator.platform.steam.client import SteamWorkerClient
 
 _log = structlog.get_logger(__name__)
+
+
+def _summarize_failures(failures: list[tuple[str, str]], *, top: int = 5) -> dict[str, int]:
+    """Tally prefill chunk-failure reasons (e.g. ``{'http 403': 2418,
+    'ConnectError': 12}``), keeping the ``top`` most common (#169). Lets a failed
+    prefill be diagnosed from the log / the game's ``last_error`` without code
+    spelunking — e.g. an `http 403` (CDN auth token needed) vs `http 404`
+    (chunk not found) vs `ConnectError` (lancache down)."""
+    return dict(Counter(reason for _uri, reason in failures).most_common(top))
+
+
+def _failure_suffix(failure_reasons: dict[str, int]) -> str:
+    """`` (http 403: 2418, ConnectError: 12)`` for last_error, or `""` if none."""
+    if not failure_reasons:
+        return ""
+    return " (" + ", ".join(f"{r}: {n}" for r, n in failure_reasons.items()) + ")"
+
 
 # Epic manifest upsert (depot_id is NULL — Epic has no depots). Keyed on
 # (game_id, version); a re-fetch updates the existing row.
@@ -149,12 +167,22 @@ async def _epic_prefill_inner(
     settings = get_settings()
     result = await epic_prefill_chunks(paths, cdn_host, cdn_base, settings)
     if result.chunks_failed > 0:
+        failure_reasons = _summarize_failures(result.failures)
+        _log.warning(
+            "prefill.epic.chunks_failed",
+            job_id=job_id,
+            game_id=game_id,
+            failed=result.chunks_failed,
+            total=result.chunks_total,
+            failure_reasons=failure_reasons,
+        )
+        last_error = (
+            f"prefill: {result.chunks_failed}/{result.chunks_total} chunks failed"
+            f"{_failure_suffix(failure_reasons)}"
+        )[:200]
         await deps.pool.execute_write(
             "UPDATE games SET status='failed', last_error=? WHERE id=?",
-            (
-                f"prefill: {result.chunks_failed}/{result.chunks_total} chunks failed"[:200],
-                game_id,
-            ),
+            (last_error, game_id),
         )
         raise RuntimeError(
             f"epic prefill failed: {result.chunks_failed}/{result.chunks_total} chunks"
@@ -250,6 +278,7 @@ async def _steam_prefill_inner(
 
     settings = get_settings()
     result = await prefill_chunks(uris, settings)
+    failure_reasons = _summarize_failures(result.failures)
     _log.info(
         "prefill.completed",
         job_id=job_id,
@@ -257,15 +286,17 @@ async def _steam_prefill_inner(
         total=result.chunks_total,
         ok=result.chunks_ok,
         failed=result.chunks_failed,
+        failure_reasons=failure_reasons,
     )
 
     if result.chunks_failed > 0:
+        last_error = (
+            f"prefill: {result.chunks_failed}/{result.chunks_total} chunks failed"
+            f"{_failure_suffix(failure_reasons)}"
+        )[:200]
         await deps.pool.execute_write(
             "UPDATE games SET status='failed', last_error=? WHERE id=?",
-            (
-                f"prefill: {result.chunks_failed}/{result.chunks_total} chunks failed"[:200],
-                game_id,
-            ),
+            (last_error, game_id),
         )
         raise RuntimeError(f"prefill failed: {result.chunks_failed}/{result.chunks_total} chunks")
 
