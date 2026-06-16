@@ -28,6 +28,20 @@ for handoff clarity. Categories are ordered by impact severity.
 - **Tests:** `test_manifest_fetch_chunk_count_is_unique_not_summed`, `test_manifest_fetch_chunk_count_falls_back_when_field_absent`. Full suite **1192 pass**; mypy(strict)/ruff/semgrep clean.
 - **Deferred (adversarial review):** #122 (mid-fetch `NotAuthenticated` masking) — the quick `connected`/`logged_on` proxy conflates a transient CM socket drop with real auth loss, which would force a needless 2FA re-auth (SEV-2); it will be redone with EResult-based detection. #123.1 (double-compression) — changes the stored BLOB format and needs the F7 expand round-trip validated live first.
 
+### Security — bump starlette 1.1.0 → 1.3.1 (2 CVEs) — 2026-06-15
+
+A newly-disclosed advisory flagged `starlette==1.1.0` with two vulnerabilities (`GHSA-82w8-qh3p-5jfq`, `GHSA-jp82-jpqv-5vv3`), failing the CI `Dependencies` (pip-audit) gate on every branch including `main`.
+
+- Pinned `starlette==1.3.1` (the fix version) explicitly in `requirements.in` and recompiled the hashed `requirements.txt`, mirroring the existing `python-dotenv` CVE-override precedent. `fastapi==0.136.3` requires only `starlette>=0.46.0` (no upper bound), so this is compatible **without** a FastAPI bump; only `starlette` moved.
+- Verified: `pip-audit --requirement requirements.txt --disable-pip --strict` → "No known vulnerabilities found"; full suite **1192 pass** against starlette 1.3.1.
+
+### Fixed — DB pool writer now self-heals after a replacement storm (#152 / F-INT-2) — 2026-06-15
+
+UAT-11 integration finding. Readers already self-heal after a replacement storm (`_lost_reader_slots` + heal-on-acquire), but the writer did not: once the writer storm guard tripped (or a replacement open failed), `self._writer` was left pointing at the dead connection with `_writer_healthy=False` and `_checkout_writer` kept yielding it — **every write failed until a process restart** (health_check live-probes the writer → 503 → HEALTHCHECK container restart). SEV-3, recovery-by-restart, asymmetric with readers.
+
+- `_checkout_writer` now heals-on-checkout when the writer is known-dead: it opens a fresh writer connection (under `_writer_lock`, so it can't race a concurrent replacement swap), restores `_writer_healthy=True`, and best-effort-closes the old one — so writes recover **without a restart** once the fault clears. If the heal-open itself fails (persistent fault), it raises `PoolError` (loud → 503) rather than yielding a dead/closed connection.
+- **Tests:** `tests/db/test_pool_writer_self_heal.py` — recovery after the fault clears, and the loud-`PoolError` path when the heal-open fails. Full suite **1192 pass**; mypy(strict)/ruff/semgrep clean.
+
 ### Fixed — Steam worker crash on slow-CDN `gevent.Timeout` — 2026-06-14
 
 Root-caused via the new stderr drain (below) during the UAT-11 live leg: a manifest fetch for a Steam app with a slow CDN depot crashed the worker process (`steam_worker.died reason=stdout_closed`), failing that job **and every subsequent job until restart**. The captured stderr showed `gevent.timeout.Timeout: 15 seconds`.
