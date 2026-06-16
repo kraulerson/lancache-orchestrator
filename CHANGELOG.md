@@ -19,6 +19,12 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Documentation — #123.3 trigger `job_id` race verified resolved + guarded — 2026-06-15
+
+The #123.3 concern (a trigger endpoint's `ORDER BY id DESC LIMIT 1` re-read returning the *wrong* `job_id` under concurrency) is **obsolete**: the prefill/validate/manifest triggers already re-select filtered by `(kind, game_id, in-flight state)`, backed by the migration-0006/0007 partial UNIQUE indexes + `INSERT ... ON CONFLICT DO NOTHING`, so the returned id is deterministic per game. The issue's proposed `lastrowid` fix would in fact be *unreliable* here (a no-op `ON CONFLICT` INSERT leaves `lastrowid` stale). No code change needed.
+
+- Added `test_concurrent_triggers_across_games_return_correct_per_game_id` — fires concurrent validate POSTs across distinct games and asserts each response's `job_id` belongs to *its* game, locking the invariant in so a future regression to a global re-select is caught.
+
 ### Fixed — manifest `chunk_count` is now unique chunks, not summed refs (#121, #123.2) — 2026-06-15
 
 `_handle_manifest_fetch` stored `chunk_count` as `sum(len(mapping.chunks))` across all file mappings, which double-counts content-deduped chunks (Steam shares one chunk across many files). F7's `manifest.expand` + `validate` dedup by SHA, so the operator saw e.g. "1820 chunks" (BL12) vs the validator's "1100" for the same depot — confusing, and the "all cached" arithmetic looked inconsistent.
