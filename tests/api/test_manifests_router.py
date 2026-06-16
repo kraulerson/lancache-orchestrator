@@ -80,12 +80,46 @@ class TestManifestsHappyPath:
             "fetched_at",
             "chunk_count",
             "total_bytes",
+            "depot_id",
             "game",
         }
         for manifest in body["manifests"]:
             assert set(manifest.keys()) == expected_fields
             # game must be null without ?include=game
             assert manifest["game"] is None
+
+
+class TestManifestDepotIdExposure:
+    """#127: migration 0003 added manifests.depot_id (populated by BL12), but the
+    BL9 read endpoint's SELECT + response model predated the column, so every row
+    came back depot_id=null. The endpoint must expose the stored value (and stay
+    null for rows written before the column existed)."""
+
+    async def test_depot_id_exposed_when_set(self, client, populated_pool):
+        async with populated_pool.write_transaction() as tx:
+            await tx.execute("DELETE FROM manifests")
+            await tx.execute(
+                "INSERT INTO manifests "
+                "(game_id, version, fetched_at, chunk_count, total_bytes, depot_id, raw) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (1, "depot-set", "2026-06-01T00:00:00Z", 5, 100, 731, b"\x28\xb5\x2f\xfd"),
+            )
+            # A row predating the column (depot_id left NULL).
+            await tx.execute(
+                "INSERT INTO manifests "
+                "(game_id, version, fetched_at, chunk_count, total_bytes, raw) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (1, "depot-null", "2026-06-02T00:00:00Z", 5, 100, b"\x28\xb5\x2f\xfd"),
+            )
+
+        r = await client.get(
+            "/api/v1/manifests",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 200
+        by_version = {m["version"]: m for m in r.json()["manifests"]}
+        assert by_version["depot-set"]["depot_id"] == 731
+        assert by_version["depot-null"]["depot_id"] is None
 
 
 # ---------------------------------------------------------------------------

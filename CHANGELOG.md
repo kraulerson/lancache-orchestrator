@@ -27,6 +27,36 @@ for handoff clarity. Categories are ordered by impact severity.
 - The pool is created lazily (on the event-loop thread, so no creation race) and torn down in the app-lifespan shutdown (`shutdown_cache_stat_executor()`, idempotent; `cancel_futures=True` so a hung-mount backlog can't block shutdown). Ordering: the jobs worker is already stopped before the executor shuts down, so no validation is in flight.
 - **Tests:** `test_validate_chunks_uses_dedicated_cache_stat_pool` (stats run on a `cache-stat` thread, not the default pool), `test_shutdown_cache_stat_executor_is_idempotent_and_recreates`. Full suite **1192 pass**; mypy(strict)/ruff/semgrep clean.
 
+### Fixed — manifest `chunk_count` is now unique chunks, not summed refs (#121, #123.2) — 2026-06-15
+
+`_handle_manifest_fetch` stored `chunk_count` as `sum(len(mapping.chunks))` across all file mappings, which double-counts content-deduped chunks (Steam shares one chunk across many files). F7's `manifest.expand` + `validate` dedup by SHA, so the operator saw e.g. "1820 chunks" (BL12) vs the validator's "1100" for the same depot — confusing, and the "all cached" arithmetic looked inconsistent.
+
+- `chunk_count` now uses the protobuf's true value, `ContentManifestMetadata.unique_chunks` — the same unique count F7 validates against. If that field is *absent* (a steam-next rename / older protobuf) it falls back to the summed refs **and warns to stderr** (drained by the orchestrator), so a silent revert to double-counting is visible rather than masked. A legitimately-empty depot (`unique_chunks == 0`) is preserved as 0.
+- **#123.2:** dropped the dead `name` field from the manifest IPC payload — the orchestrator handler never consumed it.
+- **Tests:** `test_manifest_fetch_chunk_count_is_unique_not_summed`, `test_manifest_fetch_chunk_count_falls_back_when_field_absent`. Full suite **1192 pass**; mypy(strict)/ruff/semgrep clean.
+- **Deferred (adversarial review):** #122 (mid-fetch `NotAuthenticated` masking) — the quick `connected`/`logged_on` proxy conflates a transient CM socket drop with real auth loss, which would force a needless 2FA re-auth (SEV-2); it will be redone with EResult-based detection. #123.1 (double-compression) — changes the stored BLOB format and needs the F7 expand round-trip validated live first.
+
+### Fixed — `GET /api/v1/manifests` now exposes `depot_id` (#127) — 2026-06-15
+
+UAT-9 live finding. Migration `0003` added `manifests.depot_id` (populated correctly by the BL12 manifest fetch — verified live), but the BL9 read endpoint's `SELECT` and `ManifestResponse` model predated the column, so every row came back `depot_id: null`. The DB was correct; this was purely a read-side exposure gap (F7's validator reads the DB directly, so it was unaffected).
+
+- `depot_id` is now in the manifests `SELECT`, the `ManifestResponse` model (`int | None` — nullable for rows written before the column existed), and the row mapping.
+- **Tests:** `TestManifestDepotIdExposure` (a stored `depot_id` is returned; a NULL one stays `null`); the per-manifest field-set test now includes `depot_id`. Full suite **1191 pass**; mypy(strict)/ruff/semgrep clean.
+
+### Security — bump starlette 1.1.0 → 1.3.1 (2 CVEs) — 2026-06-15
+
+A newly-disclosed advisory flagged `starlette==1.1.0` with two vulnerabilities (`GHSA-82w8-qh3p-5jfq`, `GHSA-jp82-jpqv-5vv3`), failing the CI `Dependencies` (pip-audit) gate on every branch including `main`.
+
+- Pinned `starlette==1.3.1` (the fix version) explicitly in `requirements.in` and recompiled the hashed `requirements.txt`, mirroring the existing `python-dotenv` CVE-override precedent. `fastapi==0.136.3` requires only `starlette>=0.46.0` (no upper bound), so this is compatible **without** a FastAPI bump; only `starlette` moved.
+- Verified: `pip-audit --requirement requirements.txt --disable-pip --strict` → "No known vulnerabilities found"; full suite **1192 pass** against starlette 1.3.1.
+
+### Fixed — DB pool writer now self-heals after a replacement storm (#152 / F-INT-2) — 2026-06-15
+
+UAT-11 integration finding. Readers already self-heal after a replacement storm (`_lost_reader_slots` + heal-on-acquire), but the writer did not: once the writer storm guard tripped (or a replacement open failed), `self._writer` was left pointing at the dead connection with `_writer_healthy=False` and `_checkout_writer` kept yielding it — **every write failed until a process restart** (health_check live-probes the writer → 503 → HEALTHCHECK container restart). SEV-3, recovery-by-restart, asymmetric with readers.
+
+- `_checkout_writer` now heals-on-checkout when the writer is known-dead: it opens a fresh writer connection (under `_writer_lock`, so it can't race a concurrent replacement swap), restores `_writer_healthy=True`, and best-effort-closes the old one — so writes recover **without a restart** once the fault clears. If the heal-open itself fails (persistent fault), it raises `PoolError` (loud → 503) rather than yielding a dead/closed connection.
+- **Tests:** `tests/db/test_pool_writer_self_heal.py` — recovery after the fault clears, and the loud-`PoolError` path when the heal-open fails. Full suite **1192 pass**; mypy(strict)/ruff/semgrep clean.
+
 ### Fixed — Steam worker crash on slow-CDN `gevent.Timeout` — 2026-06-14
 
 Root-caused via the new stderr drain (below) during the UAT-11 live leg: a manifest fetch for a Steam app with a slow CDN depot crashed the worker process (`steam_worker.died reason=stdout_closed`), failing that job **and every subsequent job until restart**. The captured stderr showed `gevent.timeout.Timeout: 15 seconds`.
