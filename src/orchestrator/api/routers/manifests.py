@@ -59,7 +59,7 @@ MANIFESTS_INCLUDE_ALLOW_LIST = IncludeAllowList(keys={"game"})
 
 # Manifests columns selected from the manifests table (excludes raw BLOB per spec D1).
 # All identifiers are SAFE — sourced from this constant, not user input.
-_MANIFEST_COLUMNS = "id, game_id, version, fetched_at, chunk_count, total_bytes"
+_MANIFEST_COLUMNS = "id, game_id, version, fetched_at, chunk_count, total_bytes, depot_id"
 
 _log = structlog.get_logger(__name__)
 
@@ -87,6 +87,9 @@ class ManifestResponse(BaseModel):
     fetched_at: str
     chunk_count: int
     total_bytes: int
+    # depot_id (#127): added in migration 0003 and populated by BL12 manifest
+    # fetch. Nullable for rows written before the column existed.
+    depot_id: int | None
     # Spec D4: always-present field; populated iff ?include=game was requested.
     game: GameSummary | None
 
@@ -215,6 +218,7 @@ async def list_manifests(
                 fetched_at=row["fetched_at"],
                 chunk_count=row["chunk_count"],
                 total_bytes=row["total_bytes"],
+                depot_id=row["depot_id"],
                 game=game,
             )
         )

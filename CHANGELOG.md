@@ -19,6 +19,13 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — `GET /api/v1/manifests` now exposes `depot_id` (#127) — 2026-06-15
+
+UAT-9 live finding. Migration `0003` added `manifests.depot_id` (populated correctly by the BL12 manifest fetch — verified live), but the BL9 read endpoint's `SELECT` and `ManifestResponse` model predated the column, so every row came back `depot_id: null`. The DB was correct; this was purely a read-side exposure gap (F7's validator reads the DB directly, so it was unaffected).
+
+- `depot_id` is now in the manifests `SELECT`, the `ManifestResponse` model (`int | None` — nullable for rows written before the column existed), and the row mapping.
+- **Tests:** `TestManifestDepotIdExposure` (a stored `depot_id` is returned; a NULL one stays `null`); the per-manifest field-set test now includes `depot_id`. Full suite **1191 pass**; mypy(strict)/ruff/semgrep clean.
+
 ### Security — bump starlette 1.1.0 → 1.3.1 (2 CVEs) — 2026-06-15
 
 A newly-disclosed advisory flagged `starlette==1.1.0` with two vulnerabilities (`GHSA-82w8-qh3p-5jfq`, `GHSA-jp82-jpqv-5vv3`), failing the CI `Dependencies` (pip-audit) gate on every branch including `main`.
