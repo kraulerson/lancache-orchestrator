@@ -19,6 +19,12 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Documentation — #123.3 trigger `job_id` race verified resolved + guarded — 2026-06-15
+
+The #123.3 concern (a trigger endpoint's `ORDER BY id DESC LIMIT 1` re-read returning the *wrong* `job_id` under concurrency) is **obsolete**: the prefill/validate/manifest triggers already re-select filtered by `(kind, game_id, in-flight state)`, backed by the migration-0006/0007 partial UNIQUE indexes + `INSERT ... ON CONFLICT DO NOTHING`, so the returned id is deterministic per game. The issue's proposed `lastrowid` fix would in fact be *unreliable* here (a no-op `ON CONFLICT` INSERT leaves `lastrowid` stale). No code change needed.
+
+- Added `test_concurrent_triggers_across_games_return_correct_per_game_id` — fires concurrent validate POSTs across distinct games and asserts each response's `job_id` belongs to *its* game, locking the invariant in so a future regression to a global re-select is caught.
+
 ### Infrastructure — dedicated bounded executor for cache stat I/O (#123.4) — 2026-06-15
 
 `validate_chunks` offloaded its `stat()` batches to the **shared default** thread pool (`run_in_executor(None, ...)`). asyncio also uses that pool for stdlib offloads such as `getaddrinfo` (DNS), so a hung NFS cache mount filling it with blocked `stat()` threads could starve the pool and stall the orchestrator's own HTTP probes (lancache heartbeat, Epic API) — a cross-subsystem failure from one bad mount.

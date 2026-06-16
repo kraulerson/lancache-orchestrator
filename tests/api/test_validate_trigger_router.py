@@ -58,6 +58,44 @@ class TestDedup:
         assert r2.status_code == 202
         assert r1.json()["job_id"] == r2.json()["job_id"]
 
+    async def test_concurrent_triggers_across_games_return_correct_per_game_id(
+        self, client, populated_pool
+    ):
+        """#123.3 regression: concurrent validate POSTs for DIFFERENT games must
+        each return a job_id belonging to THAT game — never another game's id from
+        a racy global re-select. The original issue feared a global
+        `ORDER BY id DESC LIMIT 1` re-read could return the wrong id under
+        concurrency; the current code instead re-selects filtered by
+        (kind, game_id, in-flight state), backed by the migration-0006 partial
+        UNIQUE index + `INSERT ... ON CONFLICT DO NOTHING`, so the returned id is
+        deterministic per game. (`lastrowid` — the issue's proposed fix — would be
+        unreliable here, since a no-op ON CONFLICT INSERT leaves it stale.) This
+        locks that invariant in."""
+        import asyncio
+
+        game_ids = [
+            await _ensure_steam_game(populated_pool, app_id=f"conc-{i}", title=f"g{i}")
+            for i in range(6)
+        ]
+
+        async def post(gid: int):
+            r = await client.post(
+                f"/api/v1/games/{gid}/validate",
+                headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            )
+            return gid, r
+
+        results = await asyncio.gather(*(post(gid) for gid in game_ids))
+
+        for gid, r in results:
+            assert r.status_code == 202
+            job_id = r.json()["job_id"]
+            row = await populated_pool.read_one("SELECT game_id FROM jobs WHERE id=?", (job_id,))
+            assert row is not None and row["game_id"] == gid, (
+                f"trigger for game {gid} returned job {job_id} "
+                f"belonging to game {row and row['game_id']}"
+            )
+
     async def test_new_job_after_existing_finished(self, client, populated_pool):
         game_id = await _ensure_steam_game(populated_pool, app_id="fin-v", title="t")
         await populated_pool.execute_write(
