@@ -588,3 +588,170 @@ class TestRestartStormGuard:
         # 4th death triggers the guard
         client._on_worker_died(reason="crash")
         assert client._disabled is True
+
+
+class TestWorkerRestartOnWedge:
+    """#153: when a steam op times out (IPC) or is cancelled (job-runtime
+    timeout), the worker subprocess is wedged on the abandoned op and the next
+    job would queue behind it. The next op must restart the worker first so it
+    starts clean — accepting session loss (the worker doesn't auto-relogin), an
+    operator-approved tradeoff."""
+
+    def _bare_client(self):
+        import asyncio
+
+        from orchestrator.platform.steam.client import SteamWorkerClient
+
+        c = SteamWorkerClient.__new__(SteamWorkerClient)
+        c._writer = _StubWriter()
+        c._pending = {}
+        c._timeout = 0.02
+        c._op_timeout_overrides = {}
+        c._needs_restart = False
+        c._intentional_restart = False
+        c._ipc_lock = asyncio.Lock()
+        c._process = None
+        c._reader_task = None
+        c._stderr_task = None
+        return c
+
+    async def test_ipc_timeout_flags_worker_for_restart(self):
+        from orchestrator.platform.steam.client import IPCTimeoutError
+
+        c = self._bare_client()
+        # No response is ever fed → the await times out.
+        with pytest.raises(IPCTimeoutError):
+            await c._send_and_await("auth.status", {})
+        assert c._needs_restart is True
+
+    async def test_cancelled_op_flags_worker_for_restart(self):
+        import asyncio
+
+        c = self._bare_client()
+
+        async def fake_send(op, params):
+            return "mid"
+
+        async def fake_await(msg_id, timeout=None):
+            raise asyncio.CancelledError()
+
+        c._send = fake_send  # type: ignore[method-assign]
+        c._await_response = fake_await  # type: ignore[method-assign]
+
+        with pytest.raises(asyncio.CancelledError):
+            await c._send_and_await("manifest.fetch", {})
+        assert c._needs_restart is True
+
+    async def test_next_op_restarts_wedged_worker_before_sending(self):
+        c = self._bare_client()
+        c._needs_restart = True
+        order: list[str] = []
+
+        async def fake_restart():
+            order.append("restart")
+            c._needs_restart = False
+
+        async def fake_send(op, params):
+            order.append("send")
+            return "mid"
+
+        async def fake_await(msg_id, timeout=None):
+            order.append("await")
+            return {"ok": True}
+
+        c._restart_after_wedge = fake_restart  # type: ignore[method-assign]
+        c._send = fake_send  # type: ignore[method-assign]
+        c._await_response = fake_await  # type: ignore[method-assign]
+
+        await c._send_and_await("auth.status", {})
+        assert order == ["restart", "send", "await"]
+
+    async def test_shutdown_op_never_triggers_restart(self):
+        # stop() sends the 'shutdown' op through _send_and_await; a wedged worker
+        # must not try to restart itself during shutdown.
+        c = self._bare_client()
+        c._needs_restart = True
+        restarted: list[bool] = []
+
+        async def fake_restart():
+            restarted.append(True)
+
+        async def fake_send(op, params):
+            return "mid"
+
+        async def fake_await(msg_id, timeout=None):
+            return {}
+
+        c._restart_after_wedge = fake_restart  # type: ignore[method-assign]
+        c._send = fake_send  # type: ignore[method-assign]
+        c._await_response = fake_await  # type: ignore[method-assign]
+
+        await c._send_and_await("shutdown", {})
+        assert restarted == []
+
+    async def test_intentional_restart_does_not_trip_storm_guard(self):
+        import asyncio
+        import collections
+
+        from orchestrator.platform.steam.client import SteamWorkerClient
+
+        c = SteamWorkerClient.__new__(SteamWorkerClient)
+        c._restart_attempts = 0
+        c._max_restart_attempts = 3
+        c._disabled = False
+        c._pending = {}
+        c._reader_task = None
+        c._recent_stderr = collections.deque(maxlen=50)
+        c._intentional_restart = True  # a deliberate restart is in progress
+
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+
+        class _P:
+            stdout = reader
+            returncode = None
+
+        c._process = _P()
+
+        # The reader sees EOF from the intentional SIGKILL — it must NOT count as
+        # a crash (else repeated wedges would trip the restart-storm guard).
+        await c._read_loop()
+        assert c._restart_attempts == 0
+
+    async def test_concurrent_wedged_ops_restart_worker_only_once(self):
+        """#153 (adversarial-review fix): the client is shared between the jobs
+        loop and API auth handlers, so two ops can hit the wedge restart
+        concurrently. The `_ipc_lock` + clear-flag-after-respawn must serialize
+        them so the worker is respawned EXACTLY once, not double-killed."""
+        import asyncio
+
+        c = self._bare_client()
+        c._needs_restart = True
+
+        starts: list[bool] = []
+
+        async def fake_start():
+            # Real _restart_after_wedge clears _needs_restart only AFTER start().
+            starts.append(True)
+
+        sent: list[str] = []
+
+        async def fake_send(op, params):
+            sent.append(op)
+            return op
+
+        async def fake_await(msg_id, timeout=None):
+            return {"ok": True}
+
+        c.start = fake_start  # type: ignore[method-assign]
+        c._send = fake_send  # type: ignore[method-assign]
+        c._await_response = fake_await  # type: ignore[method-assign]
+
+        await asyncio.gather(
+            c._send_and_await("auth.status", {}),
+            c._send_and_await("library.enumerate", {}),
+        )
+
+        assert len(starts) == 1, "worker respawned more than once under concurrency"
+        assert len(sent) == 2  # both ops still sent
+        assert c._needs_restart is False
