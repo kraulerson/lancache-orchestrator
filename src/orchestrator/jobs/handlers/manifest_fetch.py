@@ -13,7 +13,7 @@ inside the worker venv.
 
 Per spike-A3 (`spikes/spike_a3_steam_manifest.md`):
 - IPC contract: worker returns `{manifests: [{depot_id, manifest_gid,
-  name, total_bytes, chunk_count, raw_path}, ...]}` — one entry per
+  total_bytes, chunk_count, raw_path}, ...]}` — one entry per
   depot for the requested app_id. `raw_path` is a temp file on the
   shared container FS (S2-1: avoids the 10 MiB IPC line cap); this
   handler reads, stores, and deletes it.

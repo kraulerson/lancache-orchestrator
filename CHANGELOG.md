@@ -19,6 +19,15 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — manifest `chunk_count` is now unique chunks, not summed refs (#121, #123.2) — 2026-06-15
+
+`_handle_manifest_fetch` stored `chunk_count` as `sum(len(mapping.chunks))` across all file mappings, which double-counts content-deduped chunks (Steam shares one chunk across many files). F7's `manifest.expand` + `validate` dedup by SHA, so the operator saw e.g. "1820 chunks" (BL12) vs the validator's "1100" for the same depot — confusing, and the "all cached" arithmetic looked inconsistent.
+
+- `chunk_count` now uses the protobuf's true value, `ContentManifestMetadata.unique_chunks` — the same unique count F7 validates against. If that field is *absent* (a steam-next rename / older protobuf) it falls back to the summed refs **and warns to stderr** (drained by the orchestrator), so a silent revert to double-counting is visible rather than masked. A legitimately-empty depot (`unique_chunks == 0`) is preserved as 0.
+- **#123.2:** dropped the dead `name` field from the manifest IPC payload — the orchestrator handler never consumed it.
+- **Tests:** `test_manifest_fetch_chunk_count_is_unique_not_summed`, `test_manifest_fetch_chunk_count_falls_back_when_field_absent`. Full suite **1192 pass**; mypy(strict)/ruff/semgrep clean.
+- **Deferred (adversarial review):** #122 (mid-fetch `NotAuthenticated` masking) — the quick `connected`/`logged_on` proxy conflates a transient CM socket drop with real auth loss, which would force a needless 2FA re-auth (SEV-2); it will be redone with EResult-based detection. #123.1 (double-compression) — changes the stored BLOB format and needs the F7 expand round-trip validated live first.
+
 ### Fixed — `GET /api/v1/manifests` now exposes `depot_id` (#127) — 2026-06-15
 
 UAT-9 live finding. Migration `0003` added `manifests.depot_id` (populated correctly by the BL12 manifest fetch — verified live), but the BL9 read endpoint's `SELECT` and `ManifestResponse` model predated the column, so every row came back `depot_id: null`. The DB was correct; this was purely a read-side exposure gap (F7's validator reads the DB directly, so it was unaffected).

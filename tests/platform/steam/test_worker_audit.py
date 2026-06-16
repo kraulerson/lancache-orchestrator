@@ -268,3 +268,120 @@ def test_dispatch_loop_survives_handler_gevent_timeout(worker, monkeypatch) -> N
     resp = worker._sent[-1]
     assert resp["ok"] is False
     assert resp["error"]["kind"] == "SteamCDNTimeout", resp
+
+
+def _stub_cdn_modules(worker, monkeypatch, tmp_path, cdn) -> None:
+    """Stub the lazy imports `_handle_manifest_fetch` performs + the CDN client
+    + the blob temp path, routing blobs into tmp_path."""
+    zstd_mod = types.ModuleType("zstandard")
+
+    class _Compressor:
+        def compress(self, data):
+            return data
+
+    zstd_mod.ZstdCompressor = lambda level=3: _Compressor()  # type: ignore[attr-defined]
+    cdn_mod = types.ModuleType("steam.client.cdn")
+    cdn_mod.CDNClient = lambda client: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "zstandard", zstd_mod)
+    monkeypatch.setitem(sys.modules, "steam.client.cdn", cdn_mod)
+    worker._cdn_client = cdn
+    monkeypatch.setattr(worker, "_blob_temp_path", lambda prefix: tmp_path / f"blob-{prefix}.zst")
+
+
+def test_manifest_fetch_chunk_count_is_unique_not_summed(worker, monkeypatch, tmp_path) -> None:
+    """#121 + #123.2: chunk_count must be the manifest's unique_chunks (what F7's
+    SHA-deduped validate counts), NOT the sum of per-file mapping refs (which
+    double-counts content-deduped chunks). And the dead `name` IPC field — which
+    the orchestrator handler never consumes — must not be sent."""
+
+    class _Meta:
+        cb_disk_original = 9999
+        unique_chunks = 2  # the true unique count (protobuf field 7)
+
+    class _Mapping:
+        def __init__(self, n):
+            self.chunks = [object()] * n
+
+    class _Manifest:
+        depot_id = 1
+        gid = 11
+        metadata = _Meta()
+        # 2 + 1 = 3 mapping refs, but only 2 UNIQUE chunks (one is shared).
+        payload = type("P", (), {"mappings": [_Mapping(2), _Mapping(1)]})()
+
+        def serialize(self):
+            return b"protobuf-bytes"
+
+    class _Cdn:
+        def get_app_depot_info(self, app_id):
+            return {}
+
+        def get_manifest_request_code(self, app_id, depot_id, gid):
+            return 0
+
+        def get_manifest(self, app_id, depot_id, gid, decrypt=True, manifest_request_code=0):
+            return _Manifest()
+
+    worker._client = _FakeSteamClient()
+    _stub_cdn_modules(worker, monkeypatch, tmp_path, _Cdn())
+    monkeypatch.setattr(
+        worker.enumerate_module, "manifest_gids_for_app", lambda depots, branch: [(1, 11)]
+    )
+
+    worker._handle_manifest_fetch("m6", {"app_id": "440"})
+
+    resp = worker._sent[-1]
+    assert resp["ok"] is True, resp
+    entry = resp["result"]["manifests"][0]
+    assert entry["chunk_count"] == 2, "chunk_count must be unique_chunks, not the summed refs (3)"
+    assert "name" not in entry, "the dead `name` field must not be sent (#123.2)"
+
+
+def test_manifest_fetch_chunk_count_falls_back_when_field_absent(
+    worker, monkeypatch, tmp_path
+) -> None:
+    """#121 robustness: if a manifest's metadata has no `unique_chunks` attribute
+    (steam-next rename / older protobuf), chunk_count falls back to the summed
+    mapping refs rather than dropping to 0 — so the count is never silently lost.
+    (A silent revert to the double-count is surfaced via a stderr warning, which
+    the orchestrator drains.)"""
+
+    class _Meta:
+        cb_disk_original = 9999
+        # NO unique_chunks attribute at all.
+
+    class _Mapping:
+        def __init__(self, n):
+            self.chunks = [object()] * n
+
+    class _Manifest:
+        depot_id = 1
+        gid = 11
+        metadata = _Meta()
+        payload = type("P", (), {"mappings": [_Mapping(2), _Mapping(1)]})()
+
+        def serialize(self):
+            return b"protobuf-bytes"
+
+    class _Cdn:
+        def get_app_depot_info(self, app_id):
+            return {}
+
+        def get_manifest_request_code(self, app_id, depot_id, gid):
+            return 0
+
+        def get_manifest(self, app_id, depot_id, gid, decrypt=True, manifest_request_code=0):
+            return _Manifest()
+
+    worker._client = _FakeSteamClient()
+    _stub_cdn_modules(worker, monkeypatch, tmp_path, _Cdn())
+    monkeypatch.setattr(
+        worker.enumerate_module, "manifest_gids_for_app", lambda depots, branch: [(1, 11)]
+    )
+
+    worker._handle_manifest_fetch("m7", {"app_id": "440"})
+
+    resp = worker._sent[-1]
+    assert resp["ok"] is True, resp
+    # No unique_chunks → fall back to the summed refs (2 + 1 = 3), not 0.
+    assert resp["result"]["manifests"][0]["chunk_count"] == 3
