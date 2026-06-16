@@ -15,7 +15,10 @@ class TestAppFactory:
 
     def test_health_route_mounted(self):
         app = create_app()
-        paths = {route.path for route in app.routes}
+        # Not every entry in app.routes is a path-bearing Route: FastAPI 0.137+
+        # adds internal `_IncludedRouter` objects (and Mounts) without a `.path`.
+        # Guard with getattr so route introspection survives FastAPI internals.
+        paths = {getattr(route, "path", None) for route in app.routes}
         assert "/api/v1/health" in paths
 
     def test_openapi_security_scheme_registered(self):
