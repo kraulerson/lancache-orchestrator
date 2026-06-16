@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Infrastructure — prefill logs WHY chunks failed (#169, step 1) — 2026-06-16
+
+A failed prefill recorded only the failure **count** (`prefill: 2430/2430 chunks failed`), so diagnosing it meant code-spelunking. The downloader already captured per-chunk `(uri, reason)` tuples; they just weren't surfaced.
+
+- `prefill.completed` (steam) and a new `prefill.epic.chunks_failed` (epic) now carry a `failure_reasons` histogram (top reasons → counts, e.g. `{'http 403': 2418, 'ConnectError': 12}`), and the game's `last_error` includes the dominant reasons — so `403`-needs-token vs `404`-not-found vs `ConnectError`-lancache-down is visible from the CLI/API and logs.
+- **Tests:** `_summarize_failures` (count + top-N), and `last_error` includes the reason. Full suite **1212 pass**; mypy(strict)/ruff/semgrep clean.
+- Step 1 of #169 (the F5 prefill download failing on newly-versioned Steam chunks): this makes the cause diagnosable; the actual download fix follows once the live HTTP status is read.
+
 ### Fixed — steam worker restarts on a wedged op (#153 / F-INT-6) — 2026-06-16
 
 When a steam op timed out (`IPCTimeoutError`) or was cancelled (job-runtime timeout → `CancelledError`), the **serial** worker subprocess was left wedged on the abandoned op, and the next steam job queued behind it (potentially timing out too).

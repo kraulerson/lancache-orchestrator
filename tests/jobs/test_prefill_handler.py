@@ -138,3 +138,44 @@ async def test_registered():
 
     _register_builtin_handlers()
     assert "prefill" in HANDLERS
+
+
+async def test_summarize_failures_counts_reasons():
+    from orchestrator.jobs.handlers.prefill import _summarize_failures
+
+    failures = [
+        ("/a", "http 403"),
+        ("/b", "http 403"),
+        ("/c", "ConnectError"),
+        ("/d", "http 403"),
+    ]
+    assert _summarize_failures(failures) == {"http 403": 3, "ConnectError": 1}
+
+
+async def test_summarize_failures_keeps_only_top_n():
+    from orchestrator.jobs.handlers.prefill import _summarize_failures
+
+    failures = [(f"/{i}", f"reason-{i}") for i in range(10)]  # 10 distinct reasons
+    assert len(_summarize_failures(failures, top=3)) == 3
+
+
+async def test_chunk_failure_last_error_includes_reason(pool, monkeypatch):
+    """#169: a failed prefill must record WHY (the dominant chunk-failure reason)
+    in the game's last_error, not just the count — so the operator can tell a
+    403-needs-token from a 404-not-found without reading logs."""
+    game_id = await _seed_game(pool)
+    await _seed_manifest(pool, game_id)
+
+    async def fake_prefill(uris, settings, *, on_progress=None):
+        return PrefillResult(
+            2,
+            0,
+            2,
+            [("/depot/731/chunk/x", "http 403"), ("/depot/731/chunk/y", "http 403")],
+        )
+
+    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
+    with pytest.raises(RuntimeError):
+        await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=_StubSteam()))
+    g = await pool.read_one("SELECT last_error FROM games WHERE id=?", (game_id,))
+    assert "http 403" in g["last_error"]
