@@ -41,9 +41,27 @@ _DEFAULT_SESSION_DIR = "/var/lib/orchestrator/steam_session"
 from gevent import Timeout as GeventTimeout  # noqa: E402
 from steam.client import SteamClient  # type: ignore[import-not-found]  # noqa: E402
 from steam.enums import EResult  # type: ignore[import-not-found]  # noqa: E402
+from steam.exceptions import SteamError  # type: ignore[import-not-found]  # noqa: E402
 
 # Pure-Python enumeration helpers (testable without gevent monkey-patch).
 from orchestrator.platform.steam import enumerate as enumerate_module  # noqa: E402
+
+# #122: genuine auth-loss EResults. steam-next's CDN calls raise SteamError with
+# an `.eresult`; mapping these to kind=NotAuthenticated lets the orchestrator flip
+# platforms.auth_status='expired'. Transient results (notably EResult.Timeout from
+# a slow/dropped CM, and Fail) are deliberately EXCLUDED so a network blip stays a
+# retryable SteamAPIError and never forces a needless 2FA re-auth (the design fix
+# for the pulled connected/logged_on socket-proxy — adversarial-review SEV-2).
+#
+# `_SESSION_LOST_ERESULTS` are UNAMBIGUOUS session-wide losses: if one surfaces on
+# a per-depot call it means the whole session died, so we fail the fetch (vs. a
+# false-partial success). `AccessDenied` is ambiguous on a per-depot call (the
+# common "depot not owned" case is indistinguishable), so it only counts as auth
+# loss on the app-wide enumeration path.
+_SESSION_LOST_ERESULTS = frozenset(
+    {EResult.NotLoggedOn, EResult.LoggedInElsewhere, EResult.Expired, EResult.Revoked}
+)
+_AUTH_LOSS_ERESULTS = _SESSION_LOST_ERESULTS | frozenset({EResult.AccessDenied})
 
 # In-memory state for the worker's lifetime.
 _client: SteamClient | None = None
@@ -325,12 +343,27 @@ def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
                         app_id, depot_id, gid, decrypt=True, manifest_request_code=code
                     )
                 except Exception as e:
+                    # #122: an UNAMBIGUOUS session-wide auth loss (e.g. NotLoggedOn)
+                    # on a per-depot call means the whole session died — re-raise so
+                    # the fetch fails as NotAuthenticated rather than swallowing it
+                    # into `skipped` as a false-partial success (the #109 lesson).
+                    # AccessDenied is left as a skip: the common "depot not owned"
+                    # case is indistinguishable from auth loss here.
+                    if isinstance(e, SteamError) and getattr(e, "eresult", None) in (
+                        _SESSION_LOST_ERESULTS
+                    ):
+                        raise
                     skipped.append(
                         {"depot_id": depot_id, "reason": f"{type(e).__name__}: {e}"[:120]}
                     )
                     continue
 
-                data = mfst.serialize()  # raw protobuf bytes
+                # #123.1: serialize(compress=False) — serialize() defaults to
+                # ZIP-compressing, so storing zstd(serialize()) was zstd(ZIP(pb)),
+                # double compression. We store zstd(pb); DepotManifest.deserialize
+                # auto-detects (tries ZipFile, falls back to raw), so the F7 expand
+                # round-trip and already-stored zstd(ZIP(pb)) blobs both still parse.
+                data = mfst.serialize(compress=False)  # raw protobuf bytes
                 compressed = compressor.compress(data)
 
                 # S2-1: write the BLOB to a temp file on the shared container FS
@@ -388,6 +421,17 @@ def _handle_manifest_fetch(msg_id: str, params: dict[str, str]) -> None:
         # as success (the false-empty-library lesson, #109) — and crucially,
         # never let the BaseException escape and crash the worker.
         _err(msg_id, "SteamCDNTimeout", f"manifest fetch timed out (app {app_id}): {e}"[:200])
+    except SteamError as e:
+        # #122: map a genuine auth-loss EResult to NotAuthenticated so the
+        # orchestrator's auth-flip fires. Everything else — notably EResult.Timeout
+        # from a transient CM drop — stays a retryable SteamAPIError, so a network
+        # blip never forces a needless 2FA re-auth.
+        if getattr(e, "eresult", None) in _AUTH_LOSS_ERESULTS:
+            _err(
+                msg_id, "NotAuthenticated", f"steam auth lost (eresult={e.eresult}): {str(e)[:140]}"
+            )
+        else:
+            _err(msg_id, "SteamAPIError", str(e)[:200])
     except Exception as e:
         _err(msg_id, "SteamAPIError", str(e)[:200])
 

@@ -28,8 +28,26 @@ if TYPE_CHECKING:
 
 class _EResult:
     OK = "OK"
+    Fail = "Fail"
+    Timeout = "Timeout"
     AccountLoginDeniedNeedTwoFactor = "NEED_2FA"
     AccountLogonDenied = "EMAIL_CODE"
+    # Auth-loss results (#122) — must mirror the real steam.enums.EResult member
+    # names the worker references.
+    AccessDenied = "AccessDenied"
+    Expired = "Expired"
+    NotLoggedOn = "NotLoggedOn"
+    LoggedInElsewhere = "LoggedInElsewhere"
+    InvalidPassword = "InvalidPassword"
+    Revoked = "Revoked"
+
+
+class _SteamError(Exception):
+    """Mirror of steam.exceptions.SteamError: carries an `.eresult`."""
+
+    def __init__(self, message, eresult=_EResult.Fail):
+        super().__init__(message)
+        self.eresult = eresult
 
 
 class _FakeSteamClient:
@@ -59,6 +77,10 @@ def worker(monkeypatch):
     client_mod.SteamClient = _FakeSteamClient  # type: ignore[attr-defined]
     enums_mod = types.ModuleType("steam.enums")
     enums_mod.EResult = _EResult  # type: ignore[attr-defined]
+    # steam.exceptions stub (#122): SteamError carries an `.eresult`; the worker
+    # inspects it to map genuine auth-loss results to kind=NotAuthenticated.
+    exceptions_mod = types.ModuleType("steam.exceptions")
+    exceptions_mod.SteamError = _SteamError  # type: ignore[attr-defined]
     # gevent stub. gevent.Timeout subclasses BaseException (NOT Exception) by
     # design, so a bare `except Exception` can't swallow it — faithfully
     # reproduce that so tests prove the worker catches it explicitly.
@@ -74,6 +96,7 @@ def worker(monkeypatch):
         ("steam.monkey", monkey),
         ("steam.client", client_mod),
         ("steam.enums", enums_mod),
+        ("steam.exceptions", exceptions_mod),
         ("gevent", gevent_mod),
     ]:
         monkeypatch.setitem(sys.modules, name, mod)
@@ -169,14 +192,14 @@ def test_manifest_fetch_cleans_temp_blobs_on_failure(worker, monkeypatch, tmp_pa
         metadata = _Meta()
         payload = _Payload()
 
-        def serialize(self):
+        def serialize(self, compress=True):
             return b"good-bytes"
 
     class _BadManifest:
         depot_id = 2
         gid = 22
 
-        def serialize(self):
+        def serialize(self, compress=True):
             raise RuntimeError("malformed manifest")  # post-fetch failure
 
     manifests = {1: _GoodManifest(), 2: _BadManifest()}
@@ -309,7 +332,7 @@ def test_manifest_fetch_chunk_count_is_unique_not_summed(worker, monkeypatch, tm
         # 2 + 1 = 3 mapping refs, but only 2 UNIQUE chunks (one is shared).
         payload = type("P", (), {"mappings": [_Mapping(2), _Mapping(1)]})()
 
-        def serialize(self):
+        def serialize(self, compress=True):
             return b"protobuf-bytes"
 
     class _Cdn:
@@ -360,7 +383,7 @@ def test_manifest_fetch_chunk_count_falls_back_when_field_absent(
         metadata = _Meta()
         payload = type("P", (), {"mappings": [_Mapping(2), _Mapping(1)]})()
 
-        def serialize(self):
+        def serialize(self, compress=True):
             return b"protobuf-bytes"
 
     class _Cdn:
@@ -385,3 +408,155 @@ def test_manifest_fetch_chunk_count_falls_back_when_field_absent(
     assert resp["ok"] is True, resp
     # No unique_chunks → fall back to the summed refs (2 + 1 = 3), not 0.
     assert resp["result"]["manifests"][0]["chunk_count"] == 3
+
+
+# --- #122: EResult-based mid-fetch auth-loss detection ------------------------
+
+
+def test_manifest_fetch_auth_loss_eresult_maps_to_not_authenticated(
+    worker, monkeypatch, tmp_path
+) -> None:
+    """#122: a genuine auth-loss SteamError (e.g. NotLoggedOn) from the initial
+    enumeration must surface kind=NotAuthenticated so the orchestrator's auth-flip
+    (platforms.auth_status='expired') fires — not be masked as SteamAPIError."""
+
+    class _Cdn:
+        def get_app_depot_info(self, app_id):
+            raise worker.SteamError("session lost", worker.EResult.NotLoggedOn)
+
+    worker._client = _FakeSteamClient()
+    _stub_cdn_modules(worker, monkeypatch, tmp_path, _Cdn())
+
+    worker._handle_manifest_fetch("m_a1", {"app_id": "440"})
+
+    resp = worker._sent[-1]
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "NotAuthenticated", resp
+
+
+def test_manifest_fetch_transient_timeout_eresult_is_not_auth_loss(
+    worker, monkeypatch, tmp_path
+) -> None:
+    """#122 (the adversarial-review SEV-2 it replaces): a slow/dropped CM gives
+    resp=None -> EResult.Timeout in steam-next. That is transient/retryable and
+    must NOT flip auth — otherwise a network blip forces a needless 2FA re-auth.
+    kind stays SteamAPIError."""
+
+    class _Cdn:
+        def get_app_depot_info(self, app_id):
+            raise worker.SteamError("timed out", worker.EResult.Timeout)
+
+    worker._client = _FakeSteamClient()
+    _stub_cdn_modules(worker, monkeypatch, tmp_path, _Cdn())
+
+    worker._handle_manifest_fetch("m_a2", {"app_id": "440"})
+
+    resp = worker._sent[-1]
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "SteamAPIError", resp
+
+
+def test_manifest_fetch_per_depot_session_loss_is_not_authenticated(
+    worker, monkeypatch, tmp_path
+) -> None:
+    """#122: a session-wide auth loss surfacing on a per-depot call (unambiguous
+    EResult like NotLoggedOn) must FAIL the whole fetch as NotAuthenticated — not
+    be swallowed into `skipped` as a false-partial success (the #109 lesson)."""
+
+    class _Cdn:
+        def get_app_depot_info(self, app_id):
+            return {}
+
+        def get_manifest_request_code(self, app_id, depot_id, gid):
+            raise worker.SteamError("not logged on", worker.EResult.NotLoggedOn)
+
+    worker._client = _FakeSteamClient()
+    _stub_cdn_modules(worker, monkeypatch, tmp_path, _Cdn())
+    monkeypatch.setattr(
+        worker.enumerate_module, "manifest_gids_for_app", lambda depots, branch: [(1, 11)]
+    )
+
+    worker._handle_manifest_fetch("m_a3", {"app_id": "440"})
+
+    resp = worker._sent[-1]
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "NotAuthenticated", resp
+
+
+def test_manifest_fetch_per_depot_access_denied_is_skipped(worker, monkeypatch, tmp_path) -> None:
+    """#122: AccessDenied on a per-depot call is ambiguous — the common
+    'depot not owned' case is indistinguishable from auth loss — so it stays a
+    per-depot skip. The fetch succeeds with that depot reported in `skipped`,
+    NOT a failed job."""
+
+    class _Cdn:
+        def get_app_depot_info(self, app_id):
+            return {}
+
+        def get_manifest_request_code(self, app_id, depot_id, gid):
+            raise worker.SteamError("no access", worker.EResult.AccessDenied)
+
+    worker._client = _FakeSteamClient()
+    _stub_cdn_modules(worker, monkeypatch, tmp_path, _Cdn())
+    monkeypatch.setattr(
+        worker.enumerate_module, "manifest_gids_for_app", lambda depots, branch: [(1, 11)]
+    )
+
+    worker._handle_manifest_fetch("m_a4", {"app_id": "440"})
+
+    resp = worker._sent[-1]
+    assert resp["ok"] is True, resp
+    assert resp["result"]["manifests"] == []
+    assert len(resp["result"]["skipped"]) == 1
+
+
+# --- #123.1: avoid double compression ----------------------------------------
+
+
+def test_manifest_fetch_serializes_uncompressed_to_avoid_double_zstd(
+    worker, monkeypatch, tmp_path
+) -> None:
+    """#123.1: serialize() defaults to ZIP-compressing, then we zstd it — storing
+    zstd(ZIP(protobuf)). Pass compress=False so we store zstd(protobuf): smaller,
+    and DepotManifest.deserialize auto-detects (so the F7 expand round-trip and
+    already-stored blobs still parse)."""
+    seen: dict = {}
+
+    class _Meta:
+        cb_disk_original = 10
+        unique_chunks = 1
+
+    class _Mapping:
+        chunks: ClassVar[list] = [object()]
+
+    class _Manifest:
+        depot_id = 1
+        gid = 11
+        metadata = _Meta()
+        payload = type("P", (), {"mappings": [_Mapping()]})()
+
+        def serialize(self, compress=True):
+            seen["compress"] = compress
+            return b"pb"
+
+    class _Cdn:
+        def get_app_depot_info(self, app_id):
+            return {}
+
+        def get_manifest_request_code(self, app_id, depot_id, gid):
+            return 0
+
+        def get_manifest(self, app_id, depot_id, gid, decrypt=True, manifest_request_code=0):
+            return _Manifest()
+
+    worker._client = _FakeSteamClient()
+    _stub_cdn_modules(worker, monkeypatch, tmp_path, _Cdn())
+    monkeypatch.setattr(
+        worker.enumerate_module, "manifest_gids_for_app", lambda depots, branch: [(1, 11)]
+    )
+
+    worker._handle_manifest_fetch("m_c1", {"app_id": "440"})
+
+    resp = worker._sent[-1]
+    assert resp["ok"] is True, resp
+    assert seen.get("compress") is False, "serialize must be called with compress=False (#123.1)"
