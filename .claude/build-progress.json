@@ -21,10 +21,11 @@
     "F5-steam-prefill",
     "f6-epic-prefill",
     "f13-scheduled-sweep",
-    "f11-cli"
+    "f11-cli",
+    "f8-block-list"
   ],
-  "features_since_last_test": 0,
-  "features_since_last_health_check": 5,
+  "features_since_last_test": 1,
+  "features_since_last_health_check": 1,
   "test_interval": 2,
   "last_test_session": "2026-06-14",
   "testing_required": false,

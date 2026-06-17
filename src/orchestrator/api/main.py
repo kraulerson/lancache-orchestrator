@@ -27,6 +27,7 @@ from orchestrator.api.middleware import (
 )
 from orchestrator.api.routers.auth import router as auth_router
 from orchestrator.api.routers.auth import set_steam_client_singleton
+from orchestrator.api.routers.block_list import router as block_list_router
 from orchestrator.api.routers.epic_auth import router as epic_auth_router
 from orchestrator.api.routers.epic_sync import router as epic_sync_router
 from orchestrator.api.routers.games import router as games_router
@@ -189,6 +190,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         library_sync_interval_sec=settings.scheduler_library_sync_interval_sec,
         validation_sweep_enabled=settings.validation_sweep_enabled,
         validation_sweep_cron=settings.validation_sweep_cron,
+        scheduled_prefill_enabled=settings.scheduled_prefill_enabled,
     )
     try:
         await scheduler_manager.start()
@@ -395,6 +397,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(platforms_router)
     app.include_router(games_router)
+    app.include_router(block_list_router)
     app.include_router(jobs_router)
     app.include_router(manifests_router)
     app.include_router(manifest_trigger_router)

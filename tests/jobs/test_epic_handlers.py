@@ -166,3 +166,32 @@ async def test_epic_prefill_requires_client(pool):
         await prefill_handler(
             _job("prefill", gid), Deps(pool=pool, steam_client=None, epic_client=None)
         )
+
+
+async def test_epic_library_sync_writes_current_version(pool):
+    stub = _StubEpic(items=[EpicLibraryItem("AppA", "ns", "cat", "Game A", build_version="bv-1")])
+    await library_sync_handler(
+        _job("library_sync"), Deps(pool=pool, steam_client=None, epic_client=stub)
+    )
+    row = await pool.read_one("SELECT current_version FROM games WHERE platform='epic'")
+    assert row["current_version"] == "bv-1"
+
+
+async def test_epic_prefill_sets_cached_version(pool, monkeypatch):
+    gid = await _seed_epic_game(pool)
+    await pool.execute_write("UPDATE games SET current_version='bv-1' WHERE id=?", (gid,))
+    stub = _StubEpic(manifest=_manifest())
+
+    async def fake_prefill(paths, host, base, settings, **kw):
+        return EpicPrefillResult(len(paths), len(paths), 0)
+
+    async def fake_verify(paths, host, base, settings, **kw):
+        return 1.0
+
+    monkeypatch.setattr(ph, "epic_prefill_chunks", fake_prefill)
+    monkeypatch.setattr(ph, "epic_verify_cached", fake_verify)
+    await prefill_handler(
+        _job("prefill", gid), Deps(pool=pool, steam_client=None, epic_client=stub)
+    )
+    g = await pool.read_one("SELECT cached_version FROM games WHERE id=?", (gid,))
+    assert g["cached_version"] == "bv-1"

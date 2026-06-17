@@ -197,8 +197,12 @@ async def _epic_prefill_inner(
             game_id=game_id,
             hit_ratio=round(hit_ratio, 3),
         )
+    # F8: Epic prefill always fetches a FRESH manifest (signed URLs expire), so
+    # the cache now reflects current_version — adopt it so the scheduled diff
+    # stops re-enqueuing this game every cycle.
     await deps.pool.execute_write(
-        "UPDATE games SET status='up_to_date', last_prefilled_at=CURRENT_TIMESTAMP WHERE id=?",
+        "UPDATE games SET status='up_to_date', last_prefilled_at=CURRENT_TIMESTAMP, "
+        "cached_version=current_version WHERE id=?",
         (game_id,),
     )
     _log.info(
@@ -229,7 +233,10 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
     if game_id is None:
         raise ValueError("prefill job has no game_id")
 
-    game = await deps.pool.read_one("SELECT id, app_id, platform FROM games WHERE id=?", (game_id,))
+    game = await deps.pool.read_one(
+        "SELECT id, app_id, platform, cached_version, current_version FROM games WHERE id=?",
+        (game_id,),
+    )
     if game is None:
         raise ValueError(f"game {game_id} not found in games table")
     if game["platform"] != "steam":
@@ -260,21 +267,22 @@ async def _steam_prefill_inner(
     deps: Deps,
     steam_client: SteamWorkerClient,
 ) -> None:
-    # Ensure manifests exist (fetch once if the game has none).
+    # F8 (S2-2): fetch a FRESH manifest when the game is version-diverged
+    # (cached_version != current_version, incl. never-cached) so prefill caches
+    # the CURRENT content — otherwise a patched game would re-download the stale
+    # manifest's chunks yet get stamped cached_version=current_version, silently
+    # never prefilling the patch. A redundant re-prefill of an up-to-date game
+    # (cached == current; None != None is False) reuses the existing manifest.
+    diverged = game["cached_version"] != game["current_version"]
     uris = await _load_chunk_uris(deps, game_id)
-    if not uris:
-        existing = await deps.pool.read_one(
-            "SELECT 1 AS one FROM manifests WHERE game_id=? AND depot_id IS NOT NULL LIMIT 1",
-            (game_id,),
-        )
-        if existing is None:
-            try:
-                app_id_int = int(game["app_id"])
-            except (TypeError, ValueError) as e:
-                raise ValueError(f"game {game_id} app_id not numeric") from e
-            _log.info("prefill.fetching_manifests", job_id=job_id, game_id=game_id)
-            await steam_client.manifest_fetch(app_id_int)
-            uris = await _load_chunk_uris(deps, game_id)
+    if diverged or not uris:
+        try:
+            app_id_int = int(game["app_id"])
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"game {game_id} app_id not numeric") from e
+        _log.info("prefill.fetching_manifests", job_id=job_id, game_id=game_id, diverged=diverged)
+        await steam_client.manifest_fetch(app_id_int)
+        uris = await _load_chunk_uris(deps, game_id)
 
     settings = get_settings()
     result = await prefill_chunks(uris, settings)
@@ -312,7 +320,12 @@ async def _steam_prefill_inner(
         "VALUES ('validate', ?, 'steam', 'queued', 'scheduler') ON CONFLICT DO NOTHING",
         (game_id,),
     )
+    # F8: full success → what's cached is now the current version. The validate
+    # job (enqueued above) will re-affirm this, but recording it here means the
+    # scheduled-prefill diff skips this game immediately even before validation.
     await deps.pool.execute_write(
-        "UPDATE games SET last_prefilled_at=CURRENT_TIMESTAMP WHERE id=?", (game_id,)
+        "UPDATE games SET last_prefilled_at=CURRENT_TIMESTAMP, "
+        "cached_version=current_version WHERE id=?",
+        (game_id,),
     )
     _log.info("prefill.validate_enqueued", job_id=job_id, game_id=game_id)

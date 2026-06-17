@@ -25,6 +25,7 @@ Two SEV-2 bugs from UAT-6 (issues #107 and #109) are addressed here:
 
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -140,7 +141,14 @@ def _extract_app_metadata(
             key_str = str(depot_key)
             if key_str.isdigit():
                 depot_ids.append(int(key_str))
-        out.append({"app_id": int(app_id), "name": name, "depots": depot_ids})
+        out.append(
+            {
+                "app_id": int(app_id),
+                "name": name,
+                "depots": depot_ids,
+                "version": _app_version_token(depots_dict),
+            }
+        )
     return out
 
 
@@ -226,3 +234,22 @@ def manifest_gids_for_app(depots: Any, branch: str = "public") -> list[tuple[int
             continue
         out.append((int(key), gid))
     return out
+
+
+def _app_version_token(depots: Any) -> str | None:
+    """A stable per-app version string for change detection (F8).
+
+    Prefers the public-branch ``buildid`` (changes on every app update); falls
+    back to a SHA-256 of the sorted ``(depot_id, manifest_gid)`` pairs so any
+    depot manifest change shifts the token. Returns ``None`` when neither is
+    available — the game is then treated as needing a prefill.
+    """
+    if isinstance(depots, dict):
+        buildid = ((depots.get("branches") or {}).get("public") or {}).get("buildid")
+        if buildid is not None and str(buildid):
+            return str(buildid)
+    pairs = manifest_gids_for_app(depots, "public")
+    if not pairs:
+        return None
+    joined = ",".join(f"{d}:{g}" for d, g in sorted(pairs))
+    return hashlib.sha256(joined.encode()).hexdigest()

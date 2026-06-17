@@ -1191,4 +1191,74 @@ ruff/mypy(strict)/gitleaks/semgrep clean. New deps: none.
 
 ---
 
+## Feature 22: F8 — Block List + Scheduled Prefill Driver (version-diff)
+
+**Phase Built:** 2 (Milestone B / F8)
+**Status:** Complete pending live UAT (2026-06-17)
+
+**Summary:** Makes the orchestrator the automatic Steam+Epic prefill driver
+(completes F12's "diff enqueues prefills"). A scheduled 6h cycle prefills only
+games that are new, version-diverged, or `validation_failed` — and an operator
+block-list excludes specific games. Adds the block-list REST resource + CLI and
+populates the previously-vestigial `current_version`/`cached_version` columns.
+The last orchestrator-repo MVP feature before the Game_shelf integration
+(F14–F17). **No DB migration** — `block_list` and the version columns already
+shipped in `0001_initial.sql`.
+
+**Key Interfaces:**
+  - `src/orchestrator/api/routers/block_list.py` — `GET/POST/DELETE
+    /api/v1/block-list` (paginated F9 envelope; idempotent POST 201/200,
+    pre-block OK; idempotent DELETE `{removed}`)
+  - `src/orchestrator/scheduler/jobs.py::enqueue_scheduled_prefill` — the
+    version-diff `INSERT...SELECT` (registered on the library-sync interval via
+    `scheduler/manager.py`; `settings.scheduled_prefill_enabled`)
+  - `src/orchestrator/platform/steam/enumerate.py::_app_version_token` — Steam
+    version token (buildid → depot-gid composite)
+  - `src/orchestrator/jobs/handlers/{library_sync,prefill}.py` — write
+    `current_version` / `cached_version`
+  - `src/orchestrator/api/routers/games.py` — `blocked` via correlated `EXISTS`
+  - `src/orchestrator/cli/commands/game.py` — `block`/`unblock` + `BLOCKED`
+    column; `cli/client.py::OrchClient.delete`
+
+**Locked decisions (spec 2026-06-17):**
+  - **Version-diff model** (O(changed games)/cycle), not blanket re-prefill.
+  - **`block_list` is the single source of truth** — never mutates
+    `games.status`; "blocked" is an orthogonal computed flag.
+  - **Prefill is the sole `cached_version` writer**; steam prefill re-fetches a
+    fresh manifest when version-diverged so a patch caches current content.
+  - **Manual prefill/validate bypass the block-list; the F13 sweep is not
+    block-filtered** (validation still runs on blocked games).
+  - **Orchestrator role = driver:** intended to retire the host Steam/Epic
+    prefill cron after a live parallel-run (GOG + chmod-heal cron stay).
+
+**Test Coverage:** new block-list router tests (CRUD/idempotency/pre-block/
+envelope/401/400/503), CLI block/unblock (+ URL-encode), `games.blocked`,
+scheduler diff (selects changed/null/validation_failed, excludes blocked+
+unowned, dedups), version-token population (steam composite + epic buildVersion),
+`cached_version` written only on full prefill success, steam manifest-refresh on
+divergence, validate-never-writes-`cached_version`. Full suite **1253 pass**;
+ruff/mypy(strict)/semgrep/gitleaks clean. New deps: none.
+
+**Adversarial review:** caught two SEV-2 correctness defects (Epic infinite
+re-prefill; steam stale-manifest false version-stamp) + one SEV-4 (CLI
+`unblock` URL-encoding) — all fixed test-first. See
+`docs/security-audits/f8-block-list-security-audit.md`.
+
+**Related docs:** spec `docs/superpowers/specs/2026-06-17-f8-block-list-design.md`;
+plan `docs/superpowers/plans/2026-06-17-f8-block-list.md`.
+
+**Known Limitations:**
+  - **Cold-start adoption is a (WAN-free) prefill pass**, not stat-only: a game
+    cached by external tools has no orchestrator manifest, so the first
+    scheduled cycle prefills it (all cache HITs → 0 WAN, but re-reads chunks
+    locally). A chunk-level disk-stat skip inside prefill is a clean future
+    optimization.
+  - **Scheduled Steam prefill needs a valid session** — an expired session fails
+    the cycle's jobs (and flips `auth_status='expired'`) until re-auth.
+  - **Eventual consistency:** the prefill job runs on its own interval,
+    independent of library sync — a fresh patch is enqueued within ~2 cycles.
+  - **Live UAT pending** — the full driver cycle needs a Steam 2FA login.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->

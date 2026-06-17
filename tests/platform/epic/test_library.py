@@ -60,3 +60,22 @@ async def test_enumerate_error_raises(monkeypatch):
     )
     with pytest.raises(ep_lib.EpicLibraryError):
         await ep_lib.enumerate_library("TOK", _settings())
+
+
+async def test_to_item_carries_build_version():
+    item = ep_lib._to_item(
+        {
+            "appName": "Fortnite",
+            "namespace": "fn",
+            "catalogItemId": "abc",
+            "buildVersion": "++Fortnite-29.00",
+        }
+    )
+    assert item is not None
+    assert item.build_version == "++Fortnite-29.00"
+
+
+async def test_to_item_build_version_optional():
+    item = ep_lib._to_item({"appName": "X", "namespace": "n", "catalogItemId": "c"})
+    assert item is not None
+    assert item.build_version is None

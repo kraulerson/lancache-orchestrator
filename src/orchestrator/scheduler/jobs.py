@@ -86,3 +86,42 @@ async def enqueue_validation_sweep(pool: Pool) -> int:
             reason=str(e)[:200],
         )
         return 0
+
+
+async def enqueue_scheduled_prefill(pool: Pool) -> int:
+    """Enqueue 'prefill' jobs for owned games that are new, version-diverged, or
+    validation_failed — and not block-listed (F8 scheduled prefill driver).
+
+    One bulk INSERT...SELECT. `ON CONFLICT DO NOTHING` + the migration-0006
+    in-flight UNIQUE index dedups against a prefill already queued/running for a
+    game. The `cached_version IS NULL` disjunct makes the `<>` comparison
+    NULL-safe (a never-cached game is caught by the IS NULL arm). Returns the
+    number of rows enqueued. Never raises — a failing scheduler tick must not
+    degrade APScheduler.
+    """
+    try:
+        inserted = await pool.execute_write(
+            "INSERT INTO jobs (kind, game_id, platform, state, source) "
+            "SELECT 'prefill', g.id, g.platform, 'queued', 'scheduler' "
+            "FROM games g "
+            "WHERE g.owned = 1 "
+            "  AND (g.cached_version IS NULL "
+            "       OR g.cached_version <> g.current_version "
+            "       OR g.status = 'validation_failed') "
+            "  AND NOT EXISTS ("
+            "      SELECT 1 FROM block_list b "
+            "      WHERE b.platform = g.platform AND b.app_id = g.app_id) "
+            "ON CONFLICT DO NOTHING"
+        )
+        _log.info("scheduler.scheduled_prefill.enqueued", count=inserted)
+        return inserted
+    except PoolError as e:
+        _log.error("scheduler.scheduled_prefill.db_error", reason=str(e)[:200])
+        return 0
+    except Exception as e:
+        _log.error(
+            "scheduler.scheduled_prefill.unexpected_error",
+            error=type(e).__name__,
+            reason=str(e)[:200],
+        )
+        return 0

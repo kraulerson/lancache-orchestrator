@@ -22,7 +22,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from orchestrator.scheduler.jobs import enqueue_library_sync, enqueue_validation_sweep
+from orchestrator.scheduler.jobs import (
+    enqueue_library_sync,
+    enqueue_scheduled_prefill,
+    enqueue_validation_sweep,
+)
 
 if TYPE_CHECKING:
     from apscheduler.job import Job
@@ -37,6 +41,7 @@ _log = structlog.get_logger(__name__)
 # orphan jobs if the in-memory store ever gets persisted in a future BL.
 LIBRARY_SYNC_JOB_ID = "library_sync_steam"
 VALIDATION_SWEEP_JOB_ID = "validation_sweep"
+SCHEDULED_PREFILL_JOB_ID = "scheduled_prefill"
 
 
 class SchedulerManager:
@@ -56,12 +61,14 @@ class SchedulerManager:
         library_sync_interval_sec: int,
         validation_sweep_enabled: bool = True,
         validation_sweep_cron: str = "0 3 * * 0",
+        scheduled_prefill_enabled: bool = True,
     ) -> None:
         self._pool = pool
         self._enabled = enabled
         self._library_sync_interval_sec = library_sync_interval_sec
         self._validation_sweep_enabled = validation_sweep_enabled
         self._validation_sweep_cron = validation_sweep_cron
+        self._scheduled_prefill_enabled = scheduled_prefill_enabled
         self._scheduler: AsyncIOScheduler | None = None
         # Serializes start()/shutdown() so the lifecycle stays atomic even if
         # they are ever called concurrently (e.g. a future restart endpoint).
@@ -124,6 +131,20 @@ class SchedulerManager:
                     args=(self._pool,),
                     id=VALIDATION_SWEEP_JOB_ID,
                     name="Enqueue validation sweep",
+                    replace_existing=True,
+                )
+
+            if self._scheduled_prefill_enabled:
+                # F8: same cadence as library sync, independent of it (no
+                # completion-chaining) — eventually consistent: a fresh patch is
+                # enqueued once both the next sync (refreshing current_version)
+                # and the next prefill diff have run.
+                scheduler.add_job(
+                    enqueue_scheduled_prefill,
+                    trigger=IntervalTrigger(seconds=self._library_sync_interval_sec),
+                    args=(self._pool,),
+                    id=SCHEDULED_PREFILL_JOB_ID,
+                    name="Enqueue scheduled prefill (version-diff)",
                     replace_existing=True,
                 )
 

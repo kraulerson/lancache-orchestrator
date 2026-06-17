@@ -65,6 +65,10 @@ async def validate_one_game(
 
     new_status = _STATUS_FOR.get(result.outcome)
     if new_status is not None:
+        # F8: validate does NOT write cached_version — prefill is the sole writer
+        # (it controls manifest freshness). A standalone sweep can validate a
+        # stale stored manifest, so stamping current_version here could falsely
+        # mark a patched game as cached. See the F8 spec "prefill-sole-writer".
         await pool.execute_write(
             "UPDATE games SET status=?, last_validated_at=CURRENT_TIMESTAMP WHERE id=?",
             (new_status, game_id),

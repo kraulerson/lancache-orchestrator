@@ -79,3 +79,129 @@ def test_show_rejects_non_positive_id(cli_invoke):
     r = cli_invoke(["game", "show", "0"])
     assert r.exit_code == 2
     assert "positive" in (r.output + (r.stderr or "")).lower()
+
+
+def test_game_block_resolves_and_posts(mock):
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/v1/games":
+            return httpx.Response(
+                200,
+                json={
+                    "games": [
+                        {
+                            "id": 5,
+                            "platform": "steam",
+                            "app_id": "730",
+                            "title": "CS",
+                            "status": "up_to_date",
+                            "blocked": False,
+                        }
+                    ],
+                    "meta": {},
+                },
+            )
+        assert req.method == "POST" and req.url.path == "/api/v1/block-list"
+        import json as _j
+
+        assert _j.loads(req.content) == {
+            "platform": "steam",
+            "app_id": "730",
+            "reason": "x",
+            "source": "cli",
+        }
+        return httpx.Response(
+            201,
+            json={
+                "id": 1,
+                "platform": "steam",
+                "app_id": "730",
+                "reason": "x",
+                "source": "cli",
+                "blocked_at": "t",
+            },
+        )
+
+    r = mock(["game", "block", "5", "--reason", "x"], handler)
+    assert r.exit_code == 0 and "730" in r.output
+
+
+def test_game_block_unknown_id_exit_1(mock):
+    r = mock(
+        ["game", "block", "999"], lambda req: httpx.Response(200, json={"games": [], "meta": {}})
+    )
+    assert r.exit_code == 1
+
+
+def test_game_unblock_resolves_and_deletes(mock):
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/v1/games":
+            return httpx.Response(
+                200,
+                json={
+                    "games": [
+                        {
+                            "id": 5,
+                            "platform": "steam",
+                            "app_id": "730",
+                            "title": "CS",
+                            "status": "up_to_date",
+                            "blocked": True,
+                        }
+                    ],
+                    "meta": {},
+                },
+            )
+        assert req.method == "DELETE" and req.url.path == "/api/v1/block-list/steam/730"
+        return httpx.Response(200, json={"removed": 1})
+
+    r = mock(["game", "unblock", "5"], handler)
+    assert r.exit_code == 0
+
+
+def test_game_list_shows_blocked_column(mock):
+    games = {
+        "games": [
+            {
+                "id": 5,
+                "platform": "steam",
+                "app_id": "730",
+                "title": "CS",
+                "status": "up_to_date",
+                "blocked": True,
+            }
+        ],
+        "meta": {},
+    }
+    r = mock(["game", "list"], lambda req: httpx.Response(200, json=games))
+    assert r.exit_code == 0 and "BLOCKED" in r.output
+
+
+def test_game_unblock_url_encodes_app_id(mock):
+    """An app_id with a slash (Epic appName) must be percent-encoded so it stays
+    a single path segment and doesn't mis-route (SEV-4 adversarial finding)."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/v1/games":
+            return httpx.Response(
+                200,
+                json={
+                    "games": [
+                        {
+                            "id": 5,
+                            "platform": "epic",
+                            "app_id": "a/b",
+                            "title": "X",
+                            "status": "unknown",
+                            "blocked": True,
+                        }
+                    ],
+                    "meta": {},
+                },
+            )
+        raw = req.url.raw_path.decode()
+        assert "%2F" in raw.upper(), raw
+        assert "/epic/a/b" not in raw
+        return httpx.Response(200, json={"removed": 1})
+
+    r = mock(["game", "unblock", "5"], handler)
+    assert r.exit_code == 0

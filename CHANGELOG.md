@@ -19,6 +19,28 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — F8 block list + scheduled prefill driver (version-diff) — 2026-06-17
+
+The orchestrator becomes the automatic **Steam+Epic prefill driver** (completes F12's "diff enqueues prefills"): a 6h cycle prefills only the games that actually changed, with an operator block-list to exclude games.
+
+- **Block-list REST resource** (`GET/POST/DELETE /api/v1/block-list`): paginated wrapped envelope + allow-list filters (`platform`/`source`), idempotent POST (`201` new / `200` existing, accepts an unknown `(platform, app_id)` for pre-blocking), idempotent DELETE (`{removed: 0|1}`). `block_list` is the single source of truth — no schema change (the table shipped in `0001_initial.sql`).
+- **CLI** `game block <id> [--reason]` / `game unblock <id>` (resolve id→`(platform, app_id)` via the list, then POST/DELETE), and a `BLOCKED` column on `game list`. New `OrchClient.delete`.
+- **`games.blocked`** (bool) on `GET /api/v1/games` via a correlated `EXISTS` subquery (no JOIN → no filter-clause ambiguity).
+- **Scheduled prefill driver** (`enqueue_scheduled_prefill`, registered on the library-sync interval, `scheduled_prefill_enabled`): one diff insert enqueues `prefill` for owned games where `cached_version IS NULL OR cached_version <> current_version OR status='validation_failed'`, excluding block-listed ones (`ON CONFLICT DO NOTHING` + the migration-0006 in-flight index dedup).
+
+### Changed — version tracking populates the dormant `current_version`/`cached_version` columns — 2026-06-17
+
+- `library_sync` now writes `current_version` from enumeration: Steam = public-branch `buildid` (composite SHA-256 of sorted depot:gid as fallback), Epic = `buildVersion`. `COALESCE` preserves a known-good version when an enumeration carries none (never erases tracking).
+- Prefill is the **sole** writer of `cached_version` (= `current_version`, on full success). Steam prefill now **re-fetches a fresh manifest when version-diverged** so a patched game caches *current* content (not the stale manifest); Epic already fetched fresh. Validate updates `status` but never `cached_version` (a standalone sweep can validate a stale manifest).
+
+### Data Model — `current_version`/`cached_version` now populated; `block_list` now consumed — 2026-06-17
+
+No migration. The two version columns (vestigial since `0001`) are now maintained, and the `block_list` table (also from `0001`) gains its first reader/writer.
+
+### Security — block-list endpoints bearer-gated + bound-checked — 2026-06-17
+
+All three block-list endpoints are behind the global bearer middleware; inputs are bounded by pydantic `Literal`/`Field` AND the table CHECK constraints; all SQL is parameterized (allow-list field names only). An adversarial-review pass found and we fixed two SEV-2 correctness defects test-first (Epic infinite re-prefill; steam stale-manifest false version-stamp) and one SEV-4 (CLI `unblock` now URL-encodes `app_id`). Full suite **1253 pass**; mypy(strict)/ruff/semgrep/gitleaks clean. See `docs/security-audits/f8-block-list-security-audit.md`.
+
 ### Infrastructure — prefill logs WHY chunks failed (#169, step 1) — 2026-06-16
 
 A failed prefill recorded only the failure **count** (`prefill: 2430/2430 chunks failed`), so diagnosing it meant code-spelunking. The downloader already captured per-chunk `(uri, reason)` tuples; they just weren't surfaced.

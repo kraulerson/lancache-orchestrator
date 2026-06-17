@@ -241,3 +241,30 @@ class TestErrorPropagation:
             await library_sync_handler(_job(), Deps(pool=pool, steam_client=stub))
         rows = await pool.read_all("SELECT id FROM games")
         assert rows == []
+
+
+class TestCurrentVersion:
+    async def test_steam_sync_writes_current_version(self, pool):
+        stub = _StubSteam(
+            result={"apps": [{"app_id": 730, "name": "CS2", "depots": [731], "version": "42"}]}
+        )
+        await library_sync_handler(_job(), Deps(pool=pool, steam_client=stub))
+        row = await pool.read_one("SELECT current_version FROM games WHERE app_id='730'")
+        assert row["current_version"] == "42"
+
+    async def test_steam_sync_preserves_cached_version_and_status(self, pool):
+        await pool.execute_write(
+            "INSERT INTO games "
+            "(platform, app_id, title, owned, status, cached_version, current_version)"
+            " VALUES ('steam','730','Old',1,'up_to_date','99','99')"
+        )
+        stub = _StubSteam(
+            result={"apps": [{"app_id": 730, "name": "CS2", "depots": [731], "version": "42"}]}
+        )
+        await library_sync_handler(_job(), Deps(pool=pool, steam_client=stub))
+        row = await pool.read_one(
+            "SELECT status, cached_version, current_version FROM games WHERE app_id='730'"
+        )
+        assert row["status"] == "up_to_date"  # untouched
+        assert row["cached_version"] == "99"  # untouched
+        assert row["current_version"] == "42"  # updated

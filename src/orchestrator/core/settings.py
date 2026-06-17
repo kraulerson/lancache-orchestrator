@@ -127,6 +127,8 @@ class Settings(BaseSettings):
     # F13 — scheduled validation sweep.
     validation_sweep_enabled: bool = True
     validation_sweep_cron: str = "0 3 * * 0"  # 5-field cron (min hour dom mon dow), UTC
+    # F8: the scheduled prefill driver runs on the library-sync interval.
+    scheduled_prefill_enabled: bool = True
     sweep_batch_size: int = Field(default=10, ge=1)
 
     # --- Misc --------------------------------------------------------

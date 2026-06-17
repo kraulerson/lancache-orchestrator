@@ -87,6 +87,7 @@ class TestGamesHappyPath:
                 "last_prefilled_at",
                 "last_error",
                 "metadata",
+                "blocked",
             }
 
 
@@ -543,6 +544,7 @@ class TestGamesMetadata:
                     "last_prefilled_at": None,
                     "last_error": None,
                     "metadata": {"already-decoded": True},  # non-buffer type
+                    "blocked": 0,
                 }
             ]
 
@@ -581,6 +583,7 @@ class TestGamesMetadata:
                     "last_prefilled_at": None,
                     "last_error": None,
                     "metadata": None,
+                    "blocked": 0,
                 },
                 {
                     "id": 2,
@@ -596,6 +599,7 @@ class TestGamesMetadata:
                     "last_prefilled_at": None,
                     "last_error": None,
                     "metadata": None,
+                    "blocked": 0,
                 },
             ]
 
@@ -644,3 +648,18 @@ class TestGamesLastErrorTruncation:
         )
         game = next(g for g in r.json()["games"] if g["id"] == 1)
         assert len(game["last_error"]) == 200
+
+
+class TestGamesBlockedField:
+    async def test_blocked_true_when_in_block_list(self, client, populated_pool):
+        auth = {"Authorization": f"Bearer {'a' * 32}"}
+        first = (await client.get("/api/v1/games", headers=auth)).json()["games"][0]
+        await populated_pool.execute_write(
+            "INSERT INTO block_list (platform, app_id, source) VALUES (?, ?, 'api')",
+            (first["platform"], first["app_id"]),
+        )
+        body = (await client.get("/api/v1/games", headers=auth)).json()
+        match = next(x for x in body["games"] if x["id"] == first["id"])
+        assert match["blocked"] is True
+        others = [x for x in body["games"] if x["id"] != first["id"]]
+        assert all(x["blocked"] is False for x in others)
