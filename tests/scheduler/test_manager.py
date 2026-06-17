@@ -277,3 +277,37 @@ class TestSchedulerManager:
             assert running[0] is mgr._scheduler
         finally:
             await mgr.shutdown()
+
+
+class TestScheduledPrefillRegistration:
+    async def test_registers_scheduled_prefill_job(self, pool):
+        from orchestrator.scheduler.manager import SCHEDULED_PREFILL_JOB_ID
+
+        mgr = SchedulerManager(
+            pool=pool,
+            enabled=True,
+            library_sync_interval_sec=21600,
+            validation_sweep_enabled=False,
+            scheduled_prefill_enabled=True,
+        )
+        await mgr.start()
+        try:
+            assert SCHEDULED_PREFILL_JOB_ID in mgr.get_registered_job_ids()
+        finally:
+            await mgr.shutdown()
+
+    async def test_scheduled_prefill_disabled_not_registered(self, pool):
+        from orchestrator.scheduler.manager import SCHEDULED_PREFILL_JOB_ID
+
+        mgr = SchedulerManager(
+            pool=pool,
+            enabled=True,
+            library_sync_interval_sec=21600,
+            validation_sweep_enabled=False,
+            scheduled_prefill_enabled=False,
+        )
+        await mgr.start()
+        try:
+            assert SCHEDULED_PREFILL_JOB_ID not in mgr.get_registered_job_ids()
+        finally:
+            await mgr.shutdown()

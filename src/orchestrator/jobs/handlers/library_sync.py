@@ -5,8 +5,10 @@ Called by the jobs worker when a `library_sync` job is claimed. Calls
 operator's owned apps into the `games` table.
 
 Idempotent: `INSERT ... ON CONFLICT(platform, app_id) DO UPDATE` updates
-title/owned/metadata only — `status`, `cached_version`, and other
-lifecycle columns are preserved (plan P11).
+title/owned/metadata/current_version only — `status`, `cached_version`, and
+other lifecycle columns are preserved (plan P11). `current_version` carries the
+latest upstream version token (F8) so the scheduled-prefill diff can detect
+patches without clobbering what was last cached.
 """
 
 from __future__ import annotations
@@ -22,12 +24,15 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 _UPSERT_SQL = (
-    "INSERT INTO games (platform, app_id, title, owned, metadata) "
-    "VALUES (?, ?, ?, 1, ?) "
+    "INSERT INTO games (platform, app_id, title, owned, metadata, current_version) "
+    "VALUES (?, ?, ?, 1, ?, ?) "
     "ON CONFLICT(platform, app_id) DO UPDATE SET "
     "  title = excluded.title, "
     "  owned = 1, "
-    "  metadata = excluded.metadata"
+    "  metadata = excluded.metadata, "
+    # Keep a known-good version if this enumeration didn't carry one (a depot
+    # with no buildid, or a transient gap) — never erase version tracking.
+    "  current_version = COALESCE(excluded.current_version, games.current_version)"
 )
 
 
@@ -69,7 +74,9 @@ async def _epic_library_sync(job: dict[str, Any], deps: Deps) -> None:
             {"namespace": item.namespace, "catalog_item_id": item.catalog_item_id},
             separators=(",", ":"),
         )
-        await deps.pool.execute_write(_UPSERT_SQL, ("epic", item.app_name, item.title, metadata))
+        await deps.pool.execute_write(
+            _UPSERT_SQL, ("epic", item.app_name, item.title, metadata, item.build_version)
+        )
         upserted += 1
     _log.info("library_sync.epic.upserted", job_id=job_id, upserted=upserted)
 
@@ -139,7 +146,10 @@ async def _steam_library_sync(job: dict[str, Any], deps: Deps) -> None:
             {"depots": list(depots), "steam_packages": []},
             separators=(",", ":"),
         )
-        await deps.pool.execute_write(_UPSERT_SQL, ("steam", str(app_id_raw), title, metadata))
+        version = app.get("version")
+        await deps.pool.execute_write(
+            _UPSERT_SQL, ("steam", str(app_id_raw), title, metadata, version)
+        )
         upserted += 1
 
     _log.info(

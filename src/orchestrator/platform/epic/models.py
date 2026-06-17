@@ -38,3 +38,4 @@ class EpicLibraryItem:
     namespace: str
     catalog_item_id: str
     title: str
+    build_version: str | None = None

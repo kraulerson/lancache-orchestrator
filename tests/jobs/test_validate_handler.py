@@ -188,3 +188,28 @@ async def test_validate_handler_registered():
 
     _register_builtin_handlers()
     assert "validate" in HANDLERS
+
+
+async def test_validate_never_writes_cached_version(pool, monkeypatch):
+    """F8 prefill-sole-writer: validate updates status but NEVER cached_version,
+    even on a clean outcome (a standalone sweep may validate a stale manifest)."""
+    from orchestrator.core.settings import get_settings
+    from orchestrator.jobs.handlers.validate import validate_one_game
+    from orchestrator.validator.disk_stat import ValidationResult
+
+    game_id = await _seed_game(pool)
+    await pool.execute_write(
+        "UPDATE games SET current_version='42', cached_version='OLD', status='unknown' WHERE id=?",
+        (game_id,),
+    )
+
+    async def fake_validate(p, d, gid, s):
+        return ValidationResult(3, 3, 0, "cached", "42")
+
+    monkeypatch.setattr("orchestrator.jobs.handlers.validate.validate_game", fake_validate)
+    await validate_one_game(
+        pool, Deps(pool=pool, steam_client=_StubSteam(None)), game_id, get_settings()
+    )
+    row = await pool.read_one("SELECT status, cached_version FROM games WHERE id=?", (game_id,))
+    assert row["status"] == "up_to_date"  # status still updates
+    assert row["cached_version"] == "OLD"  # cached_version untouched by validate

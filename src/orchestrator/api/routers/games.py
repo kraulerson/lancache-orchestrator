@@ -108,6 +108,7 @@ class GameResponse(BaseModel):
     last_prefilled_at: str | None
     last_error: str | None
     metadata: dict[str, Any] | None
+    blocked: bool
 
 
 class GamesMeta(BaseModel):
@@ -187,8 +188,14 @@ async def list_games(
     # _query_helpers security invariants and the Hypothesis property test
     # in tests/api/test_query_helpers.py::TestSqlInjectionResistance.
     count_sql = f"SELECT COUNT(*) AS total FROM games {where_sql}".strip()  # noqa: S608
+    # F8: `blocked` via a correlated EXISTS subquery (NOT a JOIN) so the
+    # allow-list `where_sql`/`order_sql` (bare `games` column names) stay
+    # unambiguous — block_list also has platform/app_id columns.
     rows_sql = (
-        f"SELECT {_GAMES_COLUMNS} FROM games {where_sql} {order_sql} LIMIT ? OFFSET ?"  # noqa: S608
+        f"SELECT {_GAMES_COLUMNS}, "  # noqa: S608
+        "EXISTS(SELECT 1 FROM block_list b "
+        "WHERE b.platform=games.platform AND b.app_id=games.app_id) AS blocked "
+        f"FROM games {where_sql} {order_sql} LIMIT ? OFFSET ?"
     ).strip()
     rows_params = [*where_params, pagination.limit, pagination.offset]
 
@@ -266,6 +273,7 @@ async def list_games(
                     last_prefilled_at=row["last_prefilled_at"],
                     last_error=last_error,
                     metadata=metadata,
+                    blocked=bool(row["blocked"]),
                 )
             )
         except ValidationError as e:

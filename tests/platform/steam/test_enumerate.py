@@ -206,12 +206,14 @@ class TestExtractAppMetadata:
             }
         }
         out = _extract_app_metadata(resp, [730])
-        assert out == [{"app_id": 730, "name": "Counter-Strike 2", "depots": [731, 734]}]
+        assert out == [
+            {"app_id": 730, "name": "Counter-Strike 2", "depots": [731, 734], "version": None}
+        ]
 
     def test_falls_back_to_string_key(self):
         resp = {"apps": {"730": {"common": {"name": "CS2"}, "depots": {}}}}
         out = _extract_app_metadata(resp, [730])
-        assert out == [{"app_id": 730, "name": "CS2", "depots": []}]
+        assert out == [{"app_id": 730, "name": "CS2", "depots": [], "version": None}]
 
     def test_skips_missing_common_name(self):
         """Better than synthesizing placeholder names that pollute games table."""
@@ -252,7 +254,9 @@ class TestEnumerateApps:
             ],
         )
         out = enumerate_apps(c)
-        assert out == [{"app_id": 730, "name": "Counter-Strike 2", "depots": [731, 734]}]
+        assert out == [
+            {"app_id": 730, "name": "Counter-Strike 2", "depots": [731, 734], "version": None}
+        ]
         # Verify the package call passes access token and auto_access_tokens=False
         pkg_call = next(kwargs for op, kwargs in c.calls if "packages" in kwargs)
         assert pkg_call["packages"] == [{"packageid": 730, "access_token": 42}]
@@ -403,3 +407,46 @@ class TestManifestGidExtraction:
 
         assert manifest_gids_for_app(None) == []
         assert manifest_gids_for_app([]) == []
+
+
+class TestAppVersionToken:
+    def test_prefers_public_branch_buildid(self):
+        from orchestrator.platform.steam.enumerate import _app_version_token
+
+        depots = {"branches": {"public": {"buildid": "1788499"}}, "1234": {"manifests": {}}}
+        assert _app_version_token(depots) == "1788499"
+
+    def test_composite_when_no_buildid(self):
+        from orchestrator.platform.steam.enumerate import _app_version_token
+
+        depots = {
+            "1234": {"manifests": {"public": {"gid": "555"}}},
+            "1200": {"manifests": {"public": {"gid": "777"}}},
+        }
+        tok = _app_version_token(depots)
+        # order-independent: same pairs -> same token
+        assert tok == _app_version_token(
+            {
+                "1200": {"manifests": {"public": {"gid": "777"}}},
+                "1234": {"manifests": {"public": {"gid": "555"}}},
+            }
+        )
+        assert tok is not None and tok != "1788499"
+
+    def test_none_when_no_version_info(self):
+        from orchestrator.platform.steam.enumerate import _app_version_token
+
+        assert _app_version_token({"branches": {"public": {}}}) is None
+        assert _app_version_token(None) is None
+
+    def test_extract_app_metadata_includes_version(self):
+        apps_response = {
+            "apps": {
+                "10": {
+                    "common": {"name": "Game"},
+                    "depots": {"branches": {"public": {"buildid": "42"}}, "11": {"manifests": {}}},
+                }
+            }
+        }
+        out = _extract_app_metadata(apps_response, [10])
+        assert out == [{"app_id": 10, "name": "Game", "depots": [11], "version": "42"}]

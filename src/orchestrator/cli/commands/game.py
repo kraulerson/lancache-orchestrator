@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 import click
 
 from orchestrator.cli import output
 from orchestrator.cli.base import handles_api_errors, make_client
-from orchestrator.cli.client import ApiError
+from orchestrator.cli.client import ApiError, OrchClient
 
 # games.status CHECK set — surfaced via click.Choice so a typo'd --status is
 # rejected up front instead of silently returning an empty table (UAT-11 S11-E-04).
@@ -53,10 +55,11 @@ def game_list(ctx: click.Context, platform: str | None, status_: str | None, lim
             g["app_id"],
             (g.get("title") or "")[:40],
             output.status_label(g["status"]),
+            "yes" if g.get("blocked") else "-",
         ]
         for g in data["games"]
     ]
-    click.echo(output.table(["ID", "PLATFORM", "APP_ID", "TITLE", "STATUS"], rows))
+    click.echo(output.table(["ID", "PLATFORM", "APP_ID", "TITLE", "STATUS", "BLOCKED"], rows))
 
 
 @game.command("show")
@@ -106,3 +109,47 @@ def game_validate(ctx: click.Context, game_id: int) -> None:
 def game_manifest(ctx: click.Context, game_id: int) -> None:
     """Trigger a manifest fetch."""
     _trigger(ctx, game_id, "manifest/fetch", "manifest_fetch")
+
+
+def _resolve_app(ctx: click.Context, game_id: int) -> tuple[OrchClient, str, str]:
+    """Return (client, platform, app_id) for a known game id, or raise ApiError.
+
+    Resolves via the list (no detail endpoint), mirroring ``game show``. Needed
+    because the block-list is keyed by (platform, app_id), not game id."""
+    client = make_client(ctx)
+    data = client.get("/api/v1/games", limit=500)
+    match = next((g for g in data["games"] if g["id"] == game_id), None)
+    if match is None:
+        raise ApiError(f"game {game_id} not found (in the first 500)")
+    return client, match["platform"], match["app_id"]
+
+
+@game.command("block")
+@click.argument("game_id", type=int, callback=_positive_int)
+@click.option("--reason", default=None, help="Optional note (<=500 chars).")
+@click.pass_context
+@handles_api_errors
+def game_block(ctx: click.Context, game_id: int, reason: str | None) -> None:
+    """Exclude a game from scheduled prefill."""
+    client, platform, app_id = _resolve_app(ctx, game_id)
+    client.post(
+        "/api/v1/block-list",
+        json={"platform": platform, "app_id": app_id, "reason": reason, "source": "cli"},
+    )
+    output.success(f"blocked game {game_id} ({platform}:{app_id}) from scheduled prefill.")
+
+
+@game.command("unblock")
+@click.argument("game_id", type=int, callback=_positive_int)
+@click.pass_context
+@handles_api_errors
+def game_unblock(ctx: click.Context, game_id: int) -> None:
+    """Remove a game from the block list (idempotent)."""
+    client, platform, app_id = _resolve_app(ctx, game_id)
+    # Encode app_id — an Epic appName can contain '/' which would otherwise split
+    # into extra path segments and mis-route the DELETE.
+    resp = client.delete(f"/api/v1/block-list/{platform}/{quote(app_id, safe='')}")
+    if (resp or {}).get("removed"):
+        output.success(f"unblocked game {game_id} ({platform}:{app_id}).")
+    else:
+        output.success(f"game {game_id} ({platform}:{app_id}) was not blocked.")

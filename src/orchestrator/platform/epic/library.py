@@ -53,11 +53,13 @@ def _to_item(rec: dict[str, Any]) -> EpicLibraryItem | None:
     if not app_name or not namespace or not catalog:
         return None
     title = (rec.get("metadata") or {}).get("title") or app_name
+    build_version = rec.get("buildVersion")
     return EpicLibraryItem(
         app_name=str(app_name),
         namespace=str(namespace),
         catalog_item_id=str(catalog),
         title=str(title),
+        build_version=(str(build_version) if build_version else None),
     )
 
 

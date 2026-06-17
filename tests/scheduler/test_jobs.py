@@ -144,3 +144,70 @@ class TestEnqueueValidationSweep:
 
         pool.execute_write = AsyncMock(side_effect=PoolError("simulated"))
         assert await enqueue_validation_sweep(pool) == 0  # never raises
+
+
+async def _seed_game(
+    pool, app_id, *, owned=1, current="42", cached=None, status="up_to_date", platform="steam"
+):
+    await pool.execute_write(
+        "INSERT INTO games "
+        "(platform, app_id, title, owned, current_version, cached_version, status)"
+        " VALUES (?, ?, 'G', ?, ?, ?, ?)",
+        (platform, app_id, owned, current, cached, status),
+    )
+
+
+class TestEnqueueScheduledPrefill:
+    async def test_enqueues_never_cached(self, pool):
+        from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
+
+        await _seed_game(pool, "1", current="42", cached=None)
+        n = await enqueue_scheduled_prefill(pool)
+        assert n == 1
+        row = await pool.read_one("SELECT kind, platform, state, source FROM jobs LIMIT 1")
+        assert (row["kind"], row["state"], row["source"]) == ("prefill", "queued", "scheduler")
+
+    async def test_enqueues_when_version_diverged(self, pool):
+        from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
+
+        await _seed_game(pool, "1", current="42", cached="41")
+        assert await enqueue_scheduled_prefill(pool) == 1
+
+    async def test_enqueues_validation_failed(self, pool):
+        from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
+
+        await _seed_game(pool, "1", current="42", cached="42", status="validation_failed")
+        assert await enqueue_scheduled_prefill(pool) == 1
+
+    async def test_skips_up_to_date(self, pool):
+        from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
+
+        await _seed_game(pool, "1", current="42", cached="42", status="up_to_date")
+        assert await enqueue_scheduled_prefill(pool) == 0
+
+    async def test_skips_unowned(self, pool):
+        from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
+
+        await _seed_game(pool, "1", owned=0, current="42", cached=None)
+        assert await enqueue_scheduled_prefill(pool) == 0
+
+    async def test_skips_blocked(self, pool):
+        from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
+
+        await _seed_game(pool, "1", current="42", cached=None)
+        await pool.execute_write(
+            "INSERT INTO block_list (platform, app_id, source) VALUES ('steam','1','api')"
+        )
+        assert await enqueue_scheduled_prefill(pool) == 0
+
+    async def test_dedups_inflight_prefill(self, pool):
+        from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
+
+        await _seed_game(pool, "1", current="42", cached=None)
+        gid = (await pool.read_one("SELECT id FROM games LIMIT 1"))["id"]
+        await pool.execute_write(
+            "INSERT INTO jobs (kind, game_id, platform, state, source)"
+            " VALUES ('prefill', ?, 'steam', 'queued', 'api')",
+            (gid,),
+        )
+        assert await enqueue_scheduled_prefill(pool) == 0

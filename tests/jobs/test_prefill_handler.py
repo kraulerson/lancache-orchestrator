@@ -179,3 +179,75 @@ async def test_chunk_failure_last_error_includes_reason(pool, monkeypatch):
         await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=_StubSteam()))
     g = await pool.read_one("SELECT last_error FROM games WHERE id=?", (game_id,))
     assert "http 403" in g["last_error"]
+
+
+async def test_full_success_sets_cached_version(pool, monkeypatch):
+    game_id = await _seed_game(pool)
+    await _seed_manifest(pool, game_id)
+    await pool.execute_write(
+        "UPDATE games SET current_version='42', status='downloading' WHERE id=?", (game_id,)
+    )
+
+    async def fake_prefill(uris, settings, *, on_progress=None):
+        return PrefillResult(len(uris), len(uris), 0)
+
+    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
+    await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=_StubSteam()))
+    row = await pool.read_one(
+        "SELECT cached_version, last_prefilled_at FROM games WHERE id=?", (game_id,)
+    )
+    assert row["cached_version"] == "42"
+    assert row["last_prefilled_at"] is not None
+
+
+async def test_partial_failure_leaves_cached_version_stale(pool, monkeypatch):
+    game_id = await _seed_game(pool)
+    await _seed_manifest(pool, game_id)
+    await pool.execute_write(
+        "UPDATE games SET current_version='42', cached_version='OLD' WHERE id=?", (game_id,)
+    )
+
+    async def fake_prefill(uris, settings, *, on_progress=None):
+        return PrefillResult(len(uris), 0, len(uris), [("/depot/731/chunk/x", "http 500")])
+
+    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
+    with pytest.raises(RuntimeError):
+        await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=_StubSteam()))
+    row = await pool.read_one("SELECT cached_version FROM games WHERE id=?", (game_id,))
+    assert row["cached_version"] == "OLD"
+
+
+async def test_diverged_game_refetches_manifest(pool, monkeypatch):
+    """S2-2: a version-diverged game (cached != current) must re-fetch a fresh
+    manifest even though stale manifests exist, so it caches current content."""
+    game_id = await _seed_game(pool)
+    await _seed_manifest(pool, game_id)  # stale manifest already present
+    await pool.execute_write(
+        "UPDATE games SET cached_version='41', current_version='42' WHERE id=?", (game_id,)
+    )
+    stub = _StubSteam()
+
+    async def fake_prefill(uris, settings, *, on_progress=None):
+        return PrefillResult(len(uris), len(uris), 0)
+
+    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
+    await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=stub))
+    assert stub.fetch_calls == 1  # refetched despite the existing manifest
+
+
+async def test_up_to_date_reprefill_reuses_manifest(pool, monkeypatch):
+    """A redundant re-prefill of an up-to-date game (cached == current) reuses the
+    existing manifest — no wasted fetch."""
+    game_id = await _seed_game(pool)
+    await _seed_manifest(pool, game_id)
+    await pool.execute_write(
+        "UPDATE games SET cached_version='42', current_version='42' WHERE id=?", (game_id,)
+    )
+    stub = _StubSteam()
+
+    async def fake_prefill(uris, settings, *, on_progress=None):
+        return PrefillResult(len(uris), len(uris), 0)
+
+    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
+    await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=stub))
+    assert stub.fetch_calls == 0  # reused

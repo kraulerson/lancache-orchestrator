@@ -102,3 +102,6 @@ class OrchClient:
 
     def post(self, path: str, json: dict[str, Any] | None = None) -> Any:
         return self._request("POST", path, json=json)
+
+    def delete(self, path: str, json: dict[str, Any] | None = None) -> Any:
+        return self._request("DELETE", path, json=json)
