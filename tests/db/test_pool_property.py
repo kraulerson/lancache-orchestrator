@@ -129,7 +129,10 @@ class TestShape:
             # (unlikely but possible for the literal string "int", "str", etc.)
             # we tolerate that collision. Otherwise raw values must not appear.
             v_str = str(v)
-            if v_str in {"int", "str", "bool", "float", "bytes", "NoneType"}:
+            # "None" is a substring of the legitimately-emitted "NoneType", so a
+            # string value "None" is indistinguishable from the type name and
+            # must be tolerated alongside exact type-name collisions.
+            if v_str in {"int", "str", "bool", "float", "bytes", "NoneType", "None"}:
                 continue
             # Numeric values: their str form might appear in a type name like
             # "int" — guard against that too. But since type names don't
