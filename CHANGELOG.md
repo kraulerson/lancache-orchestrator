@@ -19,6 +19,19 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Security — LAN-bind source-IP allowlist + fail-closed boot guard — 2026-06-18
+
+- Source-IP allowlist (`SourceAllowlistMiddleware`) gates all API paths to loopback + `ORCH_ALLOWED_SOURCE_IPS` when bound off-loopback; defense-in-depth over the bearer token for LAN exposure.
+- Fail-closed boot guard: a non-loopback bind with no `ORCH_ALLOWED_SOURCE_IPS` refuses to start.
+
+### Added — `ORCH_ALLOWED_SOURCE_IPS` source-IP allowlist setting — 2026-06-18
+
+- `ORCH_ALLOWED_SOURCE_IPS` setting (comma-separated IPs/CIDRs) + `Settings.allowed_source_networks`.
+
+### Infrastructure — LAN-exposure deploy recipe documented — 2026-06-18
+
+- Documented LAN-exposure deploy recipe (LAN-scoped docker publish + host nftables rule) in README.
+
 ### Added — F8 block list + scheduled prefill driver (version-diff) — 2026-06-17
 
 The orchestrator becomes the automatic **Steam+Epic prefill driver** (completes F12's "diff enqueues prefills"): a 6h cycle prefills only the games that actually changed, with an operator block-list to exclude games.

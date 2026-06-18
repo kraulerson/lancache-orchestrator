@@ -14,11 +14,12 @@ for the full design rationale.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import warnings
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import structlog
 from apscheduler.triggers.cron import CronTrigger
@@ -30,7 +31,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _SPIKE_F_CHUNK_CONCURRENCY = 32
@@ -70,6 +71,11 @@ class Settings(BaseSettings):
     api_host: str = Field(default="127.0.0.1", min_length=1)
     api_port: int = Field(default=8765, ge=1, le=65535)
     cors_origins: list[str] = Field(default_factory=list)
+    # Source-IP allowlist for LAN exposure. Empty => no extra sources beyond
+    # loopback (and the SourceAllowlistMiddleware is a pure no-op). Comma-
+    # separated IPs/CIDRs in env; NoDecode keeps pydantic-settings from trying
+    # to JSON-decode the value before our before-validator splits it.
+    allowed_source_ips: Annotated[list[str], NoDecode] = Field(default_factory=list)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
     # --- Database & migrations --------------------------------------
@@ -218,6 +224,38 @@ class Settings(BaseSettings):
         if any(not o for o in v):
             raise ValueError("cors_origins must not contain empty strings")
         return v
+
+    @field_validator("allowed_source_ips", mode="before")
+    @classmethod
+    def _split_allowed_source_ips(cls, v: Any) -> Any:
+        """Accept a comma-separated env string or a real list. A bare env
+        string like '10.100.23.102,10.0.0.0/24' is split + trimmed; empty
+        segments are dropped."""
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
+
+    @field_validator("allowed_source_ips", mode="after")
+    @classmethod
+    def _validate_allowed_source_ips(cls, v: list[str]) -> list[str]:
+        """Each entry must parse as an IP network (a bare IP becomes /32 or
+        /128). Fail fast at construction on a malformed entry."""
+        for entry in v:
+            try:
+                ipaddress.ip_network(entry, strict=False)
+            except ValueError as e:
+                raise ValueError(f"invalid allowed_source_ips entry {entry!r}: {e}") from e
+        return v
+
+    @cached_property
+    def allowed_source_networks(
+        self,
+    ) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        """Parsed allowlist networks, consumed by SourceAllowlistMiddleware.
+        Entries are pre-validated by _validate_allowed_source_ips."""
+        return [ipaddress.ip_network(e, strict=False) for e in self.allowed_source_ips]
 
     @field_validator("cache_levels", mode="after")
     @classmethod
