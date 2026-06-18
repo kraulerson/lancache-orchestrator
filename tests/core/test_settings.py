@@ -13,6 +13,7 @@ Covers:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 from pathlib import Path
 
@@ -729,3 +730,48 @@ class TestBL10SteamWorkerSettings:
         get_settings.cache_clear()
         with pytest.raises(ValueError, match=r"steam_worker_max_restart_attempts"):
             Settings()
+
+
+# ----------------------------------------------------------------------
+# 10. Source-IP allowlist
+# ----------------------------------------------------------------------
+
+
+class TestAllowedSourceIps:
+    def test_default_is_empty(self):
+        s = Settings(orchestrator_token="t" * 32)
+        assert s.allowed_source_ips == []
+        assert s.allowed_source_networks == []
+
+    def test_comma_separated_string_parses_to_list(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", "t" * 32)
+        monkeypatch.setenv("ORCH_ALLOWED_SOURCE_IPS", " 10.100.23.102 , 10.0.0.0/24 ")
+        get_settings.cache_clear()
+        s = get_settings()
+        assert s.allowed_source_ips == ["10.100.23.102", "10.0.0.0/24"]
+        get_settings.cache_clear()
+
+    def test_list_input_passes_through(self):
+        s = Settings(orchestrator_token="t" * 32, allowed_source_ips=["10.100.23.102"])
+        assert s.allowed_source_ips == ["10.100.23.102"]
+
+    def test_allowed_source_networks_parses_entries(self):
+        s = Settings(
+            orchestrator_token="t" * 32,
+            allowed_source_ips=["10.100.23.102", "10.0.0.0/24"],
+        )
+        nets = s.allowed_source_networks
+        assert ipaddress.ip_address("10.100.23.102") in nets[0]
+        assert ipaddress.ip_address("10.0.0.55") in nets[1]
+
+    def test_invalid_cidr_rejected_at_construction(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token="t" * 32, allowed_source_ips=["10.0.0.0/99"])
+
+    def test_invalid_ip_rejected_at_construction(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token="t" * 32, allowed_source_ips=["not-an-ip"])
+
+    def test_allow_any_entry_is_accepted(self):
+        s = Settings(orchestrator_token="t" * 32, allowed_source_ips=["0.0.0.0/0"])
+        assert ipaddress.ip_address("8.8.8.8") in s.allowed_source_networks[0]

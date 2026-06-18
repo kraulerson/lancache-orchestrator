@@ -1261,4 +1261,49 @@ plan `docs/superpowers/plans/2026-06-17-f8-block-list.md`.
 
 ---
 
+## Feature 23: LAN-Bind Source-IP Allowlist
+
+**Phase Built:** 2 (Milestone B / Game_shelf integration enabler)
+**Status:** Complete (2026-06-18)
+
+**Summary:** Lets the orchestrator be safely exposed off-loopback (e.g. for the
+Game_shelf backend on another host) by gating every API path to loopback plus an
+explicit source-IP allowlist. Adds the `ORCH_ALLOWED_SOURCE_IPS` setting
+(comma-separated IPs/CIDRs, default empty), a `SourceAllowlistMiddleware` that
+403s any non-loopback, non-allowlisted source on every path, and a fail-closed
+boot guard that refuses to start when bound off-loopback with an empty allowlist.
+Defense-in-depth over the bearer token. The OQ2 loopback-only surfaces
+(credential-intake `POST /platforms/{name}/auth`, 2FA-submit, OpenAPI schema,
+Swagger / ReDoc) are unchanged — an allowlisted-but-remote host still gets 403 on
+those. **No DB migration.**
+
+**Key Interfaces:**
+  - `src/orchestrator/core/settings.py` — `ORCH_ALLOWED_SOURCE_IPS` /
+    `Settings.allowed_source_networks` (parsed IP/CIDR networks)
+  - `src/orchestrator/api/middleware.py::SourceAllowlistMiddleware` — per-request
+    source gate (pure no-op when the allowlist is empty)
+  - `src/orchestrator/api/main.py` — middleware registration + the fail-closed
+    boot guard (`api.boot.lan_bind_without_allowlist` + `SystemExit`)
+
+**Locked decisions:**
+  - **Loopback is always allowed**; the allowlist only adds remote sources.
+  - **Fail-closed:** off-loopback bind + empty allowlist refuses to start (no
+    accidental open-to-the-world exposure).
+  - **OQ2 surfaces stay loopback-only** regardless of the allowlist.
+  - **No reverse proxy:** OQ2 + the allowlist read `scope["client"]` directly, so
+    uvicorn is bound directly (a proxy would mask the true source IP).
+
+**Test Coverage:** middleware allow/deny (loopback, allowlisted IP/CIDR, denied
+source, empty-allowlist no-op), boot-guard refusal, and OQ2 loopback-only paths
+still 403 a remote allowlisted host.
+
+**Related docs:** README "Running the API (BL5+)" LAN-exposure recipe
+(LAN-scoped docker publish + host nftables rule).
+
+**Known Limitations:**
+  - **Source IP must be the real client** — reading `scope["client"]` means a
+    reverse proxy or NAT in front would collapse all sources to one address.
+
+---
+
 <!-- Copy the section above for each new feature. Number sequentially. -->

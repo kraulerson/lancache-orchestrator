@@ -111,12 +111,44 @@ class TestS2CS3hLoopbackRestrictedSchema:
 
 
 # ---------------------------------------------------------------------------
-# S2-D: startup warning on non-loopback bind (deployment hardening hint)
+# S2-D: non-loopback bind boot policy (fail-closed LAN-bind guard).
+# Superseded the old `api.boot.non_loopback_bind_warning` hint: a non-loopback
+# bind now REFUSES to start unless ORCH_ALLOWED_SOURCE_IPS is declared, and
+# emits `api.boot.lan_bind_gated` when it is (feat/lan-bind-allowlist Task 5).
 # ---------------------------------------------------------------------------
 
 
 class TestS2DNonLoopbackStartupWarning:
-    async def test_lifespan_logs_warning_when_bound_to_0_0_0_0(self, db_path, monkeypatch, capsys):
+    async def test_lifespan_refuses_to_start_when_bound_to_0_0_0_0_no_allowlist(
+        self, db_path, monkeypatch, capsys
+    ):
+        from orchestrator.api.main import create_app
+        from orchestrator.core.logging import configure_logging
+        from orchestrator.core.settings import reload_settings
+
+        configure_logging()
+        monkeypatch.setenv("ORCH_DATABASE_PATH", str(db_path))
+        monkeypatch.setenv("ORCH_API_HOST", "0.0.0.0")  # noqa: S104
+        monkeypatch.delenv("ORCH_ALLOWED_SOURCE_IPS", raising=False)
+        reload_settings()
+
+        app = create_app()
+        # The guard raises SystemExit at the very top of the lifespan. We invoke
+        # FastAPI's lifespan_context directly (bypassing asgi-lifespan, which
+        # swallows SystemExit in its background task wrapper) — same pattern as
+        # the migration-failure test in test_lifespan.py.
+        with pytest.raises(SystemExit):
+            async with app.router.lifespan_context(app):
+                pass
+
+        out = capsys.readouterr().out
+        events = [json.loads(line) for line in out.splitlines() if line.strip()]
+        names = [e.get("event") for e in events]
+        assert "api.boot.lan_bind_without_allowlist" in names
+
+    async def test_lifespan_logs_gated_when_bound_to_0_0_0_0_with_allowlist(
+        self, db_path, monkeypatch, capsys
+    ):
         from asgi_lifespan import LifespanManager
 
         from orchestrator.api.main import create_app
@@ -126,6 +158,7 @@ class TestS2DNonLoopbackStartupWarning:
         configure_logging()
         monkeypatch.setenv("ORCH_DATABASE_PATH", str(db_path))
         monkeypatch.setenv("ORCH_API_HOST", "0.0.0.0")  # noqa: S104
+        monkeypatch.setenv("ORCH_ALLOWED_SOURCE_IPS", "10.100.23.102")
         reload_settings()
 
         app = create_app()
@@ -135,7 +168,7 @@ class TestS2DNonLoopbackStartupWarning:
         out = capsys.readouterr().out
         events = [json.loads(line) for line in out.splitlines() if line.strip()]
         names = [e.get("event") for e in events]
-        assert "api.boot.non_loopback_bind_warning" in names
+        assert "api.boot.lan_bind_gated" in names
 
 
 # ---------------------------------------------------------------------------

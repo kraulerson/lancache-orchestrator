@@ -36,7 +36,8 @@ The bearer token (`orchestrator_token`) is the only required field. Every other 
 | Env var | Type | Default | Notes |
 |---|---|---|---|
 | `ORCH_TOKEN` *(or secrets file `orchestrator_token`)* | string ≥32 chars | **required** | API bearer; whitespace stripped |
-| `ORCH_API_HOST` | string | `127.0.0.1` | Warns if not loopback |
+| `ORCH_API_HOST` | string | `127.0.0.1` | Off-loopback requires `ORCH_ALLOWED_SOURCE_IPS` (else refuses to start) |
+| `ORCH_ALLOWED_SOURCE_IPS` | comma-separated IPs/CIDRs | `[]` | Source-IP allowlist for LAN exposure. **Required** (non-empty) when `ORCH_API_HOST` is non-loopback. Loopback always allowed. |
 | `ORCH_API_PORT` | int (1..65535) | `8765` | |
 | `ORCH_CORS_ORIGINS` | JSON list | `[]` | Warns on `"*"` |
 | `ORCH_LOG_LEVEL` | DEBUG / INFO / WARNING / ERROR / CRITICAL | `INFO` | |
@@ -135,7 +136,25 @@ uvicorn orchestrator.api.main:create_app --factory --host 127.0.0.1 --port 8765
 
 The lifespan runs migrations + initializes the BL4 DB pool on startup; closes the pool with a 30 s hard timeout on shutdown.
 
-**Loopback restriction:** the OpenAPI schema (`/api/v1/openapi.json`) and the Swagger / ReDoc UIs (`/api/v1/docs`, `/api/v1/redoc`) are loopback-only. Browsing them on a non-loopback bind returns 403. If you bind the orchestrator to a non-loopback interface, expect a `api.boot.non_loopback_bind_warning` log line at startup — and note that **OQ2 loopback enforcement reads `scope["client"]` directly**, so a reverse proxy in front of the app silently disables OQ2. Either bind to a unix socket the proxy alone can reach, or enforce the equivalent gate at the proxy layer.
+**LAN exposure (e.g. for Game_shelf).** To reach the API from another host, bind off-loopback AND declare the allowed source(s):
+
+```bash
+# Container binds all interfaces in its namespace; the host publish is scoped
+# to the LAN NIC so the port is not exposed on other host interfaces.
+docker run -e ORCH_API_HOST=0.0.0.0 \
+           -e ORCH_ALLOWED_SOURCE_IPS=10.100.23.102 \
+           -p 192.168.1.40:8765:8765 ...
+```
+
+The `SourceAllowlistMiddleware` returns 403 for any source that is not loopback or in `ORCH_ALLOWED_SOURCE_IPS`, on every path. A non-loopback bind with an empty allowlist **refuses to start** (`api.boot.lan_bind_without_allowlist`). As an outer layer, also restrict the port at the host firewall, e.g. nftables:
+
+```
+# allow only Game_shelf to reach the orchestrator port; drop the rest
+nft add rule inet filter input ip saddr 10.100.23.102 tcp dport 8765 accept
+nft add rule inet filter input tcp dport 8765 drop
+```
+
+**Loopback restriction:** the OpenAPI schema (`/api/v1/openapi.json`), the Swagger / ReDoc UIs (`/api/v1/docs`, `/api/v1/redoc`), and the credential-intake endpoints (`POST /api/v1/platforms/{name}/auth` + 2FA-submit) are loopback-only. An allowlisted-but-remote host still receives 403 on those paths — they are never reachable over the LAN regardless of `ORCH_ALLOWED_SOURCE_IPS`. **OQ2 enforcement reads `scope["client"]` directly**, so a reverse proxy in front of the app would make every request appear to originate from the proxy and silently defeat both OQ2 and the source-IP allowlist. This design binds uvicorn directly — do **not** place a reverse proxy in front of it.
 
 **BL5 health-check note:** `GET /api/v1/health` returns **HTTP 503** until BL6+ ships the scheduler, Lancache self-test, and validator subsystems. The body still contains the 7-field response so operators can see exactly which subsystems are unhealthy. Container `HEALTHCHECK` and k8s liveness probes should expect 503 during this transition window. The unauth response truncates `git_sha` to 8 chars; full SHA is reserved for authenticated/internal observability surfaces. See [ADR-0012](docs/ADR%20documentation/0012-fastapi-skeleton-architecture.md) for the design rationale.
 

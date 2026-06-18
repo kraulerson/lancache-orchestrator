@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import re
 import time
 import uuid
@@ -51,6 +52,28 @@ _UUID4_RE = re.compile(
 # through attacker-controlled headers. 4096 is comfortably above realistic
 # bearer tokens (typical opaque tokens are 32-128 hex/base64 chars).
 _MAX_AUTH_HEADER_BYTES = 4096
+
+
+def _is_source_allowed(
+    client_host: str | None,
+    allowed_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
+) -> bool:
+    """True if client_host is a loopback form, or its IP is contained in any
+    allowed network. None/unparseable -> False (fail closed). Callers invoke
+    this only when allowed_networks is non-empty (the enforcement switch lives
+    in SourceAllowlistMiddleware)."""
+    if client_host in LOOPBACK_HOSTS:
+        return True
+    if client_host is None:
+        return False
+    try:
+        ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(client_host)
+    except ValueError:
+        return False
+    # Normalize IPv4-mapped IPv6 (::ffff:a.b.c.d) so it matches IPv4 entries.
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return any(ip in net for net in allowed_networks)
 
 
 # ----------------------------------------------------------------------
@@ -354,5 +377,58 @@ class BearerAuthMiddleware:
             {
                 "type": "http.response.body",
                 "body": b'{"detail":"forbidden: loopback only"}',
+            }
+        )
+
+
+# ----------------------------------------------------------------------
+# SourceAllowlistMiddleware — LAN-exposure source-IP gate
+# ----------------------------------------------------------------------
+
+
+class SourceAllowlistMiddleware:
+    """Reject connections whose peer IP is not loopback and not in
+    settings.allowed_source_networks. Pure no-op when the allowlist is empty
+    (the boot guard guarantees an empty allowlist only coincides with a
+    loopback-only bind). Reads scope["client"] directly — no X-Forwarded-For
+    trust, since the app is bound without a reverse proxy."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        allowed = get_settings().allowed_source_networks
+        if allowed:  # enforcement switch: empty list => passthrough
+            client_info = scope.get("client")
+            client_host = client_info[0] if client_info else None
+            if not _is_source_allowed(client_host, allowed):
+                _log.warning(
+                    "api.source.rejected",
+                    reason="source_not_allowed",
+                    path=scope["path"],
+                    client_host=client_host,
+                )
+                await self._send_403(send)
+                return
+
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _send_403(send: Send) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 403,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b'{"detail":"forbidden: source not allowed"}',
             }
         )

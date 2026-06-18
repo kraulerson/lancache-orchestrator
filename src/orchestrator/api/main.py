@@ -24,6 +24,7 @@ from orchestrator.api.middleware import (
     BearerAuthMiddleware,
     BodySizeCapMiddleware,
     CorrelationIdMiddleware,
+    SourceAllowlistMiddleware,
 )
 from orchestrator.api.routers.auth import router as auth_router
 from orchestrator.api.routers.auth import set_steam_client_singleton
@@ -40,7 +41,7 @@ from orchestrator.api.routers.prefill_trigger import router as prefill_trigger_r
 from orchestrator.api.routers.status import router as status_router
 from orchestrator.api.routers.sync import router as sync_router
 from orchestrator.api.routers.validate_trigger import router as validate_trigger_router
-from orchestrator.core.settings import get_settings
+from orchestrator.core.settings import Settings, get_settings
 from orchestrator.db import migrate
 from orchestrator.db.pool import (
     PoolError,
@@ -90,10 +91,40 @@ def _detect_non_loopback_bind(settings_api_host: str) -> str | None:
     return None
 
 
+def _enforce_lan_bind_policy(settings: Settings) -> None:
+    """Fail-closed LAN-bind guard (security priority #1). A non-loopback bind
+    MUST declare ORCH_ALLOWED_SOURCE_IPS; otherwise refuse to start. A loopback
+    bind is always fine. Called at the top of the lifespan, before migrations,
+    so a misconfiguration fails fast."""
+    log = structlog.get_logger()
+    bind_signal = _detect_non_loopback_bind(settings.api_host)
+    if bind_signal is None:
+        return
+    if not settings.allowed_source_ips:
+        log.critical(
+            "api.boot.lan_bind_without_allowlist",
+            api_host=bind_signal,
+            hint=(
+                "Set ORCH_ALLOWED_SOURCE_IPS to the permitted source(s) before "
+                "binding off-loopback. Refusing to start."
+            ),
+        )
+        raise SystemExit(1)
+    log.info(
+        "api.boot.lan_bind_gated",
+        api_host=bind_signal,
+        allowed_source_ips=settings.allowed_source_ips,
+        note="auth/2fa/schema remain loopback-only (OQ2)",
+    )
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     log = structlog.get_logger()
+
+    # 0. Fail-closed LAN-bind guard — before any startup work.
+    _enforce_lan_bind_policy(settings)
 
     # 1. Migrations (sync; offload)
     log.info("api.boot.migrations_starting")
@@ -230,23 +261,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.boot_time = time.monotonic()
         app.state.git_sha = os.environ.get("GIT_SHA", "unknown")
 
-        # 7. Deployment-hardening warning: surface non-loopback bind at boot.
-        # UAT-3 S2-D: detect non-loopback from any of three signals so an
-        # operator running `uvicorn --host 0.0.0.0` from the CLI gets the
-        # warning even without ORCH_API_HOST set.
-        bind_signal = _detect_non_loopback_bind(settings.api_host)
-        if bind_signal is not None:
-            log.warning(
-                "api.boot.non_loopback_bind_warning",
-                api_host=bind_signal,
-                hint=(
-                    "Binding to a non-loopback interface exposes the API on "
-                    "the network. OQ2 loopback enforcement reads scope[client] "
-                    "directly — a reverse proxy in front of this app silently "
-                    "disables OQ2. Document deployment topology."
-                ),
-            )
-
         log.info("api.boot.complete")
         yield
     finally:
@@ -320,11 +334,14 @@ def create_app() -> FastAPI:
     #
     # add_middleware prepends to user_middleware, so the LAST add_middleware
     # call is the OUTERMOST layer at request time. Order applied (outermost
-    # → innermost): CORS → CorrelationId → BodySizeCap → BearerAuth.
+    # → innermost): CORS → CorrelationId → SourceAllowlist → BodySizeCap →
+    # BearerAuth. SourceAllowlist sits just inside CorrelationId so a rejected
+    # source still gets a correlation_id, but is gated before body-size/auth.
     # Registration order (innermost → outermost):
 
     app.add_middleware(BearerAuthMiddleware)
     app.add_middleware(BodySizeCapMiddleware)
+    app.add_middleware(SourceAllowlistMiddleware)
     app.add_middleware(CorrelationIdMiddleware)
     app.add_middleware(
         CORSMiddleware,
