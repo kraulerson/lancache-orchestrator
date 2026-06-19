@@ -5,7 +5,9 @@
 **Repo:** lancache_orchestrator. **Branch:** `feat/steam-via-prefill`
 **Parent:** the re-architecture north-star (`docs/superpowers/specs/2026-06-19-re-architecture-design.md`, PR #174 merged). This is roadmap step ①.
 
-> Scope: replace the orchestrator's fragile Steam layer with a wrapper around the already-installed, already-authed, modern **SteamPrefill** — **in-place** (still the monolith on the UGREEN; the control/data-plane *agent* split is step ②, the LXC move is step ④). This is the increment that **fixes the auth-cascade and deletes the ValvePython/steam worker**, and it ships value on its own.
+> Scope: replace the orchestrator's fragile Steam layer with a wrapper around the already-installed, already-authed, modern **SteamPrefill** — **in-place** (still the monolith on the UGREEN; the control/data-plane *agent* split is step ②, the LXC move is step ④). This ships value on its own.
+
+> **RE-SCOPE 2026-06-19 (Task-1 gate result — supersedes parts of §3.3/§4/§6/§9/§10 below).** The live gate found: ✅ `steam.core.manifest` imports standalone (gevent-free); ❌ **SteamPrefill's cached manifests are SteamKit2/protobuf-net format, NOT parseable by ValvePython's parser** (different field schema). So validate **cannot** source manifests from SteamPrefill's cache. Decision (Karl): **ship prefill + auth + owned-app enumerate via SteamPrefill NOW** (fixes the bulk auth-cascade — the disaster was the 2,484-game *prefill* sweep), and **KEEP the existing steam worker ONLY for `manifest_fetch` feeding F7 validate** (validate of already-known games already reads DB manifests via the kept parser). **Do NOT delete the worker and do NOT remove Steam auth in ①.** A follow-up sub-project gives validate a modern manifest source (parse SteamKit2's format, or steam.py) and *then* deletes the worker. Net ① deliverable: `SteamPrefillDriver` + rewire **prefill / enumerate / F8-version-diff / `/health` Steam-prefill-status** to it; the worker + Steam auth endpoints stay.
 
 ---
 
