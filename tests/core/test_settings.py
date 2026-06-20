@@ -775,3 +775,12 @@ class TestAllowedSourceIps:
     def test_allow_any_entry_is_accepted(self):
         s = Settings(orchestrator_token="t" * 32, allowed_source_ips=["0.0.0.0/0"])
         assert ipaddress.ip_address("8.8.8.8") in s.allowed_source_networks[0]
+
+
+class TestSteamPrefillSettings:
+    def test_defaults(self):
+        from pathlib import Path
+
+        s = Settings(orchestrator_token="t" * 32)
+        assert s.steam_prefill_binary == Path("/SteamPrefill/SteamPrefill")
+        assert s.steam_prefill_config_dir == Path("/SteamPrefill/Config")

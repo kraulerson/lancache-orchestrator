@@ -56,6 +56,7 @@ from orchestrator.jobs.worker import Deps as JobsDeps
 from orchestrator.jobs.worker import worker_loop as jobs_worker_loop
 from orchestrator.lancache.heartbeat import LancacheProbe
 from orchestrator.platform.steam.client import SteamWorkerClient
+from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
 from orchestrator.scheduler.manager import SchedulerManager
 from orchestrator.validator.disk_stat import shutdown_cache_stat_executor
 
@@ -190,9 +191,29 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.epic_client = epic_client
     log.info("api.boot.epic_client_initialized")
 
+    # 3c. Steam prefill driver — drives the host-installed SteamPrefill binary
+    # (modern persistent auth) for F5 steam prefill, and reads its auth state
+    # for /health. Construction is just path bookkeeping (no IO), so it can't
+    # fail boot. Exposed on app.state so /health can call auth_status().
+    prefill_driver = SteamPrefillDriver(
+        binary=settings.steam_prefill_binary,
+        config_dir=settings.steam_prefill_config_dir,
+    )
+    app.state.prefill_driver = prefill_driver
+    log.info(
+        "api.boot.steam_prefill_driver_initialized",
+        binary=str(settings.steam_prefill_binary),
+        config_dir=str(settings.steam_prefill_config_dir),
+    )
+
     # 4. Jobs worker — spawn the background asyncio task (BL11)
     jobs_shutdown: asyncio.Event = asyncio.Event()
-    jobs_deps = JobsDeps(pool=get_pool(), steam_client=steam_client, epic_client=epic_client)
+    jobs_deps = JobsDeps(
+        pool=get_pool(),
+        steam_client=steam_client,
+        epic_client=epic_client,
+        prefill_driver=prefill_driver,
+    )
     jobs_worker_task = asyncio.create_task(
         jobs_worker_loop(
             jobs_deps,

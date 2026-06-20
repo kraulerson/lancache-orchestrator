@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     steam_session_path: Path = Path("/var/lib/orchestrator/steam_session.json")
     epic_session_path: Path = Path("/var/lib/orchestrator/epic_session.json")
 
+    # --- SteamPrefill delegation (re-architecture step 1) -----------
+    # The orchestrator drives the host-installed SteamPrefill binary for Steam
+    # prefill (modern persistent auth). Config dir holds account.config (auth),
+    # selectedAppsToPrefill.json, successfullyDownloadedDepots.json.
+    steam_prefill_binary: Path = Path("/SteamPrefill/SteamPrefill")
+    steam_prefill_config_dir: Path = Path("/SteamPrefill/Config")
+
     # --- Lancache cache topology ------------------------------------
     lancache_nginx_cache_path: Path = Path("/data/cache/cache/")
     cache_slice_size_bytes: int = Field(default=10_485_760, gt=0)

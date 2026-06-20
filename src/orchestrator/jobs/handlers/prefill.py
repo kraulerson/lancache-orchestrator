@@ -1,9 +1,10 @@
 """F5 — prefill job handler.
 
-Builds the game's deduped chunk list (latest manifest per depot →
-``manifest.expand``, reusing F7's query) and downloads each chunk through the
-lancache so it gets cached. On full success, enqueues a ``validate`` job (ID5),
-which sets the game's final status.
+Steam: delegates to the host-installed SteamPrefill binary via
+``SteamPrefillDriver`` (modern persistent auth), which downloads the app's
+content through the lancache so it gets cached. Epic: fetches a fresh signed
+manifest and downloads chunks through our own downloader. On success either
+path enqueues a ``validate`` job (ID5), which sets the game's final status.
 """
 
 from __future__ import annotations
@@ -18,15 +19,13 @@ import structlog
 from orchestrator.core.settings import get_settings
 from orchestrator.platform.epic.manifest import chunk_path as epic_chunk_path
 from orchestrator.platform.epic.models import EpicLibraryItem
-from orchestrator.prefill.downloader import prefill_chunks, steam_chunk_download_uri
 from orchestrator.prefill.epic_downloader import prefill_chunks as epic_prefill_chunks
 from orchestrator.prefill.epic_downloader import verify_cached as epic_verify_cached
-from orchestrator.validator.disk_stat import _LATEST_PER_DEPOT_SQL
 
 if TYPE_CHECKING:
     from orchestrator.jobs.worker import Deps
     from orchestrator.platform.epic.client import EpicClient
-    from orchestrator.platform.steam.client import SteamWorkerClient
+    from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
 
 _log = structlog.get_logger(__name__)
 
@@ -58,26 +57,6 @@ _EPIC_MANIFEST_UPSERT = (
     "  total_bytes = excluded.total_bytes, "
     "  raw = excluded.raw"
 )
-
-
-async def _load_chunk_uris(deps: Deps, game_id: int) -> list[str]:
-    """Deduped /depot/{id}/chunk/{sha} URIs from the latest manifest per depot."""
-    client = deps.steam_client
-    if client is None:
-        raise RuntimeError("steam_client is required for prefill handler")
-    rows = await deps.pool.read_all(_LATEST_PER_DEPOT_SQL, (game_id,))
-    seen: set[tuple[int, str]] = set()
-    uris: list[str] = []
-    for row in rows:
-        depot_id = int(row["depot_id"])
-        expanded = await client.manifest_expand(row["raw"])
-        for sha in expanded.get("chunk_shas", []):
-            key = (depot_id, sha)
-            if key in seen:
-                continue
-            seen.add(key)
-            uris.append(steam_chunk_download_uri(depot_id, sha))
-    return uris
 
 
 async def prefill_handler(job: dict[str, Any], deps: Deps) -> None:
@@ -215,20 +194,20 @@ async def _epic_prefill_inner(
 
 
 async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
-    """Prefill one Steam game's chunks through the lancache (F5).
+    """Prefill one Steam game through the host-installed SteamPrefill binary (F5).
 
     Sets the game to 'downloading', then delegates to ``_steam_prefill_inner``
-    inside a guard so any failure (IPC/worker death, expired session, network)
+    inside a guard so any failure (subprocess death, expired session, network)
     marks the game 'failed' rather than leaving it stuck 'downloading' forever
     (UAT-10 #2; mirrors the Epic path).
 
     Raises:
-        ValueError — unknown game or non-steam platform.
-        RuntimeError — steam_client is None, or chunks failed to download.
+        ValueError — unknown game, non-steam platform, or non-numeric app_id.
+        RuntimeError — prefill_driver is None, or SteamPrefill exited non-zero.
     """
-    if deps.steam_client is None:
-        raise RuntimeError("steam_client is required for prefill handler")
-    steam_client = deps.steam_client
+    if deps.prefill_driver is None:
+        raise RuntimeError("prefill_driver is required for prefill handler")
+    prefill_driver = deps.prefill_driver
     game_id = job.get("game_id")
     if game_id is None:
         raise ValueError("prefill job has no game_id")
@@ -243,14 +222,15 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
         raise ValueError(f"game {game_id} platform is {game['platform']!r}, not steam")
 
     job_id = job.get("id")
+    force = bool(job.get("force", False))
     await deps.pool.execute_write("UPDATE games SET status='downloading' WHERE id=?", (game_id,))
     _log.info("prefill.started", job_id=job_id, game_id=game_id)
     try:
-        await _steam_prefill_inner(job_id, game_id, game, deps, steam_client)
+        await _steam_prefill_inner(job_id, game_id, game, deps, prefill_driver, force=force)
     except Exception as e:
-        # Never leave the game stuck in 'downloading'. The chunk-failure path
+        # Never leave the game stuck in 'downloading'. The non-ok-exit path
         # already set 'failed' (this then no-ops via the status guard); any other
-        # failure (IPC/worker/network) is marked here before the re-raise.
+        # failure (subprocess/network) is marked here before the re-raise.
         with contextlib.suppress(Exception):
             await deps.pool.execute_write(
                 "UPDATE games SET status='failed', last_error=? "
@@ -265,48 +245,33 @@ async def _steam_prefill_inner(
     game_id: int,
     game: dict[str, Any],
     deps: Deps,
-    steam_client: SteamWorkerClient,
+    prefill_driver: SteamPrefillDriver,
+    *,
+    force: bool,
 ) -> None:
-    # F8 (S2-2): fetch a FRESH manifest when the game is version-diverged
-    # (cached_version != current_version, incl. never-cached) so prefill caches
-    # the CURRENT content — otherwise a patched game would re-download the stale
-    # manifest's chunks yet get stamped cached_version=current_version, silently
-    # never prefilling the patch. A redundant re-prefill of an up-to-date game
-    # (cached == current; None != None is False) reuses the existing manifest.
-    diverged = game["cached_version"] != game["current_version"]
-    uris = await _load_chunk_uris(deps, game_id)
-    if diverged or not uris:
-        try:
-            app_id_int = int(game["app_id"])
-        except (TypeError, ValueError) as e:
-            raise ValueError(f"game {game_id} app_id not numeric") from e
-        _log.info("prefill.fetching_manifests", job_id=job_id, game_id=game_id, diverged=diverged)
-        await steam_client.manifest_fetch(app_id_int)
-        uris = await _load_chunk_uris(deps, game_id)
+    try:
+        app_id_int = int(game["app_id"])
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"game {game_id} app_id not numeric") from e
 
-    settings = get_settings()
-    result = await prefill_chunks(uris, settings)
-    failure_reasons = _summarize_failures(result.failures)
+    result = await prefill_driver.prefill_apps([app_id_int], force=force)
     _log.info(
         "prefill.completed",
         job_id=job_id,
         game_id=game_id,
-        total=result.chunks_total,
-        ok=result.chunks_ok,
-        failed=result.chunks_failed,
-        failure_reasons=failure_reasons,
+        app_id=app_id_int,
+        ok=result.ok,
     )
 
-    if result.chunks_failed > 0:
-        last_error = (
-            f"prefill: {result.chunks_failed}/{result.chunks_total} chunks failed"
-            f"{_failure_suffix(failure_reasons)}"
-        )[:200]
+    if not result.ok:
+        # SteamPrefill exited non-zero. Surface the tail of its output as the
+        # operator-facing reason (it never logs token bytes — see the driver).
+        last_error = (f"prefill: SteamPrefill exited non-zero: {result.raw[-150:]}")[:200]
         await deps.pool.execute_write(
             "UPDATE games SET status='failed', last_error=? WHERE id=?",
             (last_error, game_id),
         )
-        raise RuntimeError(f"prefill failed: {result.chunks_failed}/{result.chunks_total} chunks")
+        raise RuntimeError(f"steam prefill failed for app {app_id_int} (exit non-zero)")
 
     # ID5: success → enqueue a validate job (it sets the final status). The
     # jobs.source CHECK allows scheduler/cli/gameshelf/api — use 'scheduler'

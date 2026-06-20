@@ -163,6 +163,48 @@ class TestValidatorHealth:
             get_settings.cache_clear()
 
 
+class TestSteamAuthStatus:
+    """Steam auth status on /health reflects prefill_driver.auth_status()."""
+
+    async def test_steam_auth_ok_field_present(self, client):
+        r = await client.get("/api/v1/health")
+        assert "steam_auth_ok" in r.json()
+
+    async def test_steam_auth_ok_false_when_driver_absent(self, client):
+        """No-lifespan unit_app omits app.state.prefill_driver — fall back to
+        False rather than crashing (BL5-stub-like)."""
+        r = await client.get("/api/v1/health")
+        assert r.json()["steam_auth_ok"] is False
+
+    async def test_steam_auth_ok_true_when_driver_reports_ok(self, client):
+        from orchestrator.platform.steam.prefill_driver import SteamAuthStatus
+
+        class _StubDriver:
+            def auth_status(self):
+                return SteamAuthStatus(ok=True)
+
+        client._transport.app.state.prefill_driver = _StubDriver()
+        try:
+            r = await client.get("/api/v1/health")
+            assert r.json()["steam_auth_ok"] is True
+        finally:
+            del client._transport.app.state.prefill_driver
+
+    async def test_steam_auth_ok_false_when_driver_needs_reauth(self, client):
+        from orchestrator.platform.steam.prefill_driver import SteamAuthStatus
+
+        class _StubDriver:
+            def auth_status(self):
+                return SteamAuthStatus(ok=False, reason="no_account_config")
+
+        client._transport.app.state.prefill_driver = _StubDriver()
+        try:
+            r = await client.get("/api/v1/health")
+            assert r.json()["steam_auth_ok"] is False
+        finally:
+            del client._transport.app.state.prefill_driver
+
+
 class TestHealthDynamicFields:
     async def test_uptime_sec_increases_monotonically(self, client):
         r1 = await client.get("/api/v1/health")
