@@ -27,6 +27,7 @@ class HealthResponse(BaseModel):
     lancache_reachable: bool
     cache_volume_mounted: bool
     validator_healthy: bool
+    steam_auth_ok: bool = False
     git_sha: str
 
 
@@ -79,6 +80,13 @@ async def get_health(
     # lifespan omit the state — fall back to False (BL5-stub-like).
     validator_healthy = bool(getattr(request.app.state, "validator_healthy", False))
 
+    # Steam auth status routed through the SteamPrefill driver (it reads the
+    # persisted account.config). `app.state.prefill_driver` is built in lifespan
+    # startup; tests without lifespan omit it — fall back to False. auth_status()
+    # is a cheap filesystem stat and never logs token bytes (see the driver).
+    prefill_driver = getattr(request.app.state, "prefill_driver", None)
+    steam_auth_ok = bool(prefill_driver.auth_status().ok) if prefill_driver is not None else False
+
     body = HealthResponse(
         status="ok" if pool_ok else "degraded",
         version=__version__,
@@ -87,6 +95,7 @@ async def get_health(
         lancache_reachable=lancache_reachable,
         cache_volume_mounted=cache_volume_mounted,
         validator_healthy=validator_healthy,
+        steam_auth_ok=steam_auth_ok,
         # UAT-3 S2-B: /api/v1/health is unauthenticated, so the git_sha
         # is reachable by anyone with network access. Truncate to 8 hex
         # chars — enough to identify a build for ops, not enough for

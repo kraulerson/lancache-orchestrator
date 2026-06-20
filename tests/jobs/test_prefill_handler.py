@@ -6,7 +6,7 @@ import pytest
 
 from orchestrator.jobs.handlers.prefill import prefill_handler
 from orchestrator.jobs.worker import Deps
-from orchestrator.prefill.downloader import PrefillResult
+from orchestrator.platform.steam.prefill_driver import PrefillResult as DriverPrefillResult
 
 pytestmark = pytest.mark.asyncio
 
@@ -27,8 +27,20 @@ class _StubSteam:
         return {"manifests": []}
 
 
-def _job(game_id, platform="steam"):
-    return {"id": 1, "kind": "prefill", "platform": platform, "game_id": game_id}
+class _StubDriver:
+    """Stand-in for SteamPrefillDriver — records prefill_apps calls."""
+
+    def __init__(self, *, ok=True):
+        self._ok = ok
+        self.calls: list[tuple[list[int], bool]] = []
+
+    async def prefill_apps(self, app_ids, *, force=False):
+        self.calls.append((list(app_ids), force))
+        return DriverPrefillResult(ok=self._ok, raw="stub output")
+
+
+def _job(game_id, platform="steam", **extra):
+    return {"id": 1, "kind": "prefill", "platform": platform, "game_id": game_id, **extra}
 
 
 async def _seed_game(pool, *, platform="steam", app_id="730"):
@@ -42,95 +54,107 @@ async def _seed_game(pool, *, platform="steam", app_id="730"):
     return row["id"]
 
 
-async def _seed_manifest(pool, game_id, *, depot_id=731, version="100"):
-    await pool.execute_write(
-        "INSERT INTO manifests "
-        "(game_id, depot_id, version, fetched_at, chunk_count, total_bytes, raw) "
-        "VALUES (?, ?, ?, CURRENT_TIMESTAMP, 1, 100, ?)",
-        (game_id, depot_id, version, b"BLOB"),
-    )
+def _steam_deps(pool, driver):
+    """Deps for the rewired steam path: prefill goes through the driver, but
+    steam_client is still carried (kept for other handlers)."""
+    return Deps(pool=pool, steam_client=_StubSteam(), prefill_driver=driver)
 
 
-async def test_downloading_set_and_validate_enqueued_on_success(pool, monkeypatch):
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id)
+async def test_steam_calls_driver_not_downloader(pool):
+    """Rewired steam path delegates to prefill_driver.prefill_apps([app_id]) and
+    must NOT touch our chunk downloader (prefill_chunks) or manifest_expand — the
+    handler module no longer even imports those steam-downloader symbols."""
+    import orchestrator.jobs.handlers.prefill as prefill_mod
 
-    async def fake_prefill(uris, settings, *, on_progress=None):
-        return PrefillResult(len(uris), len(uris), 0)
+    # Regression guard: the steam-downloader path is fully removed from the
+    # handler module, so these names must no longer be bound there.
+    assert not hasattr(prefill_mod, "prefill_chunks")
+    assert not hasattr(prefill_mod, "steam_chunk_download_uri")
 
-    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
-    await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=_StubSteam()))
+    game_id = await _seed_game(pool, app_id="730")
+
+    # The stub steam_client raises if its IPC (manifest_expand/fetch) is touched.
+    class _ExplodingSteam(_StubSteam):
+        async def manifest_expand(self, raw):
+            raise AssertionError("steam path must not call manifest_expand")
+
+        async def manifest_fetch(self, app_id):
+            raise AssertionError("steam path must not call manifest_fetch")
+
+    driver = _StubDriver(ok=True)
+    deps = Deps(pool=pool, steam_client=_ExplodingSteam(), prefill_driver=driver)
+    await prefill_handler(_job(game_id), deps)
+
+    assert driver.calls == [([730], False)]
+
+
+async def test_steam_force_flag_passthrough(pool):
+    game_id = await _seed_game(pool, app_id="730")
+    driver = _StubDriver(ok=True)
+    await prefill_handler(_job(game_id, force=True), _steam_deps(pool, driver))
+    assert driver.calls == [([730], True)]
+
+
+async def test_steam_success_enqueues_validate_and_marks_cached(pool):
+    game_id = await _seed_game(pool, app_id="730")
+    await pool.execute_write("UPDATE games SET current_version='42' WHERE id=?", (game_id,))
+    driver = _StubDriver(ok=True)
+    await prefill_handler(_job(game_id), _steam_deps(pool, driver))
 
     vj = await pool.read_one(
         "SELECT kind, state FROM jobs WHERE kind='validate' AND game_id=?", (game_id,)
     )
     assert vj == {"kind": "validate", "state": "queued"}
-    g = await pool.read_one("SELECT last_prefilled_at FROM games WHERE id=?", (game_id,))
+    g = await pool.read_one(
+        "SELECT last_prefilled_at, cached_version FROM games WHERE id=?", (game_id,)
+    )
     assert g["last_prefilled_at"] is not None
+    assert g["cached_version"] == "42"
 
 
-async def test_chunk_failure_marks_game_failed(pool, monkeypatch):
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id)
-
-    async def fake_prefill(uris, settings, *, on_progress=None):
-        return PrefillResult(len(uris), 0, len(uris), [("/depot/731/chunk/x", "http 500")])
-
-    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
+async def test_steam_failure_marks_game_failed_no_validate(pool):
+    game_id = await _seed_game(pool, app_id="730")
+    driver = _StubDriver(ok=False)
     with pytest.raises(RuntimeError):
-        await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=_StubSteam()))
+        await prefill_handler(_job(game_id), _steam_deps(pool, driver))
     g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
     assert g["status"] == "failed"
     vj = await pool.read_one("SELECT id FROM jobs WHERE kind='validate' AND game_id=?", (game_id,))
     assert vj is None
 
 
-async def test_manifest_error_marks_failed_not_stuck_downloading(pool):
-    """An IPC/worker failure during manifest expand must not leave the game
-    stuck in 'downloading' forever — it must resolve to 'failed' (UAT-10 #2)."""
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id)
+async def test_steam_driver_error_marks_failed_not_stuck_downloading(pool):
+    """A driver exception (subprocess crash) must resolve to 'failed', not leave
+    the game stuck 'downloading' (UAT-10 #2 invariant preserved)."""
+    game_id = await _seed_game(pool, app_id="730")
 
-    class _BoomSteam(_StubSteam):
-        async def manifest_expand(self, raw):
-            raise RuntimeError("worker died: IPC timeout")
+    class _BoomDriver(_StubDriver):
+        async def prefill_apps(self, app_ids, *, force=False):
+            raise RuntimeError("SteamPrefill subprocess died")
 
     with pytest.raises(RuntimeError):
-        await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=_BoomSteam()))
+        await prefill_handler(_job(game_id), _steam_deps(pool, _BoomDriver()))
     g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
     assert g["status"] == "failed"
 
 
-async def test_no_manifests_triggers_fetch(pool, monkeypatch):
-    game_id = await _seed_game(pool)  # no manifest rows
-
-    async def fake_prefill(uris, settings, *, on_progress=None):
-        return PrefillResult(len(uris), len(uris), 0)
-
-    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
-
-    stub = _StubSteam()
-
-    async def fake_fetch(app_id):
-        stub.fetch_calls += 1
-        await _seed_manifest(pool, game_id)  # fetch populates manifests
-        return {"manifests": [{}]}
-
-    stub.manifest_fetch = fake_fetch  # type: ignore[method-assign]
-    await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=stub))
-    assert stub.fetch_calls == 1
+async def test_steam_nonnumeric_app_id_raises(pool):
+    game_id = await _seed_game(pool, app_id="not-a-number")
+    driver = _StubDriver(ok=True)
+    with pytest.raises(ValueError):
+        await prefill_handler(_job(game_id), _steam_deps(pool, driver))
 
 
 async def test_unsupported_platform_raises(pool):
     # steam + epic are supported (F6); an unknown platform still rejects.
     game_id = await _seed_game(pool, platform="epic", app_id="fort")
     with pytest.raises(ValueError, match="unsupported platform"):
-        await prefill_handler(_job(game_id, "gog"), Deps(pool=pool, steam_client=_StubSteam()))
+        await prefill_handler(_job(game_id, "gog"), _steam_deps(pool, _StubDriver()))
 
 
 async def test_unknown_game_raises(pool):
     with pytest.raises(ValueError, match="not found"):
-        await prefill_handler(_job(99999), Deps(pool=pool, steam_client=_StubSteam()))
+        await prefill_handler(_job(99999), _steam_deps(pool, _StubDriver()))
 
 
 async def test_registered():
@@ -157,97 +181,3 @@ async def test_summarize_failures_keeps_only_top_n():
 
     failures = [(f"/{i}", f"reason-{i}") for i in range(10)]  # 10 distinct reasons
     assert len(_summarize_failures(failures, top=3)) == 3
-
-
-async def test_chunk_failure_last_error_includes_reason(pool, monkeypatch):
-    """#169: a failed prefill must record WHY (the dominant chunk-failure reason)
-    in the game's last_error, not just the count — so the operator can tell a
-    403-needs-token from a 404-not-found without reading logs."""
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id)
-
-    async def fake_prefill(uris, settings, *, on_progress=None):
-        return PrefillResult(
-            2,
-            0,
-            2,
-            [("/depot/731/chunk/x", "http 403"), ("/depot/731/chunk/y", "http 403")],
-        )
-
-    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
-    with pytest.raises(RuntimeError):
-        await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=_StubSteam()))
-    g = await pool.read_one("SELECT last_error FROM games WHERE id=?", (game_id,))
-    assert "http 403" in g["last_error"]
-
-
-async def test_full_success_sets_cached_version(pool, monkeypatch):
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id)
-    await pool.execute_write(
-        "UPDATE games SET current_version='42', status='downloading' WHERE id=?", (game_id,)
-    )
-
-    async def fake_prefill(uris, settings, *, on_progress=None):
-        return PrefillResult(len(uris), len(uris), 0)
-
-    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
-    await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=_StubSteam()))
-    row = await pool.read_one(
-        "SELECT cached_version, last_prefilled_at FROM games WHERE id=?", (game_id,)
-    )
-    assert row["cached_version"] == "42"
-    assert row["last_prefilled_at"] is not None
-
-
-async def test_partial_failure_leaves_cached_version_stale(pool, monkeypatch):
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id)
-    await pool.execute_write(
-        "UPDATE games SET current_version='42', cached_version='OLD' WHERE id=?", (game_id,)
-    )
-
-    async def fake_prefill(uris, settings, *, on_progress=None):
-        return PrefillResult(len(uris), 0, len(uris), [("/depot/731/chunk/x", "http 500")])
-
-    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
-    with pytest.raises(RuntimeError):
-        await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=_StubSteam()))
-    row = await pool.read_one("SELECT cached_version FROM games WHERE id=?", (game_id,))
-    assert row["cached_version"] == "OLD"
-
-
-async def test_diverged_game_refetches_manifest(pool, monkeypatch):
-    """S2-2: a version-diverged game (cached != current) must re-fetch a fresh
-    manifest even though stale manifests exist, so it caches current content."""
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id)  # stale manifest already present
-    await pool.execute_write(
-        "UPDATE games SET cached_version='41', current_version='42' WHERE id=?", (game_id,)
-    )
-    stub = _StubSteam()
-
-    async def fake_prefill(uris, settings, *, on_progress=None):
-        return PrefillResult(len(uris), len(uris), 0)
-
-    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
-    await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=stub))
-    assert stub.fetch_calls == 1  # refetched despite the existing manifest
-
-
-async def test_up_to_date_reprefill_reuses_manifest(pool, monkeypatch):
-    """A redundant re-prefill of an up-to-date game (cached == current) reuses the
-    existing manifest — no wasted fetch."""
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id)
-    await pool.execute_write(
-        "UPDATE games SET cached_version='42', current_version='42' WHERE id=?", (game_id,)
-    )
-    stub = _StubSteam()
-
-    async def fake_prefill(uris, settings, *, on_progress=None):
-        return PrefillResult(len(uris), len(uris), 0)
-
-    monkeypatch.setattr("orchestrator.jobs.handlers.prefill.prefill_chunks", fake_prefill)
-    await prefill_handler(_job(game_id), Deps(pool=pool, steam_client=stub))
-    assert stub.fetch_calls == 0  # reused

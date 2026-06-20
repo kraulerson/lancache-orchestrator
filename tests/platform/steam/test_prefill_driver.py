@@ -1,0 +1,74 @@
+import json
+import stat
+
+import pytest
+
+from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
+
+
+def _fake_binary(tmp_path, stdout="Done.", code=0):
+    p = tmp_path / "FakeSteamPrefill"
+    p.write_text(f"#!/bin/sh\ncat <<EOF\n{stdout}\nEOF\nexit {code}\n")
+    p.chmod(p.stat().st_mode | stat.S_IEXEC)
+    return p
+
+
+@pytest.mark.asyncio
+async def test_prefill_apps_writes_selection_and_runs(tmp_path):
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    d = SteamPrefillDriver(binary=_fake_binary(tmp_path), config_dir=cfg)
+    res = await d.prefill_apps([730, 440], force=True)
+    assert json.loads((cfg / "selectedAppsToPrefill.json").read_text()) == [730, 440]
+    assert res.ok is True
+
+
+@pytest.mark.asyncio
+async def test_prefill_apps_restores_prior_selection(tmp_path):
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "selectedAppsToPrefill.json").write_text("[111, 222]")
+    d = SteamPrefillDriver(binary=_fake_binary(tmp_path), config_dir=cfg)
+    await d.prefill_apps([730], force=False)
+    # the operator's prior selection is restored after the run
+    assert json.loads((cfg / "selectedAppsToPrefill.json").read_text()) == [111, 222]
+
+
+@pytest.mark.asyncio
+async def test_prefill_apps_nonzero_exit_not_ok(tmp_path):
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    d = SteamPrefillDriver(binary=_fake_binary(tmp_path, stdout="boom", code=3), config_dir=cfg)
+    res = await d.prefill_apps([730])
+    assert res.ok is False
+
+
+def test_downloaded_state_parses(tmp_path):
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "successfullyDownloadedDepots.json").write_text('{"730":[111,222],"440":[333]}')
+    d = SteamPrefillDriver(binary=tmp_path / "x", config_dir=cfg)
+    assert d.downloaded_state() == {730: [111, 222], 440: [333]}
+
+
+def test_downloaded_state_missing_returns_empty(tmp_path):
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    d = SteamPrefillDriver(binary=tmp_path / "x", config_dir=cfg)
+    assert d.downloaded_state() == {}
+
+
+def test_auth_status_missing_config_needs_reauth(tmp_path):
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    d = SteamPrefillDriver(binary=tmp_path / "x", config_dir=cfg)
+    st = d.auth_status()
+    assert st.ok is False and st.reason == "no_account_config"
+
+
+def test_auth_status_present_ok(tmp_path):
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "account.config").write_bytes(b"\x0a\x05hello")
+    d = SteamPrefillDriver(binary=tmp_path / "x", config_dir=cfg)
+    assert d.auth_status().ok is True
