@@ -40,8 +40,14 @@ class SteamPrefillDriver:
         self._selection_path.write_text(json.dumps([int(a) for a in app_ids]))
         try:
             args = [str(self._binary), "prefill", "--no-ansi", *(["--force"] if force else [])]
+            # SteamPrefill resolves its Config/ dir RELATIVE TO the working
+            # directory (./Config), not the binary path. Run it from the parent
+            # of our config_dir so ./Config maps to exactly config_dir —
+            # otherwise it finds no account.config and login fails (the failure
+            # is masked by a Spectre.Console crash; see the 2026-06-21 flip).
             proc = await asyncio.create_subprocess_exec(
                 *args,
+                cwd=str(self._config_dir.parent),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
