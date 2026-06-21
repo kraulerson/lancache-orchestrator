@@ -1,5 +1,6 @@
 import json
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +33,22 @@ async def test_prefill_apps_restores_prior_selection(tmp_path):
     await d.prefill_apps([730], force=False)
     # the operator's prior selection is restored after the run
     assert json.loads((cfg / "selectedAppsToPrefill.json").read_text()) == [111, 222]
+
+
+@pytest.mark.asyncio
+async def test_prefill_apps_runs_from_config_parent_cwd(tmp_path):
+    # SteamPrefill resolves its Config/ dir RELATIVE TO the working directory
+    # (./Config), not the binary path, so the driver must run it from
+    # config_dir.parent — otherwise it finds no account.config and login fails.
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    marker = tmp_path / "cwd.txt"
+    bin_path = tmp_path / "FakeSteamPrefill"
+    bin_path.write_text(f'#!/bin/sh\npwd > "{marker}"\nexit 0\n')
+    bin_path.chmod(bin_path.stat().st_mode | stat.S_IEXEC)
+    d = SteamPrefillDriver(binary=bin_path, config_dir=cfg)
+    await d.prefill_apps([730])
+    assert Path(marker.read_text().strip()).resolve() == tmp_path.resolve()
 
 
 @pytest.mark.asyncio
