@@ -161,7 +161,9 @@ async def validate_game(
 ) -> ValidationResult:
     """Validate the latest manifest per depot for `game_id`."""
     cache_root = Path(settings.lancache_nginx_cache_path)
-    if not cache_root.is_dir():
+    # When the agent owns the data plane, the control plane may not have the
+    # cache filesystem mounted, so this guard would wrongly error. Flag-off only.
+    if not settings.agent_enabled and not cache_root.is_dir():
         return ValidationResult(0, 0, 0, "error", "", f"cache root not a directory: {cache_root}")
 
     steam_client = deps.steam_client
@@ -178,6 +180,7 @@ async def validate_game(
 
     seen: set[tuple[int, str]] = set()
     paths: list[Path] = []
+    hashes: list[str] = []
     versions: list[str] = []
     try:
         for row in rows:
@@ -198,6 +201,7 @@ async def validate_game(
                 seen.add(key)
                 uri = steam_chunk_uri(depot_id, sha)
                 h = cache_key(identifier, uri, slice_range)
+                hashes.append(h)
                 paths.append(cache_path(cache_root, h, levels))
     except ValueError as e:
         # Bug C: a malformed chunk SHA / depot mismatch is a data error for
@@ -205,8 +209,17 @@ async def validate_game(
         _log.warning("validate.expand_error", game_id=game_id, reason=str(e)[:200])
         return ValidationResult(0, 0, 0, "error", ",".join(sorted(versions)), str(e)[:200])
 
-    cached, missing = await validate_chunks(paths)
-    total = len(paths)
+    if settings.agent_enabled:
+        if deps.agent_client is None:
+            return ValidationResult(
+                0, 0, 0, "error", ",".join(sorted(versions)), "agent_client unavailable"
+            )
+        counts = await deps.agent_client.stat(hashes)
+        cached, missing = counts["cached"], counts["missing"]
+        total = cached + missing
+    else:
+        cached, missing = await validate_chunks(paths)
+        total = len(paths)
     outcome = _classify(total, cached)
     _log.info(
         "validate.stat_done",

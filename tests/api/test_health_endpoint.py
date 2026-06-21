@@ -205,6 +205,49 @@ class TestSteamAuthStatus:
             del client._transport.app.state.prefill_driver
 
 
+class TestAgentReachable:
+    """Task 13: /health surfaces agent_reachable. The agent is only consulted
+    when settings.agent_enabled is True; otherwise agent_reachable defaults
+    True (not consulted) and steam_auth_ok comes from the local prefill_driver."""
+
+    async def test_health_agent_reachable_default_present(self, client):
+        """With agent_enabled False (default), agent_reachable is present and
+        True (the agent isn't consulted when disabled). The endpoint returns
+        its normal status (503 — the unit_app stubs leave subsystems false)."""
+        r = await client.get("/api/v1/health")
+        assert r.status_code == 503
+        body = r.json()
+        assert "agent_reachable" in body
+        assert body["agent_reachable"] is True
+
+    async def test_health_agent_unreachable_when_enabled(self, client, monkeypatch):
+        """With agent_enabled True and an agent_client whose auth_status raises
+        AgentError, /health reports agent_reachable False and steam_auth_ok
+        False, and still returns its normal (non-500) status — the agent being
+        down is REPORTED, not a hard crash."""
+        from orchestrator.clients.agent_client import AgentError
+        from orchestrator.core.settings import get_settings
+
+        monkeypatch.setenv("ORCH_AGENT_ENABLED", "true")
+        get_settings.cache_clear()
+
+        class _StubAgentClient:
+            async def auth_status(self):
+                raise AgentError("agent unreachable: ConnectError")
+
+        client._transport.app.state.agent_client = _StubAgentClient()
+        try:
+            r = await client.get("/api/v1/health")
+            # Agent down is reported, not a hard 500.
+            assert r.status_code == 503
+            body = r.json()
+            assert body["agent_reachable"] is False
+            assert body["steam_auth_ok"] is False
+        finally:
+            del client._transport.app.state.agent_client
+            get_settings.cache_clear()
+
+
 class TestHealthDynamicFields:
     async def test_uptime_sec_increases_monotonically(self, client):
         r1 = await client.get("/api/v1/health")

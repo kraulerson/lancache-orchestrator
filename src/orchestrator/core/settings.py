@@ -93,6 +93,17 @@ class Settings(BaseSettings):
     steam_prefill_binary: Path = Path("/SteamPrefill/SteamPrefill")
     steam_prefill_config_dir: Path = Path("/SteamPrefill/Config")
 
+    # --- Data-plane agent (re-architecture step 2) ------------------
+    # The data plane (chunk-pull + cache disk-stat + SteamPrefill runner) runs
+    # as a separate HTTP service (the agent) on the lancache host. agent_enabled
+    # routes the control-plane handlers through it; OFF keeps the in-process path
+    # (zero behavior change). agent_base_url is loopback while co-located (step
+    # 2) and becomes the LXC->host LAN address in step 4.
+    agent_enabled: bool = False
+    agent_base_url: str = "http://127.0.0.1:8780"
+    agent_bind_host: str = Field(default="127.0.0.1", min_length=1)
+    agent_bind_port: int = Field(default=8780, ge=1, le=65535)
+
     # --- Lancache cache topology ------------------------------------
     lancache_nginx_cache_path: Path = Path("/data/cache/cache/")
     cache_slice_size_bytes: int = Field(default=10_485_760, gt=0)

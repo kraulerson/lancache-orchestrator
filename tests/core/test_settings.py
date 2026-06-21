@@ -784,3 +784,21 @@ class TestSteamPrefillSettings:
         s = Settings(orchestrator_token="t" * 32)
         assert s.steam_prefill_binary == Path("/SteamPrefill/SteamPrefill")
         assert s.steam_prefill_config_dir == Path("/SteamPrefill/Config")
+
+
+class TestDataPlaneAgentSettings:
+    def test_defaults(self):
+        s = Settings(orchestrator_token="a" * 32)
+        assert s.agent_enabled is False
+        assert s.agent_base_url == "http://127.0.0.1:8780"
+        assert s.agent_bind_host == "127.0.0.1"
+        assert s.agent_bind_port == 8780
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("ORCH_AGENT_ENABLED", "true")
+        monkeypatch.setenv("ORCH_AGENT_BASE_URL", "http://10.0.0.5:8780")
+        monkeypatch.setenv("ORCH_AGENT_BIND_PORT", "9001")
+        s = Settings(orchestrator_token="a" * 32)
+        assert s.agent_enabled is True
+        assert s.agent_base_url == "http://10.0.0.5:8780"
+        assert s.agent_bind_port == 9001

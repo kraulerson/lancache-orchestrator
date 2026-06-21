@@ -19,6 +19,7 @@ import structlog
 from orchestrator.core.settings import get_settings
 from orchestrator.platform.epic.manifest import chunk_path as epic_chunk_path
 from orchestrator.platform.epic.models import EpicLibraryItem
+from orchestrator.prefill.epic_downloader import _full_path
 from orchestrator.prefill.epic_downloader import prefill_chunks as epic_prefill_chunks
 from orchestrator.prefill.epic_downloader import verify_cached as epic_verify_cached
 
@@ -144,28 +145,42 @@ async def _epic_prefill_inner(
             paths.append(p)
 
     settings = get_settings()
-    result = await epic_prefill_chunks(paths, cdn_host, cdn_base, settings)
-    if result.chunks_failed > 0:
-        failure_reasons = _summarize_failures(result.failures)
+    if settings.agent_enabled:
+        # Bulk chunk download delegated to the out-of-process data-plane agent.
+        # NOTE: only the bulk pull moves behind the flag — epic_verify_cached
+        # (the 20-chunk HIT sample below) STAYS control-side on both paths
+        # (deferred to a later step-④ follow-up).
+        if deps.agent_client is None:
+            raise RuntimeError("agent_client is required when agent_enabled")
+        specs = [{"url": _full_path(cdn_base, p), "host": cdn_host} for p in paths]
+        result_d = await deps.agent_client.pull(specs, user_agent=settings.epic_user_agent)
+        chunks_total = result_d["chunks_total"]
+        chunks_failed = result_d["chunks_failed"]
+        failures = result_d.get("failures", [])
+    else:
+        result = await epic_prefill_chunks(paths, cdn_host, cdn_base, settings)
+        chunks_total = result.chunks_total
+        chunks_failed = result.chunks_failed
+        failures = result.failures
+    if chunks_failed > 0:
+        failure_reasons = _summarize_failures(failures)
         _log.warning(
             "prefill.epic.chunks_failed",
             job_id=job_id,
             game_id=game_id,
-            failed=result.chunks_failed,
-            total=result.chunks_total,
+            failed=chunks_failed,
+            total=chunks_total,
             failure_reasons=failure_reasons,
         )
         last_error = (
-            f"prefill: {result.chunks_failed}/{result.chunks_total} chunks failed"
+            f"prefill: {chunks_failed}/{chunks_total} chunks failed"
             f"{_failure_suffix(failure_reasons)}"
         )[:200]
         await deps.pool.execute_write(
             "UPDATE games SET status='failed', last_error=? WHERE id=?",
             (last_error, game_id),
         )
-        raise RuntimeError(
-            f"epic prefill failed: {result.chunks_failed}/{result.chunks_total} chunks"
-        )
+        raise RuntimeError(f"epic prefill failed: {chunks_failed}/{chunks_total} chunks")
 
     # Inline header-HIT verification (epic validation; F7-epic disk-stat deferred).
     hit_ratio = await epic_verify_cached(paths[:20], cdn_host, cdn_base, settings)
@@ -188,7 +203,7 @@ async def _epic_prefill_inner(
         "prefill.epic.completed",
         job_id=job_id,
         game_id=game_id,
-        total=result.chunks_total,
+        total=chunks_total,
         hit_ratio=round(hit_ratio, 3),
     )
 
@@ -201,11 +216,20 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
     marks the game 'failed' rather than leaving it stuck 'downloading' forever
     (UAT-10 #2; mirrors the Epic path).
 
+    When ``settings.agent_enabled`` is True the prefill is delegated to the
+    out-of-process data-plane agent via ``deps.agent_client`` instead of the
+    in-process ``SteamPrefillDriver``; the DB writes (downloading → validate
+    enqueue → cached_version) are identical either way.
+
     Raises:
         ValueError — unknown game, non-steam platform, or non-numeric app_id.
-        RuntimeError — prefill_driver is None, or SteamPrefill exited non-zero.
+        RuntimeError — required client missing, or the prefill exited non-zero.
     """
-    if deps.prefill_driver is None:
+    settings = get_settings()
+    if settings.agent_enabled:
+        if deps.agent_client is None:
+            raise RuntimeError("agent_client is required when agent_enabled")
+    elif deps.prefill_driver is None:
         raise RuntimeError("prefill_driver is required for prefill handler")
     prefill_driver = deps.prefill_driver
     game_id = job.get("game_id")
@@ -226,7 +250,15 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
     await deps.pool.execute_write("UPDATE games SET status='downloading' WHERE id=?", (game_id,))
     _log.info("prefill.started", job_id=job_id, game_id=game_id)
     try:
-        await _steam_prefill_inner(job_id, game_id, game, deps, prefill_driver, force=force)
+        await _steam_prefill_inner(
+            job_id,
+            game_id,
+            game,
+            deps,
+            prefill_driver,
+            force=force,
+            agent_enabled=settings.agent_enabled,
+        )
     except Exception as e:
         # Never leave the game stuck in 'downloading'. The non-ok-exit path
         # already set 'failed' (this then no-ops via the status guard); any other
@@ -245,28 +277,43 @@ async def _steam_prefill_inner(
     game_id: int,
     game: dict[str, Any],
     deps: Deps,
-    prefill_driver: SteamPrefillDriver,
+    prefill_driver: SteamPrefillDriver | None,
     *,
     force: bool,
+    agent_enabled: bool,
 ) -> None:
     try:
         app_id_int = int(game["app_id"])
     except (TypeError, ValueError) as e:
         raise ValueError(f"game {game_id} app_id not numeric") from e
 
-    result = await prefill_driver.prefill_apps([app_id_int], force=force)
+    if agent_enabled:
+        # Delegate to the out-of-process data-plane agent. _steam_prefill's
+        # guard already ensures agent_client is set when agent_enabled; re-check
+        # here so the type checker narrows it (mirrors the Epic seam).
+        if deps.agent_client is None:
+            raise RuntimeError("agent_client is required when agent_enabled")
+        agent_result = await deps.agent_client.steam_prefill([app_id_int], force=force)
+        ok = bool(agent_result["ok"])
+        raw = str(agent_result.get("raw", ""))
+    else:
+        if prefill_driver is None:
+            raise RuntimeError("prefill_driver is required for prefill handler")
+        driver_result = await prefill_driver.prefill_apps([app_id_int], force=force)
+        ok = driver_result.ok
+        raw = driver_result.raw
     _log.info(
         "prefill.completed",
         job_id=job_id,
         game_id=game_id,
         app_id=app_id_int,
-        ok=result.ok,
+        ok=ok,
     )
 
-    if not result.ok:
+    if not ok:
         # SteamPrefill exited non-zero. Surface the tail of its output as the
         # operator-facing reason (it never logs token bytes — see the driver).
-        last_error = (f"prefill: SteamPrefill exited non-zero: {result.raw[-150:]}")[:200]
+        last_error = (f"prefill: SteamPrefill exited non-zero: {raw[-150:]}")[:200]
         await deps.pool.execute_write(
             "UPDATE games SET status='failed', last_error=? WHERE id=?",
             (last_error, game_id),
