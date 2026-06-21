@@ -28,6 +28,7 @@ class HealthResponse(BaseModel):
     cache_volume_mounted: bool
     validator_healthy: bool
     steam_auth_ok: bool = False
+    agent_reachable: bool = True
     git_sha: str
 
 
@@ -80,12 +81,27 @@ async def get_health(
     # lifespan omit the state — fall back to False (BL5-stub-like).
     validator_healthy = bool(getattr(request.app.state, "validator_healthy", False))
 
-    # Steam auth status routed through the SteamPrefill driver (it reads the
-    # persisted account.config). `app.state.prefill_driver` is built in lifespan
-    # startup; tests without lifespan omit it — fall back to False. auth_status()
-    # is a cheap filesystem stat and never logs token bytes (see the driver).
-    prefill_driver = getattr(request.app.state, "prefill_driver", None)
-    steam_auth_ok = bool(prefill_driver.auth_status().ok) if prefill_driver is not None else False
+    # Steam auth status. When the data-plane agent is enabled (re-arch step ②),
+    # steam auth lives on the agent host, so /health asks the agent over the
+    # control-plane client; a down agent is REPORTED (agent_reachable=False,
+    # steam_auth_ok=False), never a hard crash. When the agent is disabled
+    # (default, co-located), route through the local SteamPrefill driver, which
+    # reads the persisted account.config (a cheap filesystem stat that never
+    # logs token bytes — see the driver). Tests without lifespan omit app.state
+    # entries — fall back to False.
+    agent_reachable = True
+    if settings.agent_enabled:
+        try:
+            st = await request.app.state.agent_client.auth_status()
+            steam_auth_ok = bool(st["ok"])
+        except Exception:  # agent down is reported on /health, not fatal
+            steam_auth_ok = False
+            agent_reachable = False
+    else:
+        prefill_driver = getattr(request.app.state, "prefill_driver", None)
+        steam_auth_ok = (
+            bool(prefill_driver.auth_status().ok) if prefill_driver is not None else False
+        )
 
     body = HealthResponse(
         status="ok" if pool_ok else "degraded",
@@ -96,6 +112,7 @@ async def get_health(
         cache_volume_mounted=cache_volume_mounted,
         validator_healthy=validator_healthy,
         steam_auth_ok=steam_auth_ok,
+        agent_reachable=agent_reachable,
         # UAT-3 S2-B: /api/v1/health is unauthenticated, so the git_sha
         # is reachable by anyone with network access. Truncate to 8 hex
         # chars — enough to identify a build for ops, not enough for

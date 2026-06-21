@@ -15,7 +15,7 @@ import ipaddress
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 import structlog
@@ -225,8 +225,15 @@ class BodySizeCapMiddleware:
 
 
 class BearerAuthMiddleware:
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        exempt_paths: Iterable[tuple[str, bool]] | None = None,
+    ) -> None:
         self.app = app
+        # Additive: callers that omit exempt_paths keep the API's
+        # AUTH_EXEMPT_PATHS (unchanged behavior). The agent passes its own set.
+        self._exempt_paths = exempt_paths if exempt_paths is not None else AUTH_EXEMPT_PATHS
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -261,7 +268,7 @@ class BearerAuthMiddleware:
         # Skip exempt paths — exact match for most, exact-or-subpath for
         # the few that need it (e.g. Swagger UI loads /api/v1/docs/* assets).
         # UAT-3 S2-A: /api/v1/healthxxx (substring) must NOT auto-bypass.
-        for exempt_path, allow_subpaths in AUTH_EXEMPT_PATHS:
+        for exempt_path, allow_subpaths in self._exempt_paths:
             if path == exempt_path:
                 await self.app(scope, receive, send)
                 return

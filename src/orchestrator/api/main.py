@@ -206,6 +206,25 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         config_dir=str(settings.steam_prefill_config_dir),
     )
 
+    # 3d. Data-plane agent control-plane client (re-arch step ②). Constructed
+    # unconditionally — construction is pure config (no IO), so it can't fail
+    # boot. Handlers and /health only actually call it when settings.agent_enabled
+    # is True; otherwise it's inert. Exposed on app.state so /health can probe
+    # agent reachability and routed into JobsDeps so the steam/epic/validate
+    # seams can delegate to the agent.
+    from orchestrator.clients.agent_client import AgentClient
+
+    agent_client = AgentClient(
+        base_url=settings.agent_base_url,
+        token=settings.orchestrator_token.get_secret_value(),
+    )
+    app.state.agent_client = agent_client
+    log.info(
+        "api.boot.agent_client_initialized",
+        agent_enabled=settings.agent_enabled,
+        agent_base_url=settings.agent_base_url,
+    )
+
     # 4. Jobs worker — spawn the background asyncio task (BL11)
     jobs_shutdown: asyncio.Event = asyncio.Event()
     jobs_deps = JobsDeps(
@@ -213,6 +232,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         steam_client=steam_client,
         epic_client=epic_client,
         prefill_driver=prefill_driver,
+        agent_client=agent_client,
     )
     jobs_worker_task = asyncio.create_task(
         jobs_worker_loop(

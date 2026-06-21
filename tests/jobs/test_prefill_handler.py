@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from orchestrator.core.settings import Settings
 from orchestrator.jobs.handlers.prefill import prefill_handler
 from orchestrator.jobs.worker import Deps
 from orchestrator.platform.steam.prefill_driver import PrefillResult as DriverPrefillResult
@@ -136,6 +137,297 @@ async def test_steam_driver_error_marks_failed_not_stuck_downloading(pool):
         await prefill_handler(_job(game_id), _steam_deps(pool, _BoomDriver()))
     g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
     assert g["status"] == "failed"
+
+
+# --- DPA-T10: agent control-plane seam (settings.agent_enabled=True) ---
+
+
+class _FakeAgent:
+    """Stand-in for AgentClient — records steam_prefill calls."""
+
+    def __init__(self, *, ok=True, raw="ok"):
+        self._ok = ok
+        self._raw = raw
+        self.calls: list[tuple[list[int], bool]] = []
+
+    async def steam_prefill(self, app_ids, *, force=False):
+        self.calls.append((list(app_ids), force))
+        return {"ok": self._ok, "raw": self._raw}
+
+
+class _ExplodingDriver(_StubDriver):
+    """Proves the driver path is NOT taken when the agent flag is on."""
+
+    async def prefill_apps(self, app_ids, *, force=False):
+        raise AssertionError("agent_enabled path must not call prefill_driver")
+
+
+def _agent_enabled(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.jobs.handlers.prefill.get_settings",
+        lambda: Settings(orchestrator_token="a" * 32, agent_enabled=True),
+    )
+
+
+async def test_steam_agent_path_taken_not_driver(pool, monkeypatch):
+    """With agent_enabled=True the steam prefill routes through agent_client and
+    the in-process driver is never touched."""
+    _agent_enabled(monkeypatch)
+    game_id = await _seed_game(pool, app_id="730")
+    agent = _FakeAgent(ok=True)
+    deps = Deps(
+        pool=pool,
+        steam_client=_StubSteam(),
+        prefill_driver=_ExplodingDriver(),
+        agent_client=agent,
+    )
+    await prefill_handler(_job(game_id), deps)
+    assert agent.calls == [([730], False)]
+
+
+async def test_steam_agent_force_passthrough(pool, monkeypatch):
+    _agent_enabled(monkeypatch)
+    game_id = await _seed_game(pool, app_id="730")
+    agent = _FakeAgent(ok=True)
+    deps = Deps(
+        pool=pool,
+        steam_client=_StubSteam(),
+        prefill_driver=_ExplodingDriver(),
+        agent_client=agent,
+    )
+    await prefill_handler(_job(game_id, force=True), deps)
+    assert agent.calls == [([730], True)]
+
+
+async def test_steam_agent_success_same_db_writes(pool, monkeypatch):
+    """The agent happy path produces the SAME DB writes as the flag-off path:
+    validate enqueued + last_prefilled_at + cached_version=current_version."""
+    _agent_enabled(monkeypatch)
+    game_id = await _seed_game(pool, app_id="730")
+    await pool.execute_write("UPDATE games SET current_version='42' WHERE id=?", (game_id,))
+    agent = _FakeAgent(ok=True)
+    deps = Deps(
+        pool=pool,
+        steam_client=_StubSteam(),
+        prefill_driver=_ExplodingDriver(),
+        agent_client=agent,
+    )
+    await prefill_handler(_job(game_id), deps)
+
+    vj = await pool.read_one(
+        "SELECT kind, state FROM jobs WHERE kind='validate' AND game_id=?", (game_id,)
+    )
+    assert vj == {"kind": "validate", "state": "queued"}
+    g = await pool.read_one(
+        "SELECT last_prefilled_at, cached_version FROM games WHERE id=?", (game_id,)
+    )
+    assert g["last_prefilled_at"] is not None
+    assert g["cached_version"] == "42"
+
+
+async def test_steam_agent_failure_marks_failed_no_validate(pool, monkeypatch):
+    """agent returns ok=False → game marked 'failed' with last_error, RuntimeError
+    raised, and no validate job enqueued (mirrors the driver-non-ok path)."""
+    _agent_enabled(monkeypatch)
+    game_id = await _seed_game(pool, app_id="730")
+    agent = _FakeAgent(ok=False, raw="boom: exited 1")
+    deps = Deps(
+        pool=pool,
+        steam_client=_StubSteam(),
+        prefill_driver=_ExplodingDriver(),
+        agent_client=agent,
+    )
+    with pytest.raises(RuntimeError):
+        await prefill_handler(_job(game_id), deps)
+    g = await pool.read_one("SELECT status, last_error FROM games WHERE id=?", (game_id,))
+    assert g["status"] == "failed"
+    assert g["last_error"] is not None
+    vj = await pool.read_one("SELECT id FROM jobs WHERE kind='validate' AND game_id=?", (game_id,))
+    assert vj is None
+
+
+async def test_steam_agent_enabled_but_no_agent_client_raises(pool, monkeypatch):
+    """agent_enabled=True but no agent_client wired → explicit RuntimeError."""
+    _agent_enabled(monkeypatch)
+    game_id = await _seed_game(pool, app_id="730")
+    deps = Deps(pool=pool, steam_client=_StubSteam(), prefill_driver=_StubDriver())
+    with pytest.raises(RuntimeError, match="agent_client"):
+        await prefill_handler(_job(game_id), deps)
+
+
+# --- DPA-T11: Epic prefill seam (settings.agent_enabled=True) ---
+
+
+class _StubEpic:
+    """Stand-in for EpicClient — fetch_manifest returns (manifest, host, base)."""
+
+    def __init__(self, manifest):
+        self._manifest = manifest
+
+    async def fetch_manifest(self, item):
+        return self._manifest, "epiccdn.test", "/base"
+
+
+class _FakeEpicAgent:
+    """Stand-in for AgentClient — records pull() calls (Epic bulk download)."""
+
+    def __init__(self, *, chunks_failed=0):
+        self._chunks_failed = chunks_failed
+        self.calls: list[dict] = []
+
+    async def pull(self, chunks, *, user_agent, concurrency=None):
+        n = len(chunks)
+        self.calls.append(
+            {"chunks": list(chunks), "user_agent": user_agent, "concurrency": concurrency}
+        )
+        failed = self._chunks_failed
+        return {
+            "chunks_total": n,
+            "chunks_ok": n - failed,
+            "chunks_failed": failed,
+            "failures": [("/x", "http 403")] * failed,
+        }
+
+
+def _epic_manifest():
+    from orchestrator.platform.epic.models import EpicChunk, EpicManifest
+
+    chunks = [EpicChunk((1, 2, 3, 4), 100, b"x" * 20, 0, 500, 1048576)]
+    return EpicManifest(version=22, chunks=chunks, cdn_base="/base", raw=b"BINARY-MANIFEST")
+
+
+def _expected_epic_specs(manifest):
+    """The dedup'd chunk specs the handler should hand the agent."""
+    from orchestrator.platform.epic.manifest import chunk_path as epic_chunk_path
+    from orchestrator.prefill.epic_downloader import _full_path
+
+    seen: set[str] = set()
+    specs: list[dict[str, str]] = []
+    for chunk in manifest.chunks:
+        p = epic_chunk_path(chunk, manifest.version)
+        if p not in seen:
+            seen.add(p)
+            specs.append({"url": _full_path("/base", p), "host": "epiccdn.test"})
+    return specs
+
+
+async def _seed_epic_game(pool, *, app_id="AppA"):
+    import json
+
+    await pool.execute_write(
+        "INSERT INTO games (platform, app_id, title, owned, metadata) VALUES "
+        "('epic', ?, 't', 1, ?)",
+        (app_id, json.dumps({"namespace": "ns", "catalog_item_id": "cat"})),
+    )
+    row = await pool.read_one("SELECT id FROM games WHERE platform='epic' AND app_id=?", (app_id,))
+    return row["id"]
+
+
+async def test_epic_agent_path_pulls_through_agent_not_downloader(pool, monkeypatch):
+    """With agent_enabled=True the Epic bulk download routes through
+    agent_client.pull() with the correct chunk specs + user_agent, and the
+    in-process epic_prefill_chunks is never touched. epic_verify_cached STAYS
+    control-side (deferred from the agent)."""
+    import orchestrator.jobs.handlers.prefill as ph
+
+    settings = Settings(orchestrator_token="a" * 32, agent_enabled=True)
+    monkeypatch.setattr(ph, "get_settings", lambda: settings)
+
+    async def _explode_prefill(*a, **kw):
+        raise AssertionError("agent_enabled Epic path must not call epic_prefill_chunks")
+
+    verify_calls: list[tuple] = []
+
+    async def _fake_verify(paths, host, base, settings, **kw):
+        verify_calls.append((tuple(paths), host, base))
+        return 1.0
+
+    monkeypatch.setattr(ph, "epic_prefill_chunks", _explode_prefill)
+    monkeypatch.setattr(ph, "epic_verify_cached", _fake_verify)
+
+    manifest = _epic_manifest()
+    gid = await _seed_epic_game(pool, app_id="AppPull")
+    agent = _FakeEpicAgent()
+    deps = Deps(pool=pool, steam_client=None, epic_client=_StubEpic(manifest), agent_client=agent)
+    await prefill_handler(_job(gid, platform="epic"), deps)
+
+    # (1) agent.pull called with the expected specs + epic UA.
+    assert len(agent.calls) == 1
+    assert agent.calls[0]["chunks"] == _expected_epic_specs(manifest)
+    assert agent.calls[0]["user_agent"] == settings.epic_user_agent
+    # (2) verify_cached WAS still called control-side (first 20 of the same paths).
+    assert len(verify_calls) == 1
+
+
+async def test_epic_agent_success_same_db_writes(pool, monkeypatch):
+    """The Epic agent happy path produces the SAME final DB writes as the flag-off
+    Epic path: status up_to_date, cached_version=current_version, last_prefilled_at,
+    and the manifest upsert + size_bytes."""
+    import orchestrator.jobs.handlers.prefill as ph
+
+    settings = Settings(orchestrator_token="a" * 32, agent_enabled=True)
+    monkeypatch.setattr(ph, "get_settings", lambda: settings)
+
+    async def _fake_verify(paths, host, base, settings, **kw):
+        return 1.0
+
+    monkeypatch.setattr(ph, "epic_verify_cached", _fake_verify)
+
+    gid = await _seed_epic_game(pool, app_id="AppOK")
+    await pool.execute_write("UPDATE games SET current_version='bv-1' WHERE id=?", (gid,))
+    deps = Deps(
+        pool=pool,
+        steam_client=None,
+        epic_client=_StubEpic(_epic_manifest()),
+        agent_client=_FakeEpicAgent(),
+    )
+    await prefill_handler(_job(gid, platform="epic"), deps)
+
+    g = await pool.read_one(
+        "SELECT status, size_bytes, cached_version, last_prefilled_at FROM games WHERE id=?", (gid,)
+    )
+    assert g["status"] == "up_to_date"
+    assert g["size_bytes"] == 500
+    assert g["cached_version"] == "bv-1"
+    assert g["last_prefilled_at"] is not None
+    m = await pool.read_one(
+        "SELECT chunk_count, total_bytes FROM manifests WHERE game_id=?", (gid,)
+    )
+    assert m["chunk_count"] == 1
+    assert m["total_bytes"] == 500
+
+
+async def test_epic_agent_failed_chunks_marks_failed(pool, monkeypatch):
+    """agent.pull reporting chunks_failed>0 → game 'failed' with last_error and a
+    RuntimeError raised (mirrors the in-process chunks-failed path)."""
+    import orchestrator.jobs.handlers.prefill as ph
+
+    settings = Settings(orchestrator_token="a" * 32, agent_enabled=True)
+    monkeypatch.setattr(ph, "get_settings", lambda: settings)
+    monkeypatch.setattr(ph, "epic_verify_cached", _unreachable_verify := _make_unreachable_verify())
+
+    gid = await _seed_epic_game(pool, app_id="AppFail")
+    deps = Deps(
+        pool=pool,
+        steam_client=None,
+        epic_client=_StubEpic(_epic_manifest()),
+        agent_client=_FakeEpicAgent(chunks_failed=1),
+    )
+    with pytest.raises(RuntimeError):
+        await prefill_handler(_job(gid, platform="epic"), deps)
+    g = await pool.read_one("SELECT status, last_error FROM games WHERE id=?", (gid,))
+    assert g["status"] == "failed"
+    assert g["last_error"] is not None
+    assert _unreachable_verify.called is False  # verify is skipped on the failure path
+
+
+def _make_unreachable_verify():
+    async def _verify(paths, host, base, settings, **kw):
+        _verify.called = True
+        return 1.0
+
+    _verify.called = False
+    return _verify
 
 
 async def test_steam_nonnumeric_app_id_raises(pool):

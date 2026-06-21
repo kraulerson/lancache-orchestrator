@@ -21,6 +21,7 @@ from orchestrator.db.pool import PoolError
 from orchestrator.jobs.handlers import HANDLERS
 
 if TYPE_CHECKING:
+    from orchestrator.clients.agent_client import AgentClient
     from orchestrator.db.pool import Pool
     from orchestrator.platform.epic.client import EpicClient
     from orchestrator.platform.steam.client import SteamWorkerClient
@@ -42,6 +43,7 @@ class Deps:
     steam_client: SteamWorkerClient | None
     epic_client: EpicClient | None = None
     prefill_driver: SteamPrefillDriver | None = None
+    agent_client: AgentClient | None = None
 
 
 async def claim_next_job(pool: Pool) -> dict[str, Any] | None:
