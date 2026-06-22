@@ -271,11 +271,11 @@ class TestCurrentVersion:
 
 
 class _StubAgent:
-    def __init__(self, state):
-        self._state = state
+    def __init__(self, app_ids):
+        self._app_ids = app_ids
 
-    async def downloaded_state(self):
-        return self._state
+    async def prefilled_apps(self):
+        return self._app_ids
 
 
 class TestEnumerateViaPrefill:
@@ -306,7 +306,7 @@ class TestEnumerateViaPrefill:
             return {"type": "dlc", "name": "Some DLC"}
 
         monkeypatch.setattr("orchestrator.jobs.handlers.library_sync.fetch_app_info", fake_fetch)
-        agent = _StubAgent({"440": [1], "570": [2]})
+        agent = _StubAgent([440, 570])
         await library_sync_handler(_job(), Deps(pool=pool, steam_client=None, agent_client=agent))
 
         games = await pool.read_all(
@@ -333,7 +333,7 @@ class TestEnumerateViaPrefill:
             raise AssertionError("fetch_app_info must not be called on a cache hit")
 
         monkeypatch.setattr("orchestrator.jobs.handlers.library_sync.fetch_app_info", boom)
-        agent = _StubAgent({"440": [1]})
+        agent = _StubAgent([440])
         await library_sync_handler(_job(), Deps(pool=pool, steam_client=None, agent_client=agent))
 
         row = await pool.read_one("SELECT title, owned FROM games WHERE app_id='440'")
@@ -351,7 +351,7 @@ class TestEnumerateViaPrefill:
         monkeypatch.setattr(
             "orchestrator.jobs.handlers.library_sync.fetch_app_info", counting_fetch
         )
-        agent = _StubAgent({"1": [1], "2": [2], "3": [3]})
+        agent = _StubAgent([1, 2, 3])
         await library_sync_handler(_job(), Deps(pool=pool, steam_client=None, agent_client=agent))
 
         # Budget=1 → only one uncached app is looked up this run; the rest defer.
@@ -367,7 +367,7 @@ class TestEnumerateViaPrefill:
             return {"type": "game", "name": "Team Fortress 2"}
 
         monkeypatch.setattr("orchestrator.jobs.handlers.library_sync.fetch_app_info", fake_fetch)
-        agent = _StubAgent({"440": [1]})
+        agent = _StubAgent([440])
         await library_sync_handler(_job(), Deps(pool=pool, steam_client=None, agent_client=agent))
 
         row = await pool.read_one("SELECT title, owned FROM games WHERE app_id='440'")
