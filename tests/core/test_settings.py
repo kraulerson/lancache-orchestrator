@@ -802,3 +802,15 @@ class TestDataPlaneAgentSettings:
         assert s.agent_enabled is True
         assert s.agent_base_url == "http://10.0.0.5:8780"
         assert s.agent_bind_port == 9001
+
+
+class TestSteamWorkerDeletionSettings:
+    def test_defaults(self):
+        s = Settings(orchestrator_token="a" * 32)
+        assert s.steam_manifest_cache_dir == Path("/steamprefill-cache")
+        assert s.steam_validate_via_agent is False
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("ORCH_STEAM_VALIDATE_VIA_AGENT", "true")
+        s = Settings(orchestrator_token="a" * 32)
+        assert s.steam_validate_via_agent is True

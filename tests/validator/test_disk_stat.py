@@ -408,3 +408,80 @@ async def test_agent_enabled_but_no_agent_client_is_error(pool, tmp_path):
     result = await validate_game(pool, deps, game_id, _agent_settings(tmp_path))
     assert result.outcome == "error"
     assert result.error is not None
+
+
+# --- validate_game steam_validate_via_agent (③a-6) ---------------------
+
+
+class _FakeAgentSV:
+    """Records steam_validate(app_id) calls and returns a fixed validate dict."""
+
+    def __init__(self):
+        self.calls: list[int] = []
+
+    async def steam_validate(self, app_id: int) -> dict:
+        self.calls.append(app_id)
+        return {
+            "chunks_total": 60,
+            "chunks_cached": 55,
+            "chunks_missing": 5,
+            "outcome": "partial",
+            "versions": "1018131:x",
+            "error": None,
+        }
+
+
+def _validate_via_agent_settings(tmp_path: Path) -> Settings:
+    # steam_validate_via_agent=True; cache path points at a NON-existent dir to
+    # prove the legacy is_dir() guard / manifest path is never reached.
+    return Settings(
+        orchestrator_token=VALID_TOKEN,
+        steam_validate_via_agent=True,
+        lancache_nginx_cache_path=tmp_path / "no-cache-mount-here",
+    )
+
+
+async def test_validate_via_agent_delegates_and_skips_legacy(pool, tmp_path):
+    """Flag-ON (steam_validate_via_agent): validate_game must look up the game's
+    app_id, call deps.agent_client.steam_validate(int(app_id)), map the dict to a
+    ValidationResult, and NEVER touch the legacy worker manifest_expand path."""
+    game_id = await _seed_game(pool, app_id="1018130")
+    # A manifest exists, but the legacy path must NOT be exercised.
+    await _seed_manifest(pool, game_id, depot_id=731, version="100")
+
+    async def _boom_expand(*_a, **_k):
+        raise AssertionError("manifest_expand must NOT be called on the validate-via-agent path")
+
+    steam = _StubSteam({"depot_id": 731, "chunk_shas": [SHA_A]})
+    steam.manifest_expand = _boom_expand  # type: ignore[method-assign]
+    agent = _FakeAgentSV()
+    deps = Deps(pool=pool, steam_client=steam, agent_client=agent)
+
+    result = await validate_game(pool, deps, game_id, _validate_via_agent_settings(tmp_path))
+
+    # (1) steam_validate called once with the int-coerced app_id.
+    assert agent.calls == [1018130]
+    # (2) manifest_expand NOT called (no recorded calls; _boom would have raised).
+    assert steam.calls == []
+    # (3) dict mapped onto ValidationResult.
+    assert result.chunks_total == 60
+    assert result.chunks_cached == 55
+    assert result.chunks_missing == 5
+    assert result.outcome == "partial"
+    assert result.manifest_version == "1018131:x"
+    assert result.error is None
+
+
+async def test_validate_via_agent_no_agent_client_is_error(pool, tmp_path):
+    """Flag-ON but deps.agent_client is None must yield a clean error result,
+    not crash."""
+    game_id = await _seed_game(pool)
+    await _seed_manifest(pool, game_id, depot_id=731, version="100")
+    deps = Deps(
+        pool=pool,
+        steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A]}),
+        agent_client=None,
+    )
+    result = await validate_game(pool, deps, game_id, _validate_via_agent_settings(tmp_path))
+    assert result.outcome == "error"
+    assert result.error is not None

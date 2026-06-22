@@ -85,6 +85,11 @@ class AgentClient:
         result: dict[str, int] = resp.json()
         return result
 
+    async def steam_validate(self, app_id: int) -> dict[str, Any]:
+        resp = await self._request("POST", "/v1/steam/validate", json={"app_id": app_id})
+        result: dict[str, Any] = resp.json()
+        return result
+
     async def downloaded_state(self) -> dict[str, list[int]]:
         resp = await self._request("GET", "/v1/steam/downloaded-state")
         result: dict[str, list[int]] = resp.json()

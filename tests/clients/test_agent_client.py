@@ -99,3 +99,33 @@ async def test_failed_job_raises_agent_error():
     client = _client(handler)
     with pytest.raises(AgentError):
         await client.pull([{"url": "/x", "host": "h"}], user_agent="UA/1.0")
+
+
+async def test_steam_validate_single_call():
+    def handler(request):
+        assert request.url.path == "/v1/steam/validate"
+        return httpx.Response(
+            200,
+            json={
+                "chunks_total": 60,
+                "chunks_cached": 60,
+                "chunks_missing": 0,
+                "outcome": "cached",
+                "versions": "1018131:x",
+                "error": None,
+            },
+        )
+
+    client = _client(handler)
+    res = await client.steam_validate(1018130)
+    assert res["chunks_cached"] == 60
+    assert res["outcome"] == "cached"
+
+
+async def test_steam_validate_unreachable_raises():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    client = _client(handler)
+    with pytest.raises(AgentError):
+        await client.steam_validate(1018130)
