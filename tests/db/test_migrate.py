@@ -982,6 +982,24 @@ class TestChecksumFilenameValidation:
         migrate.run_migrations(db_path, migrations_dir=migs_dir)
 
 
+def test_migration_0008_creates_steam_app_info_table(db_path: Path) -> None:
+    """0008 adds the steam_app_info cache table (re-arch ③b): app_id PK,
+    app_type, name, fetched_at — STRICT. library_sync reads it to filter
+    prefilled apps to type='game' without re-querying the store API."""
+    migrate.run_migrations(db_path)  # default packaged source includes 0008
+    conn = sqlite3.connect(db_path)
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "steam_app_info" in tables
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(steam_app_info)")}
+        assert {"app_id", "app_type", "name", "fetched_at"} <= cols
+        # app_id is the primary key (idempotent upsert target).
+        pk = [r[1] for r in conn.execute("PRAGMA table_info(steam_app_info)") if r[5]]
+        assert pk == ["app_id"]
+    finally:
+        conn.close()
+
+
 def test_migration_0004_cleanup_keeps_earliest_inflight_per_platform() -> None:
     """SEV-3 (review 2026-06-02): migration 0004's one-time cleanup cancels
     all-but-earliest in-flight library_sync per platform BEFORE creating the
