@@ -89,20 +89,3 @@ def test_auth_status_present_ok(tmp_path):
     (cfg / "account.config").write_bytes(b"\x0a\x05hello")
     d = SteamPrefillDriver(binary=tmp_path / "x", config_dir=cfg)
     assert d.auth_status().ok is True
-
-
-def test_list_owned_from_downloaded_depots(tmp_path):
-    cfg = tmp_path / "Config"
-    cfg.mkdir()
-    (cfg / "successfullyDownloadedDepots.json").write_text('{"440":[1],"570":[2,3]}')
-    d = SteamPrefillDriver(binary=tmp_path / "bin", config_dir=cfg)
-    owned = d.list_owned()
-    assert sorted(o.app_id for o in owned) == [440, 570]
-    assert all(o.name == "" for o in owned)
-
-
-def test_list_owned_missing_file_returns_empty(tmp_path):
-    cfg = tmp_path / "Config"
-    cfg.mkdir()
-    d = SteamPrefillDriver(binary=tmp_path / "bin", config_dir=cfg)
-    assert d.list_owned() == []

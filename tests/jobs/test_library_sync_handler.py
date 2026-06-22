@@ -270,18 +270,17 @@ class TestCurrentVersion:
         assert row["current_version"] == "42"  # updated
 
 
-class _StubDriver:
-    def __init__(self, owned):
-        self._owned = owned
+class _StubAgent:
+    def __init__(self, state):
+        self._state = state
 
-    def list_owned(self):
-        return self._owned
+    async def downloaded_state(self):
+        return self._state
 
 
 class TestEnumerateViaPrefill:
-    async def test_upserts_from_list_owned(self, pool, monkeypatch):
+    async def test_upserts_from_downloaded_state(self, pool, monkeypatch):
         from orchestrator.core import settings as settings_mod
-        from orchestrator.platform.steam.prefill_driver import OwnedApp
 
         monkeypatch.setattr(
             "orchestrator.jobs.handlers.library_sync.get_settings",
@@ -289,10 +288,8 @@ class TestEnumerateViaPrefill:
                 orchestrator_token="a" * 32, steam_enumerate_via_prefill=True
             ),
         )
-        driver = _StubDriver([OwnedApp(440), OwnedApp(570)])
-        await library_sync_handler(
-            _job(), Deps(pool=pool, steam_client=None, prefill_driver=driver)
-        )
+        agent = _StubAgent({"440": [1], "570": [2, 3]})
+        await library_sync_handler(_job(), Deps(pool=pool, steam_client=None, agent_client=agent))
         rows = await pool.read_all(
             "SELECT app_id, title FROM games WHERE platform='steam' ORDER BY app_id"
         )
@@ -300,7 +297,6 @@ class TestEnumerateViaPrefill:
 
     async def test_existing_title_preserved(self, pool, monkeypatch):
         from orchestrator.core import settings as settings_mod
-        from orchestrator.platform.steam.prefill_driver import OwnedApp
 
         await pool.execute_write(
             "INSERT INTO games (platform, app_id, title, owned) "
@@ -312,10 +308,8 @@ class TestEnumerateViaPrefill:
                 orchestrator_token="a" * 32, steam_enumerate_via_prefill=True
             ),
         )
-        driver = _StubDriver([OwnedApp(440)])
-        await library_sync_handler(
-            _job(), Deps(pool=pool, steam_client=None, prefill_driver=driver)
-        )
+        agent = _StubAgent({"440": [1]})
+        await library_sync_handler(_job(), Deps(pool=pool, steam_client=None, agent_client=agent))
         row = await pool.read_one("SELECT title, owned FROM games WHERE app_id='440'")
         assert row["title"] == "Team Fortress 2"  # existing name kept
         assert row["owned"] == 1  # marked owned
