@@ -86,7 +86,15 @@ class AgentClient:
         return result
 
     async def steam_validate(self, app_id: int) -> dict[str, Any]:
-        resp = await self._request("POST", "/v1/steam/validate", json={"app_id": app_id})
+        # A big game (tens of thousands of chunks) stat's many cache files over
+        # NFS and can take well over the default 30s timeout — use a generous
+        # per-call timeout so validate doesn't AgentError on large apps.
+        resp = await self._request(
+            "POST",
+            "/v1/steam/validate",
+            json={"app_id": app_id},
+            timeout=httpx.Timeout(300.0, connect=10.0),
+        )
         result: dict[str, Any] = resp.json()
         return result
 

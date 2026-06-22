@@ -129,3 +129,28 @@ async def test_steam_validate_unreachable_raises():
     client = _client(handler)
     with pytest.raises(AgentError):
         await client.steam_validate(1018130)
+
+
+async def test_steam_validate_uses_long_timeout():
+    # A large validate (tens of thousands of chunks) stat's many files over NFS
+    # and can take well over the default 30s; steam_validate must use a generous
+    # per-call timeout so it doesn't AgentError on big games.
+    seen = {}
+
+    def handler(request):
+        seen["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(
+            200,
+            json={
+                "chunks_total": 1,
+                "chunks_cached": 1,
+                "chunks_missing": 0,
+                "outcome": "cached",
+                "versions": "",
+                "error": None,
+            },
+        )
+
+    client = _client(handler)
+    await client.steam_validate(1)
+    assert seen["timeout"]["read"] == 300.0
