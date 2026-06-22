@@ -13,25 +13,34 @@ patches without clobbering what was last cached.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from orchestrator.core.settings import get_settings
+from orchestrator.platform.steam.store import fetch_app_info
 
 if TYPE_CHECKING:
     from orchestrator.jobs.worker import Deps
 
 _log = structlog.get_logger(__name__)
 
-# Title-preserving upsert for the SteamPrefill-sourced enumeration: list_owned
-# gives app_ids without names, so a NEW app gets the app_id as its placeholder
-# title (set on INSERT), while an EXISTING app keeps its title — only `owned`
-# is updated on conflict.
-_PREFILL_UPSERT_SQL = (
+# Name-bearing upsert for the SteamPrefill-sourced enumeration (re-arch ③b):
+# the Steam store lookup gives us the real title, so a NEW app is inserted with
+# it and an EXISTING app has its title refreshed to the store name. Lifecycle
+# columns (status, cached_version, …) are preserved.
+_NAMED_UPSERT_SQL = (
     "INSERT INTO games (platform, app_id, title) VALUES ('steam', ?, ?) "
-    "ON CONFLICT(platform, app_id) DO UPDATE SET owned = 1"
+    "ON CONFLICT(platform, app_id) DO UPDATE SET title = excluded.title, owned = 1"
+)
+
+# Idempotent upsert into the store-lookup cache.
+_APP_INFO_UPSERT_SQL = (
+    "INSERT INTO steam_app_info (app_id, app_type, name) VALUES (?, ?, ?) "
+    "ON CONFLICT(app_id) DO UPDATE SET "
+    "app_type = excluded.app_type, name = excluded.name, fetched_at = datetime('now')"
 )
 
 _UPSERT_SQL = (
@@ -61,18 +70,52 @@ async def _steam_library_sync_via_prefill(job: dict[str, Any], deps: Deps) -> No
     """Enumerate the Steam library from SteamPrefill's prefilled apps (re-arch
     ③b). SteamPrefill lives on the lancache host (agent side), so this reads the
     agent's downloaded-state ({app_id: [gids]}) rather than the orchestrator's
-    driver (the control plane has no /SteamPrefill mount). The keys are the
-    prefilled app_ids; the title-preserving upsert keeps any existing name and
-    uses the app_id as the placeholder title for new apps."""
+    driver (the control plane has no /SteamPrefill mount).
+
+    The prefilled app_ids include Valve tools, dedicated servers and DLC — not
+    just games. To upsert only actual games (with their real names) we look each
+    uncached app up via the public Steam store appdetails API (no auth) for its
+    {type, name}, cache the result in steam_app_info, and upsert only
+    type=='game'. The store API is rate-limited (~200/5min) so each run is bound
+    by steam_store_fetch_budget; the rest fill on later scheduled syncs."""
     if deps.agent_client is None:
         raise RuntimeError("agent_client is required when steam_enumerate_via_prefill")
+    settings = get_settings()
     job_id = job.get("id")
     state = await deps.agent_client.downloaded_state()
-    app_ids = list(state)
+    app_ids = [str(a) for a in state]
     _log.info("library_sync.prefill.enumerate.returned", job_id=job_id, app_count=len(app_ids))
+
+    cache: dict[str, dict[str, str]] = {
+        r["app_id"]: {"type": r["app_type"], "name": r["name"]}
+        for r in await deps.pool.read_all("SELECT app_id, app_type, name FROM steam_app_info")
+    }
+    budget = settings.steam_store_fetch_budget
+    delay = settings.steam_store_fetch_delay_sec
+    fetched = 0
+    upserted = 0
     for app_id in app_ids:
-        await deps.pool.execute_write(_PREFILL_UPSERT_SQL, (str(app_id), str(app_id)))
-    _log.info("library_sync.prefill.upserted", job_id=job_id, upserted=len(app_ids))
+        info = cache.get(app_id)
+        if info is None and fetched < budget:
+            detail = await fetch_app_info(int(app_id))
+            fetched += 1
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if detail is not None:
+                await deps.pool.execute_write(
+                    _APP_INFO_UPSERT_SQL, (app_id, detail["type"], detail["name"])
+                )
+                info = detail
+        if info is not None and info["type"] == "game":
+            await deps.pool.execute_write(_NAMED_UPSERT_SQL, (app_id, info["name"]))
+            upserted += 1
+    _log.info(
+        "library_sync.prefill.upserted",
+        job_id=job_id,
+        app_count=len(app_ids),
+        fetched=fetched,
+        upserted=upserted,
+    )
 
 
 async def _epic_library_sync(job: dict[str, Any], deps: Deps) -> None:

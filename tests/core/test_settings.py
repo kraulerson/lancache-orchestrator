@@ -84,6 +84,8 @@ class TestDefaults:
             ("db_cache_size_kib", 16384),
             ("db_mmap_size_bytes", 268_435_456),
             ("db_journal_size_limit_bytes", 67_108_864),
+            ("steam_store_fetch_budget", 150),
+            ("steam_store_fetch_delay_sec", 1.5),
         ],
     )
     def test_default_value(self, settings, field, expected):

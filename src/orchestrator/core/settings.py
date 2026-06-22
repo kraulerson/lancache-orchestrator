@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     # Flag: source the Steam library from SteamPrefill (prefilled apps) instead
     # of the legacy worker library_enumerate.
     steam_enumerate_via_prefill: bool = False
+    # How many UNCACHED apps library_sync looks up from the Steam store per run
+    # (the store API is rate-limited ~200/5min; the rest fill on later syncs).
+    steam_store_fetch_budget: int = Field(default=150, ge=0)
+    # Delay between store lookups (seconds) to stay under the rate limit.
+    steam_store_fetch_delay_sec: float = Field(default=1.5, ge=0.0)
 
     # --- Lancache cache topology ------------------------------------
     lancache_nginx_cache_path: Path = Path("/data/cache/cache/")
