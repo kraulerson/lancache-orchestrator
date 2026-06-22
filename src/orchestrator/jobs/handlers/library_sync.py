@@ -1,8 +1,8 @@
-"""Steam library sync handler (BL11).
+"""Steam library sync handler (BL11 / re-arch ③b).
 
-Called by the jobs worker when a `library_sync` job is claimed. Calls
-`library.enumerate` on the steam worker subprocess and upserts the
-operator's owned apps into the `games` table.
+Called by the jobs worker when a `library_sync` job is claimed. Enumerates the
+prefilled Steam library via the data-plane agent (SteamPrefill manifest cache)
+and upserts the operator's owned apps into the `games` table.
 
 Idempotent: `INSERT ... ON CONFLICT(platform, app_id) DO UPDATE` updates
 title/owned/metadata/current_version only — `status`, `cached_version`, and
@@ -80,7 +80,7 @@ async def _steam_library_sync_via_prefill(job: dict[str, Any], deps: Deps) -> No
     (~200/5min) so each run is bound by steam_store_fetch_budget; the rest fill
     on later scheduled syncs."""
     if deps.agent_client is None:
-        raise RuntimeError("agent_client is required when steam_enumerate_via_prefill")
+        raise RuntimeError("agent_client is required for steam library_sync")
     settings = get_settings()
     job_id = job.get("id")
     app_ids = [str(a) for a in await deps.agent_client.prefilled_apps()]
@@ -154,82 +154,6 @@ async def _epic_library_sync(job: dict[str, Any], deps: Deps) -> None:
 
 
 async def _steam_library_sync(job: dict[str, Any], deps: Deps) -> None:
-    """Steam library sync.
-
-    Raises:
-        RuntimeError — `deps.steam_client` is None.
-        IPCTimeoutError / WorkerDiedError / WorkerDisabledError — propagate from
-            SteamWorkerClient. Worker loop translates to job state=failed.
-        SteamWorkerError — propagate. When kind == 'NotAuthenticated', the
-            handler ALSO updates `platforms.auth_status='expired'` so the
-            operator-facing /platforms surface matches reality before the
-            re-raise marks the job failed (F-UAT6-3).
-    """
-    if get_settings().steam_enumerate_via_prefill:
-        return await _steam_library_sync_via_prefill(job, deps)
-
-    from orchestrator.platform.steam.client import SteamWorkerError
-
-    if deps.steam_client is None:
-        raise RuntimeError("steam_client is required for library_sync handler")
-
-    job_id = job.get("id")
-    _log.info("library_sync.enumerate.started", job_id=job_id)
-    try:
-        result = await deps.steam_client.library_enumerate()
-    except SteamWorkerError as e:
-        if e.kind == "NotAuthenticated":
-            # F-UAT6-3: surface the expired-session state on the
-            # platforms row so /api/v1/platforms and /api/v1/.../auth/status
-            # don't disagree. Best-effort — if this UPDATE fails we still
-            # re-raise the original error so the job is marked failed.
-            try:
-                await deps.pool.execute_write(
-                    "UPDATE platforms SET auth_status='expired', last_error=? WHERE name='steam'",
-                    (f"NotAuthenticated: {e.message}"[:200],),
-                )
-                _log.warning(
-                    "library_sync.session_expired_marked",
-                    job_id=job_id,
-                )
-            except Exception as upd_e:
-                _log.error(
-                    "library_sync.session_expired_mark_failed",
-                    job_id=job_id,
-                    reason=str(upd_e)[:200],
-                )
-        raise
-    apps = result.get("apps") or []
-    _log.info("library_sync.enumerate.returned", job_id=job_id, app_count=len(apps))
-
-    upserted = 0
-    skipped = 0
-    for app in apps:
-        app_id_raw = app.get("app_id")
-        title = app.get("name")
-        depots = app.get("depots") or []
-        if app_id_raw is None or not isinstance(title, str) or not title:
-            skipped += 1
-            _log.warning(
-                "library_sync.skipped_app",
-                job_id=job_id,
-                reason="missing app_id or name",
-                raw=str(app)[:200],
-            )
-            continue
-        metadata = json.dumps(
-            {"depots": list(depots), "steam_packages": []},
-            separators=(",", ":"),
-        )
-        version = app.get("version")
-        await deps.pool.execute_write(
-            _UPSERT_SQL, ("steam", str(app_id_raw), title, metadata, version)
-        )
-        upserted += 1
-
-    _log.info(
-        "library_sync.upserted",
-        job_id=job_id,
-        upserted=upserted,
-        skipped=skipped,
-    )
+    """Steam library sync — enumerate the prefilled library via the data-plane
+    agent (re-arch ③b). See `_steam_library_sync_via_prefill`."""
+    return await _steam_library_sync_via_prefill(job, deps)

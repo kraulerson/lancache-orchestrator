@@ -31,14 +31,14 @@ _CANDIDATE_SQL = (
 async def sweep_handler(job: dict[str, Any], deps: Deps) -> None:
     """Validate every cached, non-blocked Steam game in batches (F13).
 
-    Best-effort: an unhealthy validator or a missing steam client is a SKIP (the
+    Best-effort: an unhealthy validator or a missing agent client is a SKIP (the
     job succeeds — nothing to do), and a per-game failure never aborts the sweep.
     """
     job_id = job.get("id")
     settings = get_settings()
 
-    if deps.steam_client is None:
-        _log.info("sweep.skipped", job_id=job_id, reason="no_steam_client")
+    if deps.agent_client is None:
+        _log.info("sweep.skipped", job_id=job_id, reason="no_agent_client")
         return
     if not await validator_self_test(settings):
         _log.info("sweep.skipped", job_id=job_id, reason="validator_unhealthy")

@@ -146,7 +146,7 @@ class TestWorkerLoopDispatch:
         await _queue_job(pool)
 
         shutdown = asyncio.Event()
-        deps = Deps(pool=pool, steam_client=None)
+        deps = Deps(pool=pool)
 
         async def stopper():
             for _ in range(100):
@@ -169,7 +169,7 @@ class TestWorkerLoopDispatch:
         await _queue_job(pool, kind="sweep")
 
         shutdown = asyncio.Event()
-        deps = Deps(pool=pool, steam_client=None)
+        deps = Deps(pool=pool)
 
         async def stopper():
             for _ in range(100):
@@ -206,7 +206,7 @@ class TestWorkerLoopDispatch:
         await _queue_job(pool, kind="prefill")
 
         shutdown = asyncio.Event()
-        deps = Deps(pool=pool, steam_client=None)
+        deps = Deps(pool=pool)
 
         async def stopper():
             for _ in range(200):
@@ -247,7 +247,7 @@ class TestWorkerLoopDispatch:
         await _queue_job(pool)
 
         shutdown = asyncio.Event()
-        deps = Deps(pool=pool, steam_client=None)
+        deps = Deps(pool=pool)
 
         async def stopper():
             for _ in range(300):
@@ -281,7 +281,7 @@ class TestWorkerLoopDispatch:
         await _queue_job(pool)
 
         shutdown = asyncio.Event()
-        deps = Deps(pool=pool, steam_client=None)
+        deps = Deps(pool=pool)
 
         async def stopper():
             for _ in range(300):
@@ -321,7 +321,7 @@ class TestWorkerLoopDispatch:
         register("prefill", hung)
 
         shutdown = asyncio.Event()
-        deps = Deps(pool=pool, steam_client=None)
+        deps = Deps(pool=pool)
 
         async def stopper():
             for _ in range(300):
@@ -342,7 +342,7 @@ class TestWorkerLoopDispatch:
         """Empty queue + shutdown.set() should exit within one poll interval."""
         clear()
         shutdown = asyncio.Event()
-        deps = Deps(pool=pool, steam_client=None)
+        deps = Deps(pool=pool)
 
         async def stopper():
             await asyncio.sleep(0.05)
@@ -369,7 +369,7 @@ class TestWorkerLoopDispatch:
         await _queue_job(pool)
 
         shutdown = asyncio.Event()
-        deps = Deps(pool=pool, steam_client=None)
+        deps = Deps(pool=pool)
 
         async def stopper():
             for _ in range(100):

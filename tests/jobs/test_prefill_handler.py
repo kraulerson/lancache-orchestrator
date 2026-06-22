@@ -15,19 +15,6 @@ SHA_A = "c8e5d44ca8618200552eb754ff6f6922c92a54ff"
 SHA_B = "234a47ed3005727db220987ecac460030295bd79"
 
 
-class _StubSteam:
-    def __init__(self, expand=None):
-        self._expand = expand or {"depot_id": 731, "chunk_shas": [SHA_A, SHA_B]}
-        self.fetch_calls = 0
-
-    async def manifest_expand(self, raw):
-        return self._expand
-
-    async def manifest_fetch(self, app_id):
-        self.fetch_calls += 1
-        return {"manifests": []}
-
-
 class _StubDriver:
     """Stand-in for SteamPrefillDriver — records prefill_apps calls."""
 
@@ -56,9 +43,8 @@ async def _seed_game(pool, *, platform="steam", app_id="730"):
 
 
 def _steam_deps(pool, driver):
-    """Deps for the rewired steam path: prefill goes through the driver, but
-    steam_client is still carried (kept for other handlers)."""
-    return Deps(pool=pool, steam_client=_StubSteam(), prefill_driver=driver)
+    """Deps for the rewired steam path: prefill goes through the driver."""
+    return Deps(pool=pool, prefill_driver=driver)
 
 
 async def test_steam_calls_driver_not_downloader(pool):
@@ -74,16 +60,8 @@ async def test_steam_calls_driver_not_downloader(pool):
 
     game_id = await _seed_game(pool, app_id="730")
 
-    # The stub steam_client raises if its IPC (manifest_expand/fetch) is touched.
-    class _ExplodingSteam(_StubSteam):
-        async def manifest_expand(self, raw):
-            raise AssertionError("steam path must not call manifest_expand")
-
-        async def manifest_fetch(self, app_id):
-            raise AssertionError("steam path must not call manifest_fetch")
-
     driver = _StubDriver(ok=True)
-    deps = Deps(pool=pool, steam_client=_ExplodingSteam(), prefill_driver=driver)
+    deps = Deps(pool=pool, prefill_driver=driver)
     await prefill_handler(_job(game_id), deps)
 
     assert driver.calls == [([730], False)]
@@ -177,7 +155,6 @@ async def test_steam_agent_path_taken_not_driver(pool, monkeypatch):
     agent = _FakeAgent(ok=True)
     deps = Deps(
         pool=pool,
-        steam_client=_StubSteam(),
         prefill_driver=_ExplodingDriver(),
         agent_client=agent,
     )
@@ -191,7 +168,6 @@ async def test_steam_agent_force_passthrough(pool, monkeypatch):
     agent = _FakeAgent(ok=True)
     deps = Deps(
         pool=pool,
-        steam_client=_StubSteam(),
         prefill_driver=_ExplodingDriver(),
         agent_client=agent,
     )
@@ -208,7 +184,6 @@ async def test_steam_agent_success_same_db_writes(pool, monkeypatch):
     agent = _FakeAgent(ok=True)
     deps = Deps(
         pool=pool,
-        steam_client=_StubSteam(),
         prefill_driver=_ExplodingDriver(),
         agent_client=agent,
     )
@@ -233,7 +208,6 @@ async def test_steam_agent_failure_marks_failed_no_validate(pool, monkeypatch):
     agent = _FakeAgent(ok=False, raw="boom: exited 1")
     deps = Deps(
         pool=pool,
-        steam_client=_StubSteam(),
         prefill_driver=_ExplodingDriver(),
         agent_client=agent,
     )
@@ -250,7 +224,7 @@ async def test_steam_agent_enabled_but_no_agent_client_raises(pool, monkeypatch)
     """agent_enabled=True but no agent_client wired → explicit RuntimeError."""
     _agent_enabled(monkeypatch)
     game_id = await _seed_game(pool, app_id="730")
-    deps = Deps(pool=pool, steam_client=_StubSteam(), prefill_driver=_StubDriver())
+    deps = Deps(pool=pool, prefill_driver=_StubDriver())
     with pytest.raises(RuntimeError, match="agent_client"):
         await prefill_handler(_job(game_id), deps)
 
@@ -348,7 +322,7 @@ async def test_epic_agent_path_pulls_through_agent_not_downloader(pool, monkeypa
     manifest = _epic_manifest()
     gid = await _seed_epic_game(pool, app_id="AppPull")
     agent = _FakeEpicAgent()
-    deps = Deps(pool=pool, steam_client=None, epic_client=_StubEpic(manifest), agent_client=agent)
+    deps = Deps(pool=pool, epic_client=_StubEpic(manifest), agent_client=agent)
     await prefill_handler(_job(gid, platform="epic"), deps)
 
     # (1) agent.pull called with the expected specs + epic UA.
@@ -377,7 +351,6 @@ async def test_epic_agent_success_same_db_writes(pool, monkeypatch):
     await pool.execute_write("UPDATE games SET current_version='bv-1' WHERE id=?", (gid,))
     deps = Deps(
         pool=pool,
-        steam_client=None,
         epic_client=_StubEpic(_epic_manifest()),
         agent_client=_FakeEpicAgent(),
     )
@@ -409,7 +382,6 @@ async def test_epic_agent_failed_chunks_marks_failed(pool, monkeypatch):
     gid = await _seed_epic_game(pool, app_id="AppFail")
     deps = Deps(
         pool=pool,
-        steam_client=None,
         epic_client=_StubEpic(_epic_manifest()),
         agent_client=_FakeEpicAgent(chunks_failed=1),
     )

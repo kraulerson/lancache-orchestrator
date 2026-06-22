@@ -83,7 +83,6 @@ class Settings(BaseSettings):
     require_local_fs: Literal["strict", "warn", "off"] = "warn"
 
     # --- Platform session paths -------------------------------------
-    steam_session_path: Path = Path("/var/lib/orchestrator/steam_session.json")
     epic_session_path: Path = Path("/var/lib/orchestrator/epic_session.json")
 
     # --- SteamPrefill delegation (re-architecture step 1) -----------
@@ -108,12 +107,6 @@ class Settings(BaseSettings):
     # The agent reads SteamPrefill's manifest cache (mounted read-only from the
     # host's /root/.cache/SteamPrefill) to source chunk SHAs for validate.
     steam_manifest_cache_dir: Path = Path("/steamprefill-cache")
-    # Flag: route Steam validate through the agent's /v1/steam/validate (parses
-    # SteamPrefill manifests) instead of the legacy worker manifest_expand.
-    steam_validate_via_agent: bool = False
-    # Flag: source the Steam library from SteamPrefill (prefilled apps) instead
-    # of the legacy worker library_enumerate.
-    steam_enumerate_via_prefill: bool = False
     # How many UNCACHED apps library_sync looks up from the Steam store per run
     # (the store API is rate-limited ~200/5min; the rest fill on later syncs).
     steam_store_fetch_budget: int = Field(default=150, ge=0)
@@ -223,26 +216,6 @@ class Settings(BaseSettings):
     # values). Opt-in to avoid log volume at INFO/WARN deployments.
     pool_query_log_completed: bool = Field(default=False)
 
-    # --- Steam worker (BL10 / F1) ---
-    steam_worker_python_path: Path = Path("/opt/orchestrator/venv-steam-worker/bin/python")
-    steam_worker_ipc_timeout_sec: int = Field(default=30, ge=1, le=600)
-    # Issue #109: library.enumerate + (future) manifest.fetch handle real
-    # Steam libraries that take minutes to enumerate. Default budgets a
-    # 5-minute ceiling — well above the empirical worst case for hundreds
-    # of batched get_product_info calls, but bounded so a wedged worker
-    # still surfaces an error eventually.
-    steam_worker_library_enumerate_timeout_sec: int = Field(default=300, ge=30, le=3600)
-    # BL12 manifest fetcher: each fetch can issue multiple
-    # ContentServerDirectory.GetManifestRequestCode + manifest downloads
-    # against Steam's CDN. Big games with 50+ depots can take 1-3 min
-    # serially; budget 5 min by default.
-    steam_worker_manifest_fetch_timeout_sec: int = Field(default=300, ge=30, le=3600)
-    # F7 validator: manifest.expand just zstd-decompresses + protobuf-parses
-    # a stored BLOB (offline, no network). Fast, but big manifests can take
-    # a few seconds; budget 2 min.
-    steam_worker_manifest_expand_timeout_sec: int = Field(default=120, ge=30, le=600)
-    steam_worker_max_restart_attempts: int = Field(default=3, ge=0, le=10)
-    steam_session_dir: Path = Path("/var/lib/orchestrator/steam_session")
     jobs_worker_poll_interval_sec: float = Field(default=1.0, gt=0.0, le=60.0)
     # Per-job wall-clock budget. A handler that wedges past this is cancelled and
     # the job marked failed, so it can't hold the single worker loop forever

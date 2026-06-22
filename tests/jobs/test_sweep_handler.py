@@ -10,12 +10,10 @@ from orchestrator.jobs.worker import Deps
 pytestmark = pytest.mark.asyncio
 
 
-class _StubSteam:
-    def __init__(self, response):
-        self._response = response
-
-    async def manifest_expand(self, raw: bytes):
-        return self._response
+class _Agent:
+    """Truthy AgentClient stand-in. The sweep tests monkeypatch
+    ``validate_one_game``, so steam_validate is never actually called; the agent
+    only needs to be non-None to pass the handler's pre-flight guard."""
 
 
 def _job():
@@ -33,40 +31,38 @@ async def _seed(pool, *, platform="steam", status="up_to_date", app_id="730"):
     return row["id"]
 
 
-@pytest.fixture
-def cache_root(tmp_path, monkeypatch):
-    monkeypatch.setenv("ORCH_LANCACHE_NGINX_CACHE_PATH", str(tmp_path))
-    from orchestrator.core.settings import get_settings
+def _healthy(monkeypatch):
+    """Force the validator self-test to pass so the sweep proceeds."""
 
-    get_settings.cache_clear()
-    yield tmp_path
-    get_settings.cache_clear()
+    async def _ok(settings):
+        return True
+
+    monkeypatch.setattr("orchestrator.jobs.handlers.sweep.validator_self_test", _ok)
 
 
-async def test_sweep_skips_when_validator_unhealthy(pool, tmp_path, monkeypatch):
-    # Point the cache path at a non-existent dir → validator_self_test False.
-    monkeypatch.setenv("ORCH_LANCACHE_NGINX_CACHE_PATH", str(tmp_path / "nope"))
-    from orchestrator.core.settings import get_settings
+async def test_sweep_skips_when_validator_unhealthy(pool, monkeypatch):
+    async def _unhealthy(settings):
+        return False
 
-    get_settings.cache_clear()
+    monkeypatch.setattr("orchestrator.jobs.handlers.sweep.validator_self_test", _unhealthy)
     await _seed(pool)
     # Must NOT raise (skip + succeed); the game is untouched.
-    await sweep_handler(_job(), Deps(pool=pool, steam_client=_StubSteam({})))
+    await sweep_handler(_job(), Deps(pool=pool, agent_client=_Agent()))
     g = await pool.read_one("SELECT status FROM games WHERE app_id='730'")
     assert g["status"] == "up_to_date"
-    get_settings.cache_clear()
 
 
-async def test_sweep_skips_when_no_steam_client(pool, cache_root):
+async def test_sweep_skips_when_no_agent_client(pool):
     await _seed(pool)
-    # steam_client None → skip + succeed, no raise.
-    await sweep_handler(_job(), Deps(pool=pool, steam_client=None))
+    # agent_client None → skip + succeed, no raise.
+    await sweep_handler(_job(), Deps(pool=pool, agent_client=None))
     g = await pool.read_one("SELECT status FROM games WHERE app_id='730'")
     assert g["status"] == "up_to_date"
 
 
-async def test_sweep_validates_only_candidate_steam_games(pool, cache_root, monkeypatch):
+async def test_sweep_validates_only_candidate_steam_games(pool, monkeypatch):
     # candidates: up_to_date + validation_failed steam. NOT: epic, blocked, not_downloaded.
+    _healthy(monkeypatch)
     g_ok = await _seed(pool, status="up_to_date", app_id="1")
     g_vf = await _seed(pool, status="validation_failed", app_id="2")
     await _seed(pool, status="blocked", app_id="3")
@@ -89,11 +85,12 @@ async def test_sweep_validates_only_candidate_steam_games(pool, cache_root, monk
         )
 
     monkeypatch.setattr("orchestrator.jobs.handlers.sweep.validate_one_game", fake_validate_one)
-    await sweep_handler(_job(), Deps(pool=pool, steam_client=_StubSteam({})))
+    await sweep_handler(_job(), Deps(pool=pool, agent_client=_Agent()))
     assert sorted(seen) == sorted([g_ok, g_vf])
 
 
-async def test_sweep_isolates_per_game_errors(pool, cache_root, monkeypatch):
+async def test_sweep_isolates_per_game_errors(pool, monkeypatch):
+    _healthy(monkeypatch)
     g1 = await _seed(pool, app_id="1")
     g2 = await _seed(pool, app_id="2")
 
@@ -109,11 +106,11 @@ async def test_sweep_isolates_per_game_errors(pool, cache_root, monkeypatch):
 
     monkeypatch.setattr("orchestrator.jobs.handlers.sweep.validate_one_game", flaky_validate_one)
     # One game raising must NOT abort the sweep.
-    await sweep_handler(_job(), Deps(pool=pool, steam_client=_StubSteam({})))
+    await sweep_handler(_job(), Deps(pool=pool, agent_client=_Agent()))
     assert validated == [g2]
 
 
-async def test_sweep_error_outcome_not_counted_as_evicted(pool, cache_root, monkeypatch):
+async def test_sweep_error_outcome_not_counted_as_evicted(pool, monkeypatch):
     """An 'error' validation outcome (cache hiccup, purged manifests) is NOT an
     eviction — the game keeps its up_to_date status, so it must not inflate the
     `evicted` drift metric, and must be surfaced as `validation_error` (F13
@@ -122,6 +119,7 @@ async def test_sweep_error_outcome_not_counted_as_evicted(pool, cache_root, monk
 
     import orchestrator.jobs.handlers.sweep as sweep_mod
 
+    _healthy(monkeypatch)
     await _seed(pool, status="up_to_date", app_id="1")
 
     async def err_validate_one(pool_, deps_, game_id, settings):
@@ -132,7 +130,7 @@ async def test_sweep_error_outcome_not_counted_as_evicted(pool, cache_root, monk
     cap = st.CapturingLogger()
     monkeypatch.setattr(sweep_mod, "validate_one_game", err_validate_one)
     monkeypatch.setattr(sweep_mod, "_log", cap)
-    await sweep_handler(_job(), Deps(pool=pool, steam_client=_StubSteam({})))
+    await sweep_handler(_job(), Deps(pool=pool, agent_client=_Agent()))
 
     done = [c for c in cap.calls if c.args and c.args[0] == "sweep.completed"]
     assert done, "sweep.completed not logged"

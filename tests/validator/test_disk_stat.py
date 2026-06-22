@@ -2,28 +2,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import pytest
 
 from orchestrator.core.settings import Settings
 from orchestrator.jobs.worker import Deps
-from orchestrator.validator.cache_key import (
-    cache_key,
-    cache_path,
-    slice_range_zero,
-    steam_chunk_uri,
-)
 from orchestrator.validator.disk_stat import validate_chunks, validate_game
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 pytestmark = pytest.mark.asyncio
 
 VALID_TOKEN = "a" * 32
-SHA_A = "c8e5d44ca8618200552eb754ff6f6922c92a54ff"
-SHA_B = "234a47ed3005727db220987ecac460030295bd79"
 
 
 # --- validate_chunks ---------------------------------------------------
@@ -139,23 +126,23 @@ async def test_shutdown_cache_stat_executor_is_idempotent_and_recreates(tmp_path
     disk_stat.shutdown_cache_stat_executor()
 
 
-# --- validate_game helpers ---------------------------------------------
+# --- validate_game (delegates to the agent's steam_validate) -----------
 
 
-class _StubSteam:
-    """manifest_expand returns a fixed depot_id + chunk_shas per call."""
+class _FakeAgentSV:
+    """Records steam_validate(app_id) calls and returns a fixed validate dict."""
 
     def __init__(self, response):
         self._response = response
-        self.calls: list[bytes] = []
+        self.calls: list[int] = []
 
-    async def manifest_expand(self, raw: bytes):
-        self.calls.append(raw)
+    async def steam_validate(self, app_id: int) -> dict:
+        self.calls.append(app_id)
         return self._response
 
 
-def _settings(tmp_path: Path) -> Settings:
-    return Settings(orchestrator_token=VALID_TOKEN, lancache_nginx_cache_path=tmp_path)
+def _settings() -> Settings:
+    return Settings(orchestrator_token=VALID_TOKEN)
 
 
 async def _seed_game(pool, *, platform="steam", app_id="730") -> int:
@@ -169,259 +156,12 @@ async def _seed_game(pool, *, platform="steam", app_id="730") -> int:
     return row["id"]
 
 
-async def _seed_manifest(pool, game_id, *, depot_id, version, raw=b"BLOB"):
-    await pool.execute_write(
-        "INSERT INTO manifests "
-        "(game_id, depot_id, version, fetched_at, chunk_count, total_bytes, raw) "
-        "VALUES (?, ?, ?, CURRENT_TIMESTAMP, 1, 100, ?)",
-        (game_id, depot_id, version, raw),
-    )
-
-
-def _make_cache_file(root: Path, depot_id: int, sha: str, content=b"data"):
-    """Create the cache file at the path validate_game will compute."""
-    uri = f"/depot/{depot_id}/chunk/{sha}"
-    h = cache_key("steam", uri, slice_range_zero(10_485_760))
-    p = cache_path(root, h, "2:2")
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(content)
-    return p
-
-
-# --- validate_game -----------------------------------------------------
-
-
-async def test_cached_when_all_chunks_present(pool, tmp_path):
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-    _make_cache_file(tmp_path, 731, SHA_A)
-    _make_cache_file(tmp_path, 731, SHA_B)
-    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A, SHA_B]}))
-    result = await validate_game(pool, deps, game_id, _settings(tmp_path))
-    assert result.outcome == "cached"
-    assert (result.chunks_total, result.chunks_cached, result.chunks_missing) == (2, 2, 0)
-
-
-async def test_partial_when_some_missing(pool, tmp_path):
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-    _make_cache_file(tmp_path, 731, SHA_A)  # only A present
-    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A, SHA_B]}))
-    result = await validate_game(pool, deps, game_id, _settings(tmp_path))
-    assert result.outcome == "partial"
-    assert (result.chunks_total, result.chunks_cached, result.chunks_missing) == (2, 1, 1)
-
-
-async def test_missing_when_none_present(pool, tmp_path):
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A, SHA_B]}))
-    result = await validate_game(pool, deps, game_id, _settings(tmp_path))
-    assert result.outcome == "missing"
-    assert (result.chunks_total, result.chunks_cached, result.chunks_missing) == (2, 0, 2)
-
-
-async def test_dedup_across_mappings(pool, tmp_path):
-    """Worker may return duplicate SHAs; validate_game dedups by (depot, sha)."""
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-    _make_cache_file(tmp_path, 731, SHA_A)
-    deps = Deps(
-        pool=pool, steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A, SHA_A, SHA_A]})
-    )
-    result = await validate_game(pool, deps, game_id, _settings(tmp_path))
-    assert result.chunks_total == 1
-    assert result.outcome == "cached"
-
-
-async def test_zero_chunk_manifest_is_cached_not_error(pool, tmp_path):
-    """Bug B: a valid manifest that expands to zero chunks means nothing to
-    cache — that is 'cached' (up_to_date), not an infra 'error'."""
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 731, "chunk_shas": []}))
-    result = await validate_game(pool, deps, game_id, _settings(tmp_path))
-    assert result.outcome == "cached"
-    assert (result.chunks_total, result.chunks_cached, result.chunks_missing) == (0, 0, 0)
-
-
-async def test_no_manifests_is_error(pool, tmp_path):
-    game_id = await _seed_game(pool)
-    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 0, "chunk_shas": []}))
-    result = await validate_game(pool, deps, game_id, _settings(tmp_path))
-    assert result.outcome == "error"
-    assert result.chunks_total == 0
-
-
-async def test_malformed_sha_is_error_not_raise(pool, tmp_path):
-    """Bug C: a malformed chunk SHA from the worker must yield outcome=error,
-    not an uncaught ValueError that fails the whole job."""
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 731, "chunk_shas": ["NOT_HEX"]}))
-    result = await validate_game(pool, deps, game_id, _settings(tmp_path))
-    assert result.outcome == "error"
-    assert result.error is not None
-
-
-async def test_depot_id_mismatch_is_error(pool, tmp_path):
-    """Bug D: if the worker-parsed depot_id disagrees with the DB column,
-    the stored BLOB doesn't match its row — fail closed rather than stat
-    wrong paths."""
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 999, "chunk_shas": [SHA_A]}))
-    result = await validate_game(pool, deps, game_id, _settings(tmp_path))
-    assert result.outcome == "error"
-
-
-async def test_cache_root_missing_is_error(pool, tmp_path):
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-    deps = Deps(pool=pool, steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A]}))
-    bad = Settings(orchestrator_token=VALID_TOKEN, lancache_nginx_cache_path=tmp_path / "nope")
-    result = await validate_game(pool, deps, game_id, bad)
-    assert result.outcome == "error"
-
-
-async def test_latest_manifest_per_depot(pool, tmp_path):
-    """Only the most-recent manifest per depot is validated; old gids ignored."""
-    game_id = await _seed_game(pool)
-    # Older manifest for depot 731 (version 100) then a newer one (version 200).
-    await _seed_manifest(pool, game_id, depot_id=731, version="100", raw=b"OLD")
-    await _seed_manifest(pool, game_id, depot_id=731, version="200", raw=b"NEW")
-    _make_cache_file(tmp_path, 731, SHA_A)
-    stub = _StubSteam({"depot_id": 731, "chunk_shas": [SHA_A]})
-    deps = Deps(pool=pool, steam_client=stub)
-    result = await validate_game(pool, deps, game_id, _settings(tmp_path))
-    assert result.outcome == "cached"
-    # Only the newest BLOB was expanded (one call, with the NEW bytes).
-    assert stub.calls == [b"NEW"]
-
-
-# --- validate_game agent seam ------------------------------------------
-
-
-class _FakeAgent:
-    """Records the hashes passed to stat() and returns fixed counts."""
-
-    def __init__(self, *, cached: int, missing: int):
-        self._counts = {"cached": cached, "missing": missing}
-        self.calls: list[list[str]] = []
-
-    async def stat(self, hashes: list[str]) -> dict[str, int]:
-        self.calls.append(list(hashes))
-        return dict(self._counts)
-
-
-def _agent_settings(tmp_path: Path) -> Settings:
-    # agent_enabled=True; cache path points at a NON-existent dir to prove the
-    # is_dir() guard is bypassed when the agent owns the filesystem.
-    return Settings(
-        orchestrator_token=VALID_TOKEN,
-        agent_enabled=True,
-        lancache_nginx_cache_path=tmp_path / "no-cache-mount-here",
-    )
-
-
-def _expected_hashes(depot_id: int, shas: list[str]) -> list[str]:
-    """Compute the control-side cache-key hashes the SAME way validate_game does.
-
-    This is the drift guard: if validate_game ever changes how it derives the
-    hash from (identifier, depot_id, sha, slice_range), this list diverges and
-    the agent-path test fails.
-    """
-    slice_range = slice_range_zero(10_485_760)
-    out: list[str] = []
-    seen: set[str] = set()
-    for sha in shas:
-        if sha in seen:
-            continue
-        seen.add(sha)
-        out.append(cache_key("steam", steam_chunk_uri(depot_id, sha), slice_range))
-    return out
-
-
-async def test_agent_path_uses_stat_and_not_validate_chunks(pool, tmp_path, monkeypatch):
-    """Flag-ON: validate_game must derive the control-side hashes, hand them to
-    deps.agent_client.stat(), and NOT touch the in-process validate_chunks path
-    (which needs a mounted cache the control plane may not have)."""
-    from orchestrator.validator import disk_stat
-
-    async def _boom(*_a, **_k):
-        raise AssertionError("validate_chunks must NOT be called on the agent path")
-
-    monkeypatch.setattr(disk_stat, "validate_chunks", _boom)
-
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-    agent = _FakeAgent(cached=2, missing=3)
-    deps = Deps(
-        pool=pool,
-        steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A, SHA_B]}),
-        agent_client=agent,
-    )
-
-    result = await validate_game(pool, deps, game_id, _agent_settings(tmp_path))
-
-    # (1) drift guard: the recorded hashes equal the control-side computation.
-    assert agent.calls == [_expected_hashes(731, [SHA_A, SHA_B])]
-    # (2) counts come straight from the agent; total = cached + missing.
-    assert (result.chunks_cached, result.chunks_missing, result.chunks_total) == (2, 3, 5)
-    # (3) outcome classified from agent counts (2 cached of 5 -> partial).
-    assert result.outcome == "partial"
-
-
-async def test_agent_path_classifies_all_cached(pool, tmp_path, monkeypatch):
-    """All chunks cached per the agent -> outcome 'cached'."""
-    from orchestrator.validator import disk_stat
-
-    async def _boom(*_a, **_k):
-        raise AssertionError("validate_chunks must NOT be called on the agent path")
-
-    monkeypatch.setattr(disk_stat, "validate_chunks", _boom)
-
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-    agent = _FakeAgent(cached=2, missing=0)
-    deps = Deps(
-        pool=pool,
-        steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A, SHA_B]}),
-        agent_client=agent,
-    )
-
-    result = await validate_game(pool, deps, game_id, _agent_settings(tmp_path))
-    assert result.outcome == "cached"
-    assert (result.chunks_cached, result.chunks_missing, result.chunks_total) == (2, 0, 2)
-
-
-async def test_agent_enabled_but_no_agent_client_is_error(pool, tmp_path):
-    """agent_enabled=True but deps.agent_client is None must yield a clean
-    error result, not crash."""
-    game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-    deps = Deps(
-        pool=pool,
-        steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A]}),
-        agent_client=None,
-    )
-    result = await validate_game(pool, deps, game_id, _agent_settings(tmp_path))
-    assert result.outcome == "error"
-    assert result.error is not None
-
-
-# --- validate_game steam_validate_via_agent (③a-6) ---------------------
-
-
-class _FakeAgentSV:
-    """Records steam_validate(app_id) calls and returns a fixed validate dict."""
-
-    def __init__(self):
-        self.calls: list[int] = []
-
-    async def steam_validate(self, app_id: int) -> dict:
-        self.calls.append(app_id)
-        return {
+async def test_validate_delegates_to_agent_and_maps_result(pool):
+    """validate_game resolves the game's app_id, calls agent.steam_validate with
+    the int-coerced id, and maps the returned dict onto a ValidationResult."""
+    game_id = await _seed_game(pool, app_id="1018130")
+    agent = _FakeAgentSV(
+        {
             "chunks_total": 60,
             "chunks_cached": 55,
             "chunks_missing": 5,
@@ -429,41 +169,12 @@ class _FakeAgentSV:
             "versions": "1018131:x",
             "error": None,
         }
-
-
-def _validate_via_agent_settings(tmp_path: Path) -> Settings:
-    # steam_validate_via_agent=True; cache path points at a NON-existent dir to
-    # prove the legacy is_dir() guard / manifest path is never reached.
-    return Settings(
-        orchestrator_token=VALID_TOKEN,
-        steam_validate_via_agent=True,
-        lancache_nginx_cache_path=tmp_path / "no-cache-mount-here",
     )
+    deps = Deps(pool=pool, agent_client=agent)
 
+    result = await validate_game(pool, deps, game_id, _settings())
 
-async def test_validate_via_agent_delegates_and_skips_legacy(pool, tmp_path):
-    """Flag-ON (steam_validate_via_agent): validate_game must look up the game's
-    app_id, call deps.agent_client.steam_validate(int(app_id)), map the dict to a
-    ValidationResult, and NEVER touch the legacy worker manifest_expand path."""
-    game_id = await _seed_game(pool, app_id="1018130")
-    # A manifest exists, but the legacy path must NOT be exercised.
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-
-    async def _boom_expand(*_a, **_k):
-        raise AssertionError("manifest_expand must NOT be called on the validate-via-agent path")
-
-    steam = _StubSteam({"depot_id": 731, "chunk_shas": [SHA_A]})
-    steam.manifest_expand = _boom_expand  # type: ignore[method-assign]
-    agent = _FakeAgentSV()
-    deps = Deps(pool=pool, steam_client=steam, agent_client=agent)
-
-    result = await validate_game(pool, deps, game_id, _validate_via_agent_settings(tmp_path))
-
-    # (1) steam_validate called once with the int-coerced app_id.
     assert agent.calls == [1018130]
-    # (2) manifest_expand NOT called (no recorded calls; _boom would have raised).
-    assert steam.calls == []
-    # (3) dict mapped onto ValidationResult.
     assert result.chunks_total == 60
     assert result.chunks_cached == 55
     assert result.chunks_missing == 5
@@ -472,16 +183,27 @@ async def test_validate_via_agent_delegates_and_skips_legacy(pool, tmp_path):
     assert result.error is None
 
 
-async def test_validate_via_agent_no_agent_client_is_error(pool, tmp_path):
-    """Flag-ON but deps.agent_client is None must yield a clean error result,
-    not crash."""
+async def test_validate_no_agent_client_is_error(pool):
+    """deps.agent_client is None must yield a clean error result, not crash."""
     game_id = await _seed_game(pool)
-    await _seed_manifest(pool, game_id, depot_id=731, version="100")
-    deps = Deps(
-        pool=pool,
-        steam_client=_StubSteam({"depot_id": 731, "chunk_shas": [SHA_A]}),
-        agent_client=None,
-    )
-    result = await validate_game(pool, deps, game_id, _validate_via_agent_settings(tmp_path))
+    deps = Deps(pool=pool, agent_client=None)
+    result = await validate_game(pool, deps, game_id, _settings())
     assert result.outcome == "error"
     assert result.error is not None
+
+
+async def test_validate_unknown_game_is_error(pool):
+    agent = _FakeAgentSV({"chunks_total": 0})
+    deps = Deps(pool=pool, agent_client=agent)
+    result = await validate_game(pool, deps, 99999, _settings())
+    assert result.outcome == "error"
+    assert agent.calls == []  # never reached the agent
+
+
+async def test_validate_nonnumeric_app_id_is_error(pool):
+    game_id = await _seed_game(pool, app_id="not-a-number")
+    agent = _FakeAgentSV({"chunks_total": 0})
+    deps = Deps(pool=pool, agent_client=agent)
+    result = await validate_game(pool, deps, game_id, _settings())
+    assert result.outcome == "error"
+    assert agent.calls == []  # bad app_id rejected before the agent call

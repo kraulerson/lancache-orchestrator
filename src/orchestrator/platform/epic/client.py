@@ -1,6 +1,6 @@
 """EpicClient (F6) — token lifecycle + library/manifest facade for handlers.
 
-Mirrors SteamWorkerClient's role in Deps, but is pure async httpx (no subprocess).
+A pure async-httpx facade in Deps (no subprocess).
 Caches a valid access token; refreshes from the persisted refresh token on demand
 and re-persists a rotated refresh token.
 """

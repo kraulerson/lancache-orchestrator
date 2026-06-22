@@ -19,6 +19,19 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Removed — Legacy ValvePython Steam worker (re-arch ③c) — 2026-06-22
+
+The gevent/`steam[client]` subprocess worker is fully deleted now that the data-plane agent owns Steam prefill, validation, and library enumeration via SteamPrefill (re-arch ① + ② + ③a/③b, all live).
+
+- **Deleted** `platform/steam/{worker,client,protocol,session,enumerate}.py` (the worker, its IPC client, NDJSON protocol, session metadata, enumerate helpers), the `manifest_fetch` job handler + its `POST /api/v1/games/{id}/manifest/fetch` route + the `game manifest` CLI command, and the Steam `auth*` endpoints (`POST/GET /api/v1/platforms/steam/auth*`). Epic auth (separate router) is untouched.
+- **Removed** the `venv-steam-worker` Docker build stage + `requirements-steam-worker.{in,txt}` (smaller image, no gevent), `Deps.steam_client`, and the worker settings (`steam_worker_*`, `steam_session_dir`, `steam_session_path`).
+- The `steam_validate_via_agent` / `steam_enumerate_via_prefill` flags are collapsed — validate and library_sync now go through the agent unconditionally.
+
+### Changed — validate + library_sync delegate to the agent unconditionally — 2026-06-22
+
+- `validate_game` resolves the game's `app_id` and calls the agent's `/v1/steam/validate`; the legacy DB-manifest + `manifest_expand` + local cache-key path is gone.
+- Steam `library_sync` always enumerates the prefilled library via the agent (`prefilled_apps` → Steam store type filter). The `manifests.raw` column is retained (Epic prefill writes it; the deferred F7-Epic validation will read it).
+
 ### Security — LAN-bind source-IP allowlist + fail-closed boot guard — 2026-06-18
 
 - Source-IP allowlist (`SourceAllowlistMiddleware`) gates all API paths to loopback + `ORCH_ALLOWED_SOURCE_IPS` when bound off-loopback; defense-in-depth over the bearer token for LAN exposure.
