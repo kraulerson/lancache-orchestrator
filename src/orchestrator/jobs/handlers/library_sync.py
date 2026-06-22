@@ -59,18 +59,20 @@ async def library_sync_handler(job: dict[str, Any], deps: Deps) -> None:
 
 async def _steam_library_sync_via_prefill(job: dict[str, Any], deps: Deps) -> None:
     """Enumerate the Steam library from SteamPrefill's prefilled apps (re-arch
-    ③b). list_owned() gives app_ids only; the title-preserving upsert keeps any
-    existing name and uses the app_id as the placeholder title for new apps."""
-    if deps.prefill_driver is None:
-        raise RuntimeError("prefill_driver is required when steam_enumerate_via_prefill")
+    ③b). SteamPrefill lives on the lancache host (agent side), so this reads the
+    agent's downloaded-state ({app_id: [gids]}) rather than the orchestrator's
+    driver (the control plane has no /SteamPrefill mount). The keys are the
+    prefilled app_ids; the title-preserving upsert keeps any existing name and
+    uses the app_id as the placeholder title for new apps."""
+    if deps.agent_client is None:
+        raise RuntimeError("agent_client is required when steam_enumerate_via_prefill")
     job_id = job.get("id")
-    owned = deps.prefill_driver.list_owned()
-    _log.info("library_sync.prefill.enumerate.returned", job_id=job_id, app_count=len(owned))
-    for app in owned:
-        await deps.pool.execute_write(
-            _PREFILL_UPSERT_SQL, (str(app.app_id), app.name or str(app.app_id))
-        )
-    _log.info("library_sync.prefill.upserted", job_id=job_id, upserted=len(owned))
+    state = await deps.agent_client.downloaded_state()
+    app_ids = list(state)
+    _log.info("library_sync.prefill.enumerate.returned", job_id=job_id, app_count=len(app_ids))
+    for app_id in app_ids:
+        await deps.pool.execute_write(_PREFILL_UPSERT_SQL, (str(app_id), str(app_id)))
+    _log.info("library_sync.prefill.upserted", job_id=job_id, upserted=len(app_ids))
 
 
 async def _epic_library_sync(job: dict[str, Any], deps: Deps) -> None:

@@ -24,12 +24,6 @@ class SteamAuthStatus:
     reason: str = ""
 
 
-@dataclass(frozen=True)
-class OwnedApp:
-    app_id: int
-    name: str = ""
-
-
 class SteamPrefillDriver:
     def __init__(self, *, binary: Path, config_dir: Path) -> None:
         self._binary = Path(binary)
@@ -71,21 +65,6 @@ class SteamPrefillDriver:
             return {}
         data = json.loads(p.read_text())
         return {int(k): [int(g) for g in v] for k, v in data.items()}
-
-    def list_owned(self) -> list[OwnedApp]:
-        """Owned/prefilled apps from successfullyDownloadedDepots.json keys.
-
-        SteamPrefill has no non-interactive owned-apps-with-names enumeration
-        (select-apps is a TTY-only picker), so this sources the prefilled apps
-        (the ones with cache to validate). Names are unknown here (empty) — the
-        library_sync upsert keeps existing names and uses the app_id as the
-        placeholder title for brand-new apps.
-        """
-        p = self._config_dir / "successfullyDownloadedDepots.json"
-        if not p.exists():
-            return []
-        data = json.loads(p.read_text())
-        return [OwnedApp(app_id=int(k)) for k in data]
 
     def auth_status(self) -> SteamAuthStatus:
         """account.config present => SteamPrefill is/was authed (its ~6-month token;
