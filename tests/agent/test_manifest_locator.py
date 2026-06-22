@@ -43,3 +43,18 @@ def test_single_depot_single_gid(tmp_path):
     _write(tmp_path, "1182900_1182900_1182901_3367036266289852265.bin", 1000)
     found = locate_manifest_bins(1182900, cache_root=tmp_path)
     assert [p.name for p in found] == ["1182900_1182900_1182901_3367036266289852265.bin"]
+
+
+def test_list_prefilled_app_ids(tmp_path):
+    from orchestrator.agent.manifest_locator import list_prefilled_app_ids
+
+    _write(tmp_path, "440_440_440_111.bin", 1000)
+    _write(tmp_path, "440_440_441_222.bin", 1000)  # same app, diff depot
+    _write(tmp_path, "730_730_731_333.bin", 1000)
+    assert list_prefilled_app_ids(cache_root=tmp_path) == [440, 730]
+
+
+def test_list_prefilled_app_ids_no_cache(tmp_path):
+    from orchestrator.agent.manifest_locator import list_prefilled_app_ids
+
+    assert list_prefilled_app_ids(cache_root=tmp_path / "missing") == []

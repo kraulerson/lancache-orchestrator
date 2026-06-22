@@ -98,6 +98,11 @@ class AgentClient:
         result: dict[str, Any] = resp.json()
         return result
 
+    async def prefilled_apps(self) -> list[int]:
+        resp = await self._request("GET", "/v1/steam/prefilled-apps")
+        result: list[int] = resp.json()["app_ids"]
+        return result
+
     async def downloaded_state(self) -> dict[str, list[int]]:
         resp = await self._request("GET", "/v1/steam/downloaded-state")
         result: dict[str, list[int]] = resp.json()

@@ -64,6 +64,16 @@ async def test_stat_single_call():
     assert await client.stat(["a" * 32]) == {"cached": 3, "missing": 1}
 
 
+async def test_prefilled_apps_single_call():
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.path == "/v1/steam/prefilled-apps"
+        return httpx.Response(200, json={"app_ids": [440, 570, 730]})
+
+    client = _client(handler)
+    assert await client.prefilled_apps() == [440, 570, 730]
+
+
 async def test_auth_status_single_call():
     def handler(request):
         return httpx.Response(200, json={"ok": True, "reason": ""})

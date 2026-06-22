@@ -69,21 +69,21 @@ async def library_sync_handler(job: dict[str, Any], deps: Deps) -> None:
 async def _steam_library_sync_via_prefill(job: dict[str, Any], deps: Deps) -> None:
     """Enumerate the Steam library from SteamPrefill's prefilled apps (re-arch
     ③b). SteamPrefill lives on the lancache host (agent side), so this reads the
-    agent's downloaded-state ({app_id: [gids]}) rather than the orchestrator's
-    driver (the control plane has no /SteamPrefill mount).
+    agent's prefilled-apps — the distinct app_ids from the manifest .bin cache
+    filenames (real game app_ids), NOT successfullyDownloadedDepots.json (whose
+    keys are depot_ids with no store page).
 
-    The prefilled app_ids include Valve tools, dedicated servers and DLC — not
-    just games. To upsert only actual games (with their real names) we look each
-    uncached app up via the public Steam store appdetails API (no auth) for its
-    {type, name}, cache the result in steam_app_info, and upsert only
-    type=='game'. The store API is rate-limited (~200/5min) so each run is bound
-    by steam_store_fetch_budget; the rest fill on later scheduled syncs."""
+    Some prefilled app_ids may still be DLC; to upsert only actual games (with
+    their real names) we look each uncached app up via the public Steam store
+    appdetails API (no auth) for its {type, name}, cache the result in
+    steam_app_info, and upsert only type=='game'. The store API is rate-limited
+    (~200/5min) so each run is bound by steam_store_fetch_budget; the rest fill
+    on later scheduled syncs."""
     if deps.agent_client is None:
         raise RuntimeError("agent_client is required when steam_enumerate_via_prefill")
     settings = get_settings()
     job_id = job.get("id")
-    state = await deps.agent_client.downloaded_state()
-    app_ids = [str(a) for a in state]
+    app_ids = [str(a) for a in await deps.agent_client.prefilled_apps()]
     _log.info("library_sync.prefill.enumerate.returned", job_id=job_id, app_count=len(app_ids))
 
     cache: dict[str, dict[str, str]] = {

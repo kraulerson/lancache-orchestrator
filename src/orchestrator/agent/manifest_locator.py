@@ -19,6 +19,24 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def list_prefilled_app_ids(*, cache_root: Path) -> list[int]:
+    """Distinct app_ids that have a cached manifest .bin (sorted ascending).
+
+    The .bin filename is {app}_{app}_{depot}_{gid}.bin, so the first field is
+    the app_id. These are the prefilled GAMES (real app_ids), unlike
+    successfullyDownloadedDepots.json whose keys are depot_ids.
+    """
+    v1 = cache_root / "v1"
+    if not v1.is_dir():
+        return []
+    apps: set[int] = set()
+    for path in v1.glob("*.bin"):
+        first = path.stem.split("_", 1)[0]
+        if first.isdigit():
+            apps.add(int(first))
+    return sorted(apps)
+
+
 def locate_manifest_bins(app_id: int, *, cache_root: Path) -> list[Path]:
     """Return the newest manifest .bin per depot for ``app_id`` (empty if none)."""
     v1 = cache_root / "v1"

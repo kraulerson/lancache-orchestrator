@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from orchestrator.agent.manifest_locator import locate_manifest_bins
+from orchestrator.agent.manifest_locator import list_prefilled_app_ids, locate_manifest_bins
 from orchestrator.agent.manifest_parser import parse_chunk_shas
 from orchestrator.validator.cache_key import (
     cache_key,
@@ -74,6 +74,14 @@ async def downloaded_state(request: Request) -> dict[str, list[int]]:
 async def auth_status(request: Request) -> dict[str, Any]:
     st = request.app.state.prefill_driver.auth_status()
     return {"ok": st.ok, "reason": st.reason}
+
+
+@router.get("/v1/steam/prefilled-apps")
+async def prefilled_apps(request: Request) -> dict[str, list[int]]:
+    """Distinct app_ids with a cached manifest (real game app_ids from the .bin
+    filenames) — the enumeration source for library_sync."""
+    manifest_cache = Path(request.app.state.settings.steam_manifest_cache_dir)
+    return {"app_ids": list_prefilled_app_ids(cache_root=manifest_cache)}
 
 
 class SteamValidateRequest(BaseModel):
