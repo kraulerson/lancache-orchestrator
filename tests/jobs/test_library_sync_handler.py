@@ -268,3 +268,54 @@ class TestCurrentVersion:
         assert row["status"] == "up_to_date"  # untouched
         assert row["cached_version"] == "99"  # untouched
         assert row["current_version"] == "42"  # updated
+
+
+class _StubDriver:
+    def __init__(self, owned):
+        self._owned = owned
+
+    def list_owned(self):
+        return self._owned
+
+
+class TestEnumerateViaPrefill:
+    async def test_upserts_from_list_owned(self, pool, monkeypatch):
+        from orchestrator.core import settings as settings_mod
+        from orchestrator.platform.steam.prefill_driver import OwnedApp
+
+        monkeypatch.setattr(
+            "orchestrator.jobs.handlers.library_sync.get_settings",
+            lambda: settings_mod.Settings(
+                orchestrator_token="a" * 32, steam_enumerate_via_prefill=True
+            ),
+        )
+        driver = _StubDriver([OwnedApp(440), OwnedApp(570)])
+        await library_sync_handler(
+            _job(), Deps(pool=pool, steam_client=None, prefill_driver=driver)
+        )
+        rows = await pool.read_all(
+            "SELECT app_id, title FROM games WHERE platform='steam' ORDER BY app_id"
+        )
+        assert [(r["app_id"], r["title"]) for r in rows] == [("440", "440"), ("570", "570")]
+
+    async def test_existing_title_preserved(self, pool, monkeypatch):
+        from orchestrator.core import settings as settings_mod
+        from orchestrator.platform.steam.prefill_driver import OwnedApp
+
+        await pool.execute_write(
+            "INSERT INTO games (platform, app_id, title, owned) "
+            "VALUES ('steam','440','Team Fortress 2',0)"
+        )
+        monkeypatch.setattr(
+            "orchestrator.jobs.handlers.library_sync.get_settings",
+            lambda: settings_mod.Settings(
+                orchestrator_token="a" * 32, steam_enumerate_via_prefill=True
+            ),
+        )
+        driver = _StubDriver([OwnedApp(440)])
+        await library_sync_handler(
+            _job(), Deps(pool=pool, steam_client=None, prefill_driver=driver)
+        )
+        row = await pool.read_one("SELECT title, owned FROM games WHERE app_id='440'")
+        assert row["title"] == "Team Fortress 2"  # existing name kept
+        assert row["owned"] == 1  # marked owned

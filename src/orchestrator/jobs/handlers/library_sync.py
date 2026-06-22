@@ -18,10 +18,21 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from orchestrator.core.settings import get_settings
+
 if TYPE_CHECKING:
     from orchestrator.jobs.worker import Deps
 
 _log = structlog.get_logger(__name__)
+
+# Title-preserving upsert for the SteamPrefill-sourced enumeration: list_owned
+# gives app_ids without names, so a NEW app gets the app_id as its placeholder
+# title (set on INSERT), while an EXISTING app keeps its title — only `owned`
+# is updated on conflict.
+_PREFILL_UPSERT_SQL = (
+    "INSERT INTO games (platform, app_id, title) VALUES ('steam', ?, ?) "
+    "ON CONFLICT(platform, app_id) DO UPDATE SET owned = 1"
+)
 
 _UPSERT_SQL = (
     "INSERT INTO games (platform, app_id, title, owned, metadata, current_version) "
@@ -44,6 +55,22 @@ async def library_sync_handler(job: dict[str, Any], deps: Deps) -> None:
     if platform == "epic":
         return await _epic_library_sync(job, deps)
     raise ValueError(f"library_sync: unsupported platform {platform!r}")
+
+
+async def _steam_library_sync_via_prefill(job: dict[str, Any], deps: Deps) -> None:
+    """Enumerate the Steam library from SteamPrefill's prefilled apps (re-arch
+    ③b). list_owned() gives app_ids only; the title-preserving upsert keeps any
+    existing name and uses the app_id as the placeholder title for new apps."""
+    if deps.prefill_driver is None:
+        raise RuntimeError("prefill_driver is required when steam_enumerate_via_prefill")
+    job_id = job.get("id")
+    owned = deps.prefill_driver.list_owned()
+    _log.info("library_sync.prefill.enumerate.returned", job_id=job_id, app_count=len(owned))
+    for app in owned:
+        await deps.pool.execute_write(
+            _PREFILL_UPSERT_SQL, (str(app.app_id), app.name or str(app.app_id))
+        )
+    _log.info("library_sync.prefill.upserted", job_id=job_id, upserted=len(owned))
 
 
 async def _epic_library_sync(job: dict[str, Any], deps: Deps) -> None:
@@ -93,6 +120,9 @@ async def _steam_library_sync(job: dict[str, Any], deps: Deps) -> None:
             operator-facing /platforms surface matches reality before the
             re-raise marks the job failed (F-UAT6-3).
     """
+    if get_settings().steam_enumerate_via_prefill:
+        return await _steam_library_sync_via_prefill(job, deps)
+
     from orchestrator.platform.steam.client import SteamWorkerError
 
     if deps.steam_client is None:
