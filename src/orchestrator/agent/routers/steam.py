@@ -98,10 +98,9 @@ def _classify(total: int, cached: int) -> str:
 async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     cache_root = Path(settings.lancache_nginx_cache_path)
-    config_dir = Path(settings.steam_prefill_config_dir)
     manifest_cache = Path(settings.steam_manifest_cache_dir)
 
-    bins = locate_manifest_bins(body.app_id, cache_root=manifest_cache, config_dir=config_dir)
+    bins = locate_manifest_bins(body.app_id, cache_root=manifest_cache)
     if not bins:
         return {
             "chunks_total": 0,
