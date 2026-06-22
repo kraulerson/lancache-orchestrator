@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
+
+from orchestrator.agent.manifest_locator import locate_manifest_bins
+from orchestrator.agent.manifest_parser import parse_chunk_shas
+from orchestrator.validator.cache_key import (
+    cache_key,
+    cache_path,
+    slice_range_zero,
+    steam_chunk_uri,
+)
+from orchestrator.validator.disk_stat import validate_chunks
 
 router = APIRouter()
 
@@ -63,3 +74,73 @@ async def downloaded_state(request: Request) -> dict[str, list[int]]:
 async def auth_status(request: Request) -> dict[str, Any]:
     st = request.app.state.prefill_driver.auth_status()
     return {"ok": st.ok, "reason": st.reason}
+
+
+class SteamValidateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    app_id: int = Field(..., ge=0)
+
+
+def _classify(total: int, cached: int) -> str:
+    # total == 0 here means the located manifests contained no chunks —
+    # nothing to cache, so the app is up to date ('cached'). The genuinely
+    # no-manifest case returns 'error' before reaching classification.
+    if total == 0:
+        return "cached"
+    if cached == total:
+        return "cached"
+    if cached == 0:
+        return "missing"
+    return "partial"
+
+
+@router.post("/v1/steam/validate")
+async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[str, Any]:
+    settings = request.app.state.settings
+    cache_root = Path(settings.lancache_nginx_cache_path)
+    config_dir = Path(settings.steam_prefill_config_dir)
+    manifest_cache = Path(settings.steam_manifest_cache_dir)
+
+    bins = locate_manifest_bins(body.app_id, cache_root=manifest_cache, config_dir=config_dir)
+    if not bins:
+        return {
+            "chunks_total": 0,
+            "chunks_cached": 0,
+            "chunks_missing": 0,
+            "outcome": "error",
+            "versions": "",
+            "error": "no_manifest_in_cache",
+        }
+
+    slice_range = slice_range_zero(settings.cache_slice_size_bytes)
+    identifier = settings.steam_cache_identifier
+    levels = settings.cache_levels
+
+    seen: set[tuple[int, str]] = set()
+    paths: list[Path] = []
+    versions: list[str] = []
+    for binpath in bins:
+        # filename is {app}_{app}_{depot}_{gid}.bin
+        parts = binpath.stem.split("_")
+        depot_id = int(parts[2])
+        gid = parts[3]
+        versions.append(f"{depot_id}:{gid}")
+        for sha in parse_chunk_shas(binpath.read_bytes()):
+            key = (depot_id, sha)
+            if key in seen:
+                continue
+            seen.add(key)
+            uri = steam_chunk_uri(depot_id, sha)
+            h = cache_key(identifier, uri, slice_range)
+            paths.append(cache_path(cache_root, h, levels))
+
+    cached, missing = await validate_chunks(paths)
+    total = len(paths)
+    return {
+        "chunks_total": total,
+        "chunks_cached": cached,
+        "chunks_missing": missing,
+        "outcome": _classify(total, cached),
+        "versions": ",".join(sorted(versions)),
+        "error": None,
+    }

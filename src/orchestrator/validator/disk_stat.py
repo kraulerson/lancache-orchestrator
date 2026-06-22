@@ -160,6 +160,30 @@ async def validate_game(
     pool: Any, deps: Deps, game_id: int, settings: Settings
 ) -> ValidationResult:
     """Validate the latest manifest per depot for `game_id`."""
+    # Roadmap ③a: when the agent owns Steam validation, delegate to its
+    # /v1/steam/validate (DepotDownloader-backed) and skip the legacy worker
+    # manifest_expand + DB-manifest + cache-key path entirely. Flag-off
+    # (default) keeps the existing path byte-identical.
+    if settings.steam_validate_via_agent:
+        if deps.agent_client is None:
+            return ValidationResult(0, 0, 0, "error", "", "agent_client unavailable")
+        row = await pool.read_one("SELECT app_id FROM games WHERE id=?", (game_id,))
+        if row is None:
+            return ValidationResult(0, 0, 0, "error", "", f"game {game_id} not found")
+        try:
+            app_id_int = int(row["app_id"])
+        except (TypeError, ValueError):
+            return ValidationResult(0, 0, 0, "error", "", "app_id not numeric")
+        res = await deps.agent_client.steam_validate(app_id_int)
+        return ValidationResult(
+            chunks_total=res["chunks_total"],
+            chunks_cached=res["chunks_cached"],
+            chunks_missing=res["chunks_missing"],
+            outcome=res["outcome"],
+            manifest_version=res.get("versions", ""),
+            error=res.get("error"),
+        )
+
     cache_root = Path(settings.lancache_nginx_cache_path)
     # When the agent owns the data plane, the control plane may not have the
     # cache filesystem mounted, so this guard would wrongly error. Flag-off only.

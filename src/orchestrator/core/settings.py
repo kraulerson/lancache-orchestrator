@@ -104,6 +104,14 @@ class Settings(BaseSettings):
     agent_bind_host: str = Field(default="127.0.0.1", min_length=1)
     agent_bind_port: int = Field(default=8780, ge=1, le=65535)
 
+    # --- Steam worker deletion (re-arch step 3) ---------------------
+    # The agent reads SteamPrefill's manifest cache (mounted read-only from the
+    # host's /root/.cache/SteamPrefill) to source chunk SHAs for validate.
+    steam_manifest_cache_dir: Path = Path("/steamprefill-cache")
+    # Flag: route Steam validate through the agent's /v1/steam/validate (parses
+    # SteamPrefill manifests) instead of the legacy worker manifest_expand.
+    steam_validate_via_agent: bool = False
+
     # --- Lancache cache topology ------------------------------------
     lancache_nginx_cache_path: Path = Path("/data/cache/cache/")
     cache_slice_size_bytes: int = Field(default=10_485_760, gt=0)
