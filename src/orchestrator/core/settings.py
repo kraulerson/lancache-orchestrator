@@ -111,6 +111,9 @@ class Settings(BaseSettings):
     # Flag: route Steam validate through the agent's /v1/steam/validate (parses
     # SteamPrefill manifests) instead of the legacy worker manifest_expand.
     steam_validate_via_agent: bool = False
+    # Flag: source the Steam library from SteamPrefill (prefilled apps) instead
+    # of the legacy worker library_enumerate.
+    steam_enumerate_via_prefill: bool = False
 
     # --- Lancache cache topology ------------------------------------
     lancache_nginx_cache_path: Path = Path("/data/cache/cache/")
