@@ -1,8 +1,8 @@
-"""Tests for locating an app's current manifest .bin files."""
+"""Tests for locating an app's current manifest .bin files (cache-based)."""
 
 from __future__ import annotations
 
-import json
+import os
 from typing import TYPE_CHECKING
 
 from orchestrator.agent.manifest_locator import locate_manifest_bins
@@ -11,42 +11,35 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _setup(tmp_path: Path, downloaded: dict, bin_names: list[str]) -> tuple[Path, Path]:
-    cache = tmp_path / "cache" / "v1"
-    cache.mkdir(parents=True)
-    for name in bin_names:
-        (cache / name).write_bytes(b"x")
-    cfg = tmp_path / "Config"
-    cfg.mkdir()
-    (cfg / "successfullyDownloadedDepots.json").write_text(json.dumps(downloaded))
-    return cache.parent, cfg
+def _write(cache_root: Path, name: str, mtime: int) -> Path:
+    v1 = cache_root / "v1"
+    v1.mkdir(parents=True, exist_ok=True)
+    p = v1 / name
+    p.write_bytes(b"x")
+    os.utime(p, (mtime, mtime))
+    return p
 
 
-def test_locates_bins_for_app(tmp_path):
-    cache_root, cfg = _setup(
-        tmp_path,
-        {"440": [111, 222]},
-        ["440_440_4401_111.bin", "440_440_4402_222.bin", "570_570_5701_999.bin"],
-    )
-    found = locate_manifest_bins(440, cache_root=cache_root, config_dir=cfg)
-    names = sorted(p.name for p in found)
-    assert names == ["440_440_4401_111.bin", "440_440_4402_222.bin"]
+def test_locates_newest_bin_per_depot(tmp_path):
+    # app 440, depots 440 and 441. Depot 441 has two gids -> newest mtime wins.
+    _write(tmp_path, "440_440_440_111.bin", 1000)
+    _write(tmp_path, "440_440_441_222.bin", 1000)
+    _write(tmp_path, "440_440_441_333.bin", 2000)  # newer for depot 441
+    _write(tmp_path, "570_570_5701_999.bin", 1000)  # other app
+    found = sorted(p.name for p in locate_manifest_bins(440, cache_root=tmp_path))
+    assert found == ["440_440_440_111.bin", "440_440_441_333.bin"]
 
 
-def test_app_not_prefilled_returns_empty(tmp_path):
-    cache_root, cfg = _setup(tmp_path, {"440": [111]}, ["440_440_4401_111.bin"])
-    assert locate_manifest_bins(999, cache_root=cache_root, config_dir=cfg) == []
+def test_app_with_no_bins_returns_empty(tmp_path):
+    _write(tmp_path, "440_440_440_111.bin", 1000)
+    assert locate_manifest_bins(999, cache_root=tmp_path) == []
 
 
-def test_missing_bin_for_gid_skipped(tmp_path):
-    cache_root, cfg = _setup(tmp_path, {"440": [111, 222]}, ["440_440_4401_111.bin"])
-    found = locate_manifest_bins(440, cache_root=cache_root, config_dir=cfg)
-    assert [p.name for p in found] == ["440_440_4401_111.bin"]
+def test_no_cache_dir_returns_empty(tmp_path):
+    assert locate_manifest_bins(440, cache_root=tmp_path / "missing") == []
 
 
-def test_no_downloaded_file_returns_empty(tmp_path):
-    cache = tmp_path / "cache" / "v1"
-    cache.mkdir(parents=True)
-    cfg = tmp_path / "Config"
-    cfg.mkdir()
-    assert locate_manifest_bins(440, cache_root=cache.parent, config_dir=cfg) == []
+def test_single_depot_single_gid(tmp_path):
+    _write(tmp_path, "1182900_1182900_1182901_3367036266289852265.bin", 1000)
+    found = locate_manifest_bins(1182900, cache_root=tmp_path)
+    assert [p.name for p in found] == ["1182900_1182900_1182901_3367036266289852265.bin"]
