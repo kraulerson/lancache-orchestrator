@@ -26,15 +26,12 @@ from orchestrator.api.middleware import (
     CorrelationIdMiddleware,
     SourceAllowlistMiddleware,
 )
-from orchestrator.api.routers.auth import router as auth_router
-from orchestrator.api.routers.auth import set_steam_client_singleton
 from orchestrator.api.routers.block_list import router as block_list_router
 from orchestrator.api.routers.epic_auth import router as epic_auth_router
 from orchestrator.api.routers.epic_sync import router as epic_sync_router
 from orchestrator.api.routers.games import router as games_router
 from orchestrator.api.routers.health import router as health_router
 from orchestrator.api.routers.jobs import router as jobs_router
-from orchestrator.api.routers.manifest_trigger import router as manifest_trigger_router
 from orchestrator.api.routers.manifests import router as manifests_router
 from orchestrator.api.routers.platforms import router as platforms_router
 from orchestrator.api.routers.prefill_trigger import router as prefill_trigger_router
@@ -55,7 +52,6 @@ from orchestrator.jobs.reaper import reap_orphaned_game_status, reap_running_job
 from orchestrator.jobs.worker import Deps as JobsDeps
 from orchestrator.jobs.worker import worker_loop as jobs_worker_loop
 from orchestrator.lancache.heartbeat import LancacheProbe
-from orchestrator.platform.steam.client import SteamWorkerClient
 from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
 from orchestrator.scheduler.manager import SchedulerManager
 from orchestrator.validator.disk_stat import shutdown_cache_stat_executor
@@ -170,18 +166,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # `running` rows anyway (it filters `state='queued'`).
         log.error("api.boot.reaper_failed", reason=str(e)[:200])
 
-    # 3. Steam worker startup
-    steam_client = SteamWorkerClient()
-    try:
-        await steam_client.start()
-        log.info("api.boot.steam_worker_started")
-    except Exception as e:
-        log.warning("api.boot.steam_worker_start_failed", reason=str(e))
-        # Continue booting — endpoints that need the worker will return 503
-        # if the DI singleton is still None. We set it anyway so tests that
-        # override the dep still work (they don't call start()).
-    set_steam_client_singleton(steam_client)
-
     # 3b. Epic client (F6). Pure async-httpx facade over Epic OAuth/library/
     # manifest — no subprocess. Refreshes the access token from the persisted
     # refresh token on demand; raises EpicNotAuthenticated if none is stored.
@@ -229,7 +213,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     jobs_shutdown: asyncio.Event = asyncio.Event()
     jobs_deps = JobsDeps(
         pool=get_pool(),
-        steam_client=steam_client,
         epic_client=epic_client,
         prefill_driver=prefill_driver,
         agent_client=agent_client,
@@ -316,8 +299,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as e:
             log.error("api.shutdown.scheduler_stop_failed", reason=str(e)[:200])
 
-        # Stop the jobs worker NEXT so it isn't still holding pool /
-        # steam-client refs when those resources unwind.
+        # Stop the jobs worker NEXT so it isn't still holding pool refs when
+        # those resources unwind.
         log.info("api.shutdown.jobs_worker_stopping")
         jobs_shutdown.set()
         try:
@@ -328,11 +311,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             with contextlib.suppress(asyncio.CancelledError):
                 await jobs_worker_task
 
-        try:
-            await steam_client.stop()
-        except Exception as e:
-            log.error("api.shutdown.steam_worker_stop_failed", reason=str(e))
-        set_steam_client_singleton(None)
         if pool_initialized:
             try:
                 await close_pool()
@@ -451,14 +429,12 @@ def create_app() -> FastAPI:
         )
 
     # Routers
-    app.include_router(auth_router)
     app.include_router(health_router)
     app.include_router(platforms_router)
     app.include_router(games_router)
     app.include_router(block_list_router)
     app.include_router(jobs_router)
     app.include_router(manifests_router)
-    app.include_router(manifest_trigger_router)
     app.include_router(validate_trigger_router)
     app.include_router(prefill_trigger_router)
     app.include_router(sync_router)

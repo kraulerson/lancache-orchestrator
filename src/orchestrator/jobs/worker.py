@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from orchestrator.clients.agent_client import AgentClient
     from orchestrator.db.pool import Pool
     from orchestrator.platform.epic.client import EpicClient
-    from orchestrator.platform.steam.client import SteamWorkerClient
     from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
 
 _log = structlog.get_logger(__name__)
@@ -35,12 +34,11 @@ JOB_ERROR_TRUNCATE = 200
 @dataclass(frozen=True, slots=True)
 class Deps:
     """Handler dependency bundle. Tests construct minimal Deps; production
-    builds one in the FastAPI lifespan that carries the singleton
-    SteamWorkerClient.
+    builds one in the FastAPI lifespan that carries the Epic client, the
+    SteamPrefill driver, and the data-plane agent client.
     """
 
     pool: Pool
-    steam_client: SteamWorkerClient | None
     epic_client: EpicClient | None = None
     prefill_driver: SteamPrefillDriver | None = None
     agent_client: AgentClient | None = None

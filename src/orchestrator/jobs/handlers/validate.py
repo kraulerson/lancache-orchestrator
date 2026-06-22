@@ -42,8 +42,8 @@ async def validate_one_game(
 ) -> ValidationResult:
     """Validate one game against the on-disk cache, record a validation_history
     row, and update games.status. Shared by the validate job handler (F7) and the
-    scheduled sweep (F13). Assumes the caller has confirmed steam_client and the
-    game's steam platform."""
+    scheduled sweep (F13). Assumes the caller has confirmed the game's steam
+    platform."""
     started_row = await pool.read_one("SELECT CURRENT_TIMESTAMP AS t")
     started_at = started_row["t"] if started_row is not None else None
 
@@ -89,13 +89,10 @@ async def validate_handler(job: dict[str, Any], deps: Deps) -> None:
 
     Raises:
         ValueError — non-steam platform or unknown game.
-        RuntimeError — `deps.steam_client` is None.
     """
     platform = job.get("platform")
     if platform != "steam":
         raise ValueError(f"validate only supports steam (got {platform!r})")
-    if deps.steam_client is None:
-        raise RuntimeError("steam_client is required for validate handler")
     game_id = job.get("game_id")
     if game_id is None:
         raise ValueError("validate job has no game_id")

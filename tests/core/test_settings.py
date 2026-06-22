@@ -70,7 +70,6 @@ class TestDefaults:
             ("log_level", "INFO"),
             ("database_path", Path("/var/lib/orchestrator/orchestrator.db")),
             ("require_local_fs", "warn"),
-            ("steam_session_path", Path("/var/lib/orchestrator/steam_session.json")),
             ("epic_session_path", Path("/var/lib/orchestrator/epic_session.json")),
             ("lancache_nginx_cache_path", Path("/data/cache/cache/")),
             ("cache_slice_size_bytes", 10_485_760),
@@ -576,72 +575,6 @@ class TestSingleton:
 
 
 class TestBL10SteamWorkerSettings:
-    def test_steam_worker_settings_defaults(self, monkeypatch):
-        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
-        from orchestrator.core.settings import Settings, get_settings
-
-        get_settings.cache_clear()
-        s = Settings()
-        assert s.steam_worker_python_path == Path("/opt/orchestrator/venv-steam-worker/bin/python")
-        assert s.steam_worker_ipc_timeout_sec == 30
-        assert s.steam_worker_max_restart_attempts == 3
-        assert s.steam_session_dir == Path("/var/lib/orchestrator/steam_session")
-        assert s.jobs_worker_poll_interval_sec == 1.0
-
-    def test_steam_worker_ipc_timeout_rejects_zero(self, monkeypatch):
-        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
-        monkeypatch.setenv("ORCH_STEAM_WORKER_IPC_TIMEOUT_SEC", "0")
-        from orchestrator.core.settings import Settings, get_settings
-
-        get_settings.cache_clear()
-        with pytest.raises(ValueError, match=r"steam_worker_ipc_timeout_sec"):
-            Settings()
-
-    def test_steam_worker_library_enumerate_timeout_default(self, monkeypatch):
-        """Issue #109: 5-minute default budget for library_enumerate."""
-        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
-        from orchestrator.core.settings import Settings, get_settings
-
-        get_settings.cache_clear()
-        s = Settings()
-        assert s.steam_worker_library_enumerate_timeout_sec == 300
-
-    def test_steam_worker_library_enumerate_timeout_rejects_too_low(self, monkeypatch):
-        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
-        monkeypatch.setenv("ORCH_STEAM_WORKER_LIBRARY_ENUMERATE_TIMEOUT_SEC", "10")
-        from orchestrator.core.settings import Settings, get_settings
-
-        get_settings.cache_clear()
-        with pytest.raises(ValueError, match="steam_worker_library_enumerate_timeout_sec"):
-            Settings()
-
-    def test_steam_worker_library_enumerate_timeout_rejects_too_high(self, monkeypatch):
-        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
-        monkeypatch.setenv("ORCH_STEAM_WORKER_LIBRARY_ENUMERATE_TIMEOUT_SEC", "7200")
-        from orchestrator.core.settings import Settings, get_settings
-
-        get_settings.cache_clear()
-        with pytest.raises(ValueError, match="steam_worker_library_enumerate_timeout_sec"):
-            Settings()
-
-    def test_steam_worker_manifest_fetch_timeout_default(self, monkeypatch):
-        """BL12: 5-minute default budget for manifest.fetch."""
-        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
-        from orchestrator.core.settings import Settings, get_settings
-
-        get_settings.cache_clear()
-        s = Settings()
-        assert s.steam_worker_manifest_fetch_timeout_sec == 300
-
-    def test_steam_worker_manifest_fetch_timeout_rejects_too_low(self, monkeypatch):
-        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
-        monkeypatch.setenv("ORCH_STEAM_WORKER_MANIFEST_FETCH_TIMEOUT_SEC", "10")
-        from orchestrator.core.settings import Settings, get_settings
-
-        get_settings.cache_clear()
-        with pytest.raises(ValueError, match="steam_worker_manifest_fetch_timeout_sec"):
-            Settings()
-
     def test_cache_levels_valid_defaults_accepted(self, monkeypatch):
         monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
         from orchestrator.core.settings import Settings, get_settings
@@ -697,41 +630,6 @@ class TestBL10SteamWorkerSettings:
         get_settings.cache_clear()
         with pytest.raises(ValueError, match="prefill_chunk_max_attempts"):
             Settings(prefill_chunk_max_attempts=0)
-
-    def test_manifest_expand_timeout_default(self, monkeypatch):
-        """F7: 2-minute default budget for the offline manifest.expand op."""
-        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
-        from orchestrator.core.settings import Settings, get_settings
-
-        get_settings.cache_clear()
-        assert Settings().steam_worker_manifest_expand_timeout_sec == 120
-
-    def test_manifest_expand_timeout_rejects_too_low(self, monkeypatch):
-        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
-        monkeypatch.setenv("ORCH_STEAM_WORKER_MANIFEST_EXPAND_TIMEOUT_SEC", "10")
-        from orchestrator.core.settings import Settings, get_settings
-
-        get_settings.cache_clear()
-        with pytest.raises(ValueError, match="steam_worker_manifest_expand_timeout_sec"):
-            Settings()
-
-    def test_manifest_expand_timeout_rejects_too_high(self, monkeypatch):
-        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
-        monkeypatch.setenv("ORCH_STEAM_WORKER_MANIFEST_EXPAND_TIMEOUT_SEC", "601")
-        from orchestrator.core.settings import Settings, get_settings
-
-        get_settings.cache_clear()
-        with pytest.raises(ValueError, match="steam_worker_manifest_expand_timeout_sec"):
-            Settings()
-
-    def test_steam_worker_max_restart_attempts_rejects_negative(self, monkeypatch):
-        monkeypatch.setenv("ORCH_TOKEN", "a" * 32)
-        monkeypatch.setenv("ORCH_STEAM_WORKER_MAX_RESTART_ATTEMPTS", "-1")
-        from orchestrator.core.settings import Settings, get_settings
-
-        get_settings.cache_clear()
-        with pytest.raises(ValueError, match=r"steam_worker_max_restart_attempts"):
-            Settings()
 
 
 # ----------------------------------------------------------------------
@@ -807,12 +705,6 @@ class TestDataPlaneAgentSettings:
 
 
 class TestSteamWorkerDeletionSettings:
-    def test_defaults(self):
+    def test_manifest_cache_dir_default(self):
         s = Settings(orchestrator_token="a" * 32)
         assert s.steam_manifest_cache_dir == Path("/steamprefill-cache")
-        assert s.steam_validate_via_agent is False
-
-    def test_env_override(self, monkeypatch):
-        monkeypatch.setenv("ORCH_STEAM_VALIDATE_VIA_AGENT", "true")
-        s = Settings(orchestrator_token="a" * 32)
-        assert s.steam_validate_via_agent is True

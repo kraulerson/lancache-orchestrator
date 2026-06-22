@@ -1,6 +1,7 @@
-"""Steam platform adapter — subprocess-isolated steam-next worker.
+"""Steam platform adapter.
 
-The subprocess (worker.py) is gevent-patched and runs in a separate
-Python venv. The asyncio orchestrator process communicates with it via
-SteamWorkerClient (client.py) over newline-delimited JSON pipes.
+Steam prefill and library enumeration are delegated to the host SteamPrefill
+binary via `SteamPrefillDriver` (prefill_driver.py); game metadata is resolved
+through the public Steam store API (store.py). The data-plane agent runs these
+on the lancache host; the control plane talks to it over HTTP.
 """

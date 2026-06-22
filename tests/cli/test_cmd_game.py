@@ -58,15 +58,6 @@ def test_game_validate_triggers(mock):
     assert r.exit_code == 0 and "51" in r.output
 
 
-def test_game_manifest_triggers(mock):
-    def handler(req: httpx.Request) -> httpx.Response:
-        assert req.url.path == "/api/v1/games/5/manifest/fetch"
-        return httpx.Response(202, json={"job_id": 52})
-
-    r = mock(["game", "manifest", "5"], handler)
-    assert r.exit_code == 0 and "52" in r.output
-
-
 def test_list_invalid_status_rejected_with_choices(cli_invoke):
     """Invalid --status must be rejected client-side, not silently empty (S11-E-04)."""
     r = cli_invoke(["game", "list", "--status", "uptodate"])  # valid is 'up_to_date'

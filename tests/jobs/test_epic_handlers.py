@@ -48,9 +48,7 @@ async def _seed_epic_game(pool, app_id="AppA", title="Game A"):
 
 async def test_epic_library_sync_upserts_games(pool):
     stub = _StubEpic(items=[EpicLibraryItem("AppA", "ns", "cat", "Game A")])
-    await library_sync_handler(
-        _job("library_sync"), Deps(pool=pool, steam_client=None, epic_client=stub)
-    )
+    await library_sync_handler(_job("library_sync"), Deps(pool=pool, epic_client=stub))
     row = await pool.read_one(
         "SELECT platform, app_id, title, metadata FROM games WHERE platform='epic'"
     )
@@ -63,9 +61,7 @@ async def test_epic_library_sync_upserts_games(pool):
 
 async def test_epic_library_sync_requires_client(pool):
     with pytest.raises(RuntimeError):
-        await library_sync_handler(
-            _job("library_sync"), Deps(pool=pool, steam_client=None, epic_client=None)
-        )
+        await library_sync_handler(_job("library_sync"), Deps(pool=pool, epic_client=None))
 
 
 def _manifest():
@@ -86,9 +82,7 @@ async def test_epic_prefill_downloads_stores_manifest_marks_up_to_date(pool, mon
     monkeypatch.setattr(ph, "epic_prefill_chunks", fake_prefill)
     monkeypatch.setattr(ph, "epic_verify_cached", fake_verify)
 
-    await prefill_handler(
-        _job("prefill", gid), Deps(pool=pool, steam_client=None, epic_client=stub)
-    )
+    await prefill_handler(_job("prefill", gid), Deps(pool=pool, epic_client=stub))
 
     g = await pool.read_one("SELECT status, size_bytes FROM games WHERE id=?", (gid,))
     assert g["status"] == "up_to_date"
@@ -116,9 +110,7 @@ async def test_epic_prefill_low_hit_ratio_is_non_gating(pool, monkeypatch):
     monkeypatch.setattr(ph, "epic_prefill_chunks", fake_prefill)
     monkeypatch.setattr(ph, "epic_verify_cached", fake_verify)
 
-    await prefill_handler(
-        _job("prefill", gid), Deps(pool=pool, steam_client=None, epic_client=stub)
-    )
+    await prefill_handler(_job("prefill", gid), Deps(pool=pool, epic_client=stub))
     g = await pool.read_one("SELECT status FROM games WHERE id=?", (gid,))
     assert g["status"] == "up_to_date"  # informational, not a failure
 
@@ -133,9 +125,7 @@ async def test_epic_prefill_failed_chunks_marks_failed(pool, monkeypatch):
     monkeypatch.setattr(ph, "epic_prefill_chunks", fake_prefill)
 
     with pytest.raises(RuntimeError):
-        await prefill_handler(
-            _job("prefill", gid), Deps(pool=pool, steam_client=None, epic_client=stub)
-        )
+        await prefill_handler(_job("prefill", gid), Deps(pool=pool, epic_client=stub))
     g = await pool.read_one("SELECT status FROM games WHERE id=?", (gid,))
     assert g["status"] == "failed"
 
@@ -152,9 +142,7 @@ async def test_epic_prefill_manifest_error_marks_failed_not_stuck_downloading(po
     from orchestrator.platform.epic.manifest import EpicManifestError
 
     with pytest.raises(EpicManifestError):
-        await prefill_handler(
-            _job("prefill", gid), Deps(pool=pool, steam_client=None, epic_client=_BadEpic())
-        )
+        await prefill_handler(_job("prefill", gid), Deps(pool=pool, epic_client=_BadEpic()))
     g = await pool.read_one("SELECT status, last_error FROM games WHERE id=?", (gid,))
     assert g["status"] == "failed"  # not stuck in 'downloading'
     assert "EpicManifestError" in (g["last_error"] or "")
@@ -163,16 +151,12 @@ async def test_epic_prefill_manifest_error_marks_failed_not_stuck_downloading(po
 async def test_epic_prefill_requires_client(pool):
     gid = await _seed_epic_game(pool, app_id="AppC")
     with pytest.raises(RuntimeError):
-        await prefill_handler(
-            _job("prefill", gid), Deps(pool=pool, steam_client=None, epic_client=None)
-        )
+        await prefill_handler(_job("prefill", gid), Deps(pool=pool, epic_client=None))
 
 
 async def test_epic_library_sync_writes_current_version(pool):
     stub = _StubEpic(items=[EpicLibraryItem("AppA", "ns", "cat", "Game A", build_version="bv-1")])
-    await library_sync_handler(
-        _job("library_sync"), Deps(pool=pool, steam_client=None, epic_client=stub)
-    )
+    await library_sync_handler(_job("library_sync"), Deps(pool=pool, epic_client=stub))
     row = await pool.read_one("SELECT current_version FROM games WHERE platform='epic'")
     assert row["current_version"] == "bv-1"
 
@@ -190,8 +174,6 @@ async def test_epic_prefill_sets_cached_version(pool, monkeypatch):
 
     monkeypatch.setattr(ph, "epic_prefill_chunks", fake_prefill)
     monkeypatch.setattr(ph, "epic_verify_cached", fake_verify)
-    await prefill_handler(
-        _job("prefill", gid), Deps(pool=pool, steam_client=None, epic_client=stub)
-    )
+    await prefill_handler(_job("prefill", gid), Deps(pool=pool, epic_client=stub))
     g = await pool.read_one("SELECT cached_version FROM games WHERE id=?", (gid,))
     assert g["cached_version"] == "bv-1"
