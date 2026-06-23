@@ -36,6 +36,15 @@ for handoff clarity. Categories are ordered by impact severity.
 
 - **CORE-2:** removed the dead prefill `force` flag — it was read from a job key the job row never carries (always `False` in production). The agent/driver `force` parameters remain (default `False`) for deliberate future use.
 
+### Fixed — Code-review SEV-2 batch (multi-agent review 2026-06-23) — 2026-06-23
+
+Four SEV-2 robustness/lifecycle defects found by a full-project review, fixed test-first:
+
+- **Security/Logging (LOG-1):** `configure_logging()` was defined but never called in any production entrypoint, so the API and agent ran structlog's default `ConsoleRenderer` — the JSON one-line-per-event contract and the secret-redaction processor were silently absent. Now wired into `create_app()` (API) and `agent.__main__.main()` (agent) before the first log line.
+- **Stability (CORE-1):** `Pool.write_transaction()` left the single writer connection mid-transaction if `COMMIT` failed (e.g. `SQLITE_BUSY`, which doesn't trip writer replacement), wedging every subsequent write with "cannot start a transaction within a transaction" until restart. The COMMIT is now wrapped with a best-effort `ROLLBACK`, mirroring `execute_write`.
+- **Stability (COR-1):** the agent's `POST /v1/steam/validate` 500'd on a single corrupt/foreign `.bin` in the SteamPrefill cache (non-numeric depot field / unreadable file). Each manifest is now parsed in isolation — a bad one is logged and skipped; if every manifest fails, the endpoint returns a graceful `outcome="error"` instead of crashing the validate job.
+- **Memory (MEM-1):** `AgentJobStore` grew unbounded on the long-lived agent (a `_Job` retained forever per prefill/pull/validate). It now bounds retention, evicting the oldest **terminal** (done/failed) jobs past a cap while never dropping a running job mid-flight.
+
 ### Removed — Legacy ValvePython Steam worker (re-arch ③c) — 2026-06-22
 
 The gevent/`steam[client]` subprocess worker is fully deleted now that the data-plane agent owns Steam prefill, validation, and library enumeration via SteamPrefill (re-arch ① + ② + ③a/③b, all live).
