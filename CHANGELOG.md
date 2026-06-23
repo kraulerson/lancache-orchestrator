@@ -19,6 +19,22 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Removed — Code-review SEV-4 housekeeping (review 2026-06-23) — 2026-06-23
+
+- Deleted the dead `adapters/{steam,epic}` + `status/` stub packages (imported nowhere; superseded by `platform/{steam,epic}`).
+- Removed the dead CLI `auth steam` command — it POSTed to `/api/v1/platforms/steam/auth`, deleted in ③c (Steam auth is host-side SteamPrefill now). Epic auth + `auth status` remain.
+
+### Changed — Code-review SEV-4 housekeeping (review 2026-06-23) — 2026-06-23
+
+- **SEC-4:** Epic `AuthCodeBody` now sets `extra="forbid"`, matching the input-validation convention of the other request bodies (an unknown field is rejected with 400).
+- **NAME-6/5:** collapsed the redundant `_steam_library_sync` pass-through wrapper into the real handler, giving symmetric `_steam_library_sync` / `_epic_library_sync` names.
+- **NAME-9:** removed stale `steam_session_path` references from comments/docstrings (the setting was deleted in ③c).
+
+### Documentation — ADR amendments (review 2026-06-23) — 2026-06-23
+
+- **ARCH-1:** ADR-0013 (Steam subprocess isolation) marked **superseded** by re-arch ③c — the gevent/ValvePython worker it describes was deleted.
+- **ARCH-2:** ADR-0001 amended — the Steam-subprocess thread + `adapters/` layer it described are no longer live (re-arch ②/③).
+
 ### Removed — Legacy ValvePython Steam worker (re-arch ③c) — 2026-06-22
 
 The gevent/`steam[client]` subprocess worker is fully deleted now that the data-plane agent owns Steam prefill, validation, and library enumeration via SteamPrefill (re-arch ① + ② + ③a/③b, all live).

@@ -1,6 +1,15 @@
 # ADR-0001: Single-Container Monolith with Event-Loop Discipline
 
-**Status:** Accepted
+> **PARTIALLY AMENDED (2026-06-22, re-arch ②/③).** The core decision (single
+> container, asyncio event-loop discipline) still holds, but two specifics here
+> are out of date: (1) the gevent/ValvePython Steam subprocess thread was
+> **deleted** (③c) — Steam work now runs in a separate data-plane *agent* process
+> via the host SteamPrefill binary (see ADR-0013's supersede note); (2) the
+> `adapters/{steam,epic}` package layer described was never used and has been
+> removed in favour of `platform/{steam,epic}`. See
+> `docs/superpowers/specs/2026-06-19-re-architecture-design.md`.
+
+**Status:** Accepted (Steam-subprocess + adapters/ details amended by re-arch ②/③)
 **Date:** 2026-04-20
 **Phase:** Phase 1 — Architecture & Technical Planning (Step 1.2)
 **Decided by:** Karl (Orchestrator, Light track, personal project)

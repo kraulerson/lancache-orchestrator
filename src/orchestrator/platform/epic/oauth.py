@@ -2,8 +2,7 @@
 
 Pure async httpx. The client_id/secret are the public legendary launcher creds.
 Access/refresh tokens are secret — never put them in log event fields. The refresh
-token persists as JSON at the operator-configured ``epic_session_path`` (0600),
-mirroring ``steam_session_path``.
+token persists as JSON at the operator-configured ``epic_session_path`` (0600).
 """
 
 from __future__ import annotations

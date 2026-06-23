@@ -80,3 +80,15 @@ async def test_get_auth_status(client, populated_pool):
     body = r.json()
     assert "auth_status" in body
     assert body["auth_status"] in ("ok", "expired", "error", "never")
+
+
+async def test_submit_auth_rejects_extra_fields(client):
+    """SEC-4 (review 2026-06-23): AuthCodeBody must reject unknown fields
+    (extra='forbid'), matching the input-validation convention of the other
+    request bodies. The app's RequestValidationError handler maps these to 400."""
+    r = await client.post(
+        "/api/v1/platforms/epic/auth",
+        headers=AUTH,
+        json={"code": "THECODE", "unexpected": "x"},
+    )
+    assert r.status_code == 400

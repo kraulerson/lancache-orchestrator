@@ -170,7 +170,7 @@ class Settings(BaseSettings):
     steam_upstream_silent_days: int = Field(default=15, ge=1)
 
     # --- Epic (F6) ---------------------------------------------------
-    # Refresh token persists to epic_session_path (JSON, like steam_session_path).
+    # Refresh token persists to epic_session_path (JSON).
     epic_token_url: str = Field(
         default="https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token"
     )

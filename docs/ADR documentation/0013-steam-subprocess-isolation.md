@@ -1,6 +1,14 @@
 # ADR-0013: Steam-next Subprocess Isolation Pattern
 
-**Status:** Accepted (BL10 / F1, 2026-05-24)
+> **SUPERSEDED (2026-06-22, re-arch ③c).** The ValvePython/steam-next gevent
+> subprocess worker described here was **deleted**. Steam prefill, validation,
+> and library enumeration now go through the data-plane agent + the host
+> SteamPrefill binary (persistent auth); there is no in-orchestrator Steam
+> subprocess or gevent dependency anymore. This ADR is kept for historical
+> context. See the re-architecture design (`docs/superpowers/specs/2026-06-19-re-architecture-design.md`)
+> and the worker-deletion spec (`docs/superpowers/specs/2026-06-21-steam-worker-deletion-design.md`).
+
+**Status:** Superseded by re-arch ③c (was: Accepted, BL10 / F1, 2026-05-24)
 **Context:** F1 needs steam-next for Steam authentication + manifest
 fetching. steam-next requires `gevent.monkey.patch_minimal()` as the
 first import, which globally patches socket/ssl/dns — incompatible with

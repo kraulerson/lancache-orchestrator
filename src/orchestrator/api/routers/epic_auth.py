@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import structlog
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from orchestrator.api.dependencies import get_pool_dep
 from orchestrator.core.settings import get_settings
@@ -32,6 +32,7 @@ router = APIRouter(prefix="/api/v1/platforms/epic", tags=["epic-auth"])
 
 
 class AuthCodeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     code: str
 
 
