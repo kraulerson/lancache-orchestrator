@@ -58,7 +58,6 @@ async def get_health(
 
     settings = get_settings()
     cache_path = Path(settings.lancache_nginx_cache_path)
-    cache_volume_mounted = cache_path.is_dir()
 
     # ID2 lancache reachability probe. `app.state.lancache_probe` is built
     # in lifespan startup; `probe()` is cache-fast (no IO most of the time)
@@ -102,6 +101,12 @@ async def get_health(
         steam_auth_ok = (
             bool(prefill_driver.auth_status().ok) if prefill_driver is not None else False
         )
+
+    # re-arch ④: the control plane on the LXC has no local lancache cache mount —
+    # the cache lives on the agent. When agent_enabled, "volume mounted" means the
+    # cache-holding agent is reachable (validator_healthy, sourced from the agent,
+    # separately covers cache USABILITY). Flag-off keeps the local is_dir() check.
+    cache_volume_mounted = agent_reachable if settings.agent_enabled else cache_path.is_dir()
 
     body = HealthResponse(
         status="ok" if pool_ok else "degraded",

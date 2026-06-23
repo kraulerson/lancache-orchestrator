@@ -312,3 +312,69 @@ class TestHealthResponseShape:
                 git_sha="x",
                 unknown_extra_field="leak",  # forbidden
             )
+
+
+class TestCacheVolumeMountedAgentAware:
+    """re-arch ④: when agent_enabled, `cache_volume_mounted` reflects the AGENT
+    (which owns the lancache cache mount), not a local path the LXC control plane
+    does not have. Flag-off keeps the local `is_dir()` check."""
+
+    async def test_agent_enabled_cache_mounted_tracks_reachable_agent(
+        self, client, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("ORCH_AGENT_ENABLED", "true")
+        # No local cache dir (the LXC case) — must still report mounted via agent.
+        monkeypatch.setenv("ORCH_LANCACHE_NGINX_CACHE_PATH", str(tmp_path / "absent"))
+        from orchestrator.core.settings import get_settings
+
+        get_settings.cache_clear()
+
+        class _UpAgent:
+            async def auth_status(self):
+                return {"ok": True}
+
+        app_state = client._transport.app.state
+        app_state.agent_client = _UpAgent()
+        try:
+            body = (await client.get("/api/v1/health")).json()
+            assert body["agent_reachable"] is True
+            assert body["cache_volume_mounted"] is True
+        finally:
+            del app_state.agent_client
+            get_settings.cache_clear()
+
+    async def test_agent_enabled_cache_unmounted_when_agent_down(
+        self, client, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("ORCH_AGENT_ENABLED", "true")
+        monkeypatch.setenv("ORCH_LANCACHE_NGINX_CACHE_PATH", str(tmp_path / "absent"))
+        from orchestrator.core.settings import get_settings
+
+        get_settings.cache_clear()
+
+        class _DownAgent:
+            async def auth_status(self):
+                raise RuntimeError("agent down")
+
+        app_state = client._transport.app.state
+        app_state.agent_client = _DownAgent()
+        try:
+            body = (await client.get("/api/v1/health")).json()
+            assert body["agent_reachable"] is False
+            assert body["cache_volume_mounted"] is False
+        finally:
+            del app_state.agent_client
+            get_settings.cache_clear()
+
+    async def test_flag_off_cache_mounted_uses_local_dir(self, client, monkeypatch, tmp_path):
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        monkeypatch.setenv("ORCH_LANCACHE_NGINX_CACHE_PATH", str(cache))
+        from orchestrator.core.settings import get_settings
+
+        get_settings.cache_clear()
+        try:
+            body = (await client.get("/api/v1/health")).json()
+            assert body["cache_volume_mounted"] is True
+        finally:
+            get_settings.cache_clear()
