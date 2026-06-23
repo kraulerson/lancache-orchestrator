@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import sys
 import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
@@ -39,6 +38,7 @@ from orchestrator.api.routers.status import router as status_router
 from orchestrator.api.routers.sync import router as sync_router
 from orchestrator.api.routers.validate_trigger import router as validate_trigger_router
 from orchestrator.core.logging import configure_logging
+from orchestrator.core.net import detect_non_loopback_bind
 from orchestrator.core.settings import Settings, get_settings
 from orchestrator.db import migrate
 from orchestrator.db.pool import (
@@ -61,41 +61,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
-_LOOPBACK_HOST_VALUES = frozenset({"127.0.0.1", "::1", "localhost"})
-
-
-def _detect_non_loopback_bind(settings_api_host: str) -> str | None:
-    """Return the non-loopback host string if any signal indicates it,
-    or None if all known signals say loopback. UAT-3 S2-D — covers
-    settings, the UVICORN_HOST env var, and `--host` in argv.
-    """
-    if settings_api_host not in _LOOPBACK_HOST_VALUES:
-        return settings_api_host
-
-    uvicorn_host = os.environ.get("UVICORN_HOST")
-    if uvicorn_host and uvicorn_host not in _LOOPBACK_HOST_VALUES:
-        return uvicorn_host
-
-    argv = sys.argv
-    for i, arg in enumerate(argv):
-        if arg == "--host" and i + 1 < len(argv):
-            value = argv[i + 1]
-            if value not in _LOOPBACK_HOST_VALUES:
-                return value
-        elif arg.startswith("--host="):
-            value = arg.split("=", 1)[1]
-            if value not in _LOOPBACK_HOST_VALUES:
-                return value
-    return None
-
-
 def _enforce_lan_bind_policy(settings: Settings) -> None:
     """Fail-closed LAN-bind guard (security priority #1). A non-loopback bind
     MUST declare ORCH_ALLOWED_SOURCE_IPS; otherwise refuse to start. A loopback
     bind is always fine. Called at the top of the lifespan, before migrations,
     so a misconfiguration fails fast."""
     log = structlog.get_logger()
-    bind_signal = _detect_non_loopback_bind(settings.api_host)
+    bind_signal = detect_non_loopback_bind(settings.api_host)
     if bind_signal is None:
         return
     if not settings.allowed_source_ips:
