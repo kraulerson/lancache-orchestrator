@@ -66,7 +66,7 @@ async def library_sync_handler(job: dict[str, Any], deps: Deps) -> None:
     raise ValueError(f"library_sync: unsupported platform {platform!r}")
 
 
-async def _steam_library_sync_via_prefill(job: dict[str, Any], deps: Deps) -> None:
+async def _steam_library_sync(job: dict[str, Any], deps: Deps) -> None:
     """Enumerate the Steam library from SteamPrefill's prefilled apps (re-arch
     ③b). SteamPrefill lives on the lancache host (agent side), so this reads the
     agent's prefilled-apps — the distinct app_ids from the manifest .bin cache
@@ -151,9 +151,3 @@ async def _epic_library_sync(job: dict[str, Any], deps: Deps) -> None:
         )
         upserted += 1
     _log.info("library_sync.epic.upserted", job_id=job_id, upserted=upserted)
-
-
-async def _steam_library_sync(job: dict[str, Any], deps: Deps) -> None:
-    """Steam library sync — enumerate the prefilled library via the data-plane
-    agent (re-arch ③b). See `_steam_library_sync_via_prefill`."""
-    return await _steam_library_sync_via_prefill(job, deps)
