@@ -440,43 +440,43 @@ class TestS2DBindDetection:
     signals so the warning fires even when the operator uses bare CLI flags."""
 
     def test_detects_settings_api_host(self):
-        from orchestrator.api.main import _detect_non_loopback_bind
+        from orchestrator.core.net import detect_non_loopback_bind
 
-        assert _detect_non_loopback_bind("0.0.0.0") == "0.0.0.0"  # noqa: S104
-        assert _detect_non_loopback_bind("127.0.0.1") is None
-        assert _detect_non_loopback_bind("::1") is None
-        assert _detect_non_loopback_bind("localhost") is None
+        assert detect_non_loopback_bind("0.0.0.0") == "0.0.0.0"  # noqa: S104
+        assert detect_non_loopback_bind("127.0.0.1") is None
+        assert detect_non_loopback_bind("::1") is None
+        assert detect_non_loopback_bind("localhost") is None
 
     def test_detects_uvicorn_host_env(self, monkeypatch):
-        from orchestrator.api.main import _detect_non_loopback_bind
+        from orchestrator.core.net import detect_non_loopback_bind
 
         monkeypatch.setenv("UVICORN_HOST", "0.0.0.0")  # noqa: S104
-        assert _detect_non_loopback_bind("127.0.0.1") == "0.0.0.0"  # noqa: S104
+        assert detect_non_loopback_bind("127.0.0.1") == "0.0.0.0"  # noqa: S104
 
     def test_detects_argv_host_flag_separate(self, monkeypatch):
         import sys
 
-        from orchestrator.api.main import _detect_non_loopback_bind
+        from orchestrator.core.net import detect_non_loopback_bind
 
         monkeypatch.setattr(sys, "argv", ["uvicorn", "--host", "0.0.0.0", "module:app"])  # noqa: S104
-        assert _detect_non_loopback_bind("127.0.0.1") == "0.0.0.0"  # noqa: S104
+        assert detect_non_loopback_bind("127.0.0.1") == "0.0.0.0"  # noqa: S104
 
     def test_detects_argv_host_flag_equals(self, monkeypatch):
         import sys
 
-        from orchestrator.api.main import _detect_non_loopback_bind
+        from orchestrator.core.net import detect_non_loopback_bind
 
         monkeypatch.setattr(sys, "argv", ["uvicorn", "--host=0.0.0.0", "module:app"])
-        assert _detect_non_loopback_bind("127.0.0.1") == "0.0.0.0"  # noqa: S104
+        assert detect_non_loopback_bind("127.0.0.1") == "0.0.0.0"  # noqa: S104
 
     def test_returns_none_when_all_signals_loopback(self, monkeypatch):
         import sys
 
-        from orchestrator.api.main import _detect_non_loopback_bind
+        from orchestrator.core.net import detect_non_loopback_bind
 
         monkeypatch.delenv("UVICORN_HOST", raising=False)
         monkeypatch.setattr(sys, "argv", ["uvicorn", "--host", "127.0.0.1", "module:app"])
-        assert _detect_non_loopback_bind("127.0.0.1") is None
+        assert detect_non_loopback_bind("127.0.0.1") is None
 
 
 class TestS2JNoTracebackOnSystemExit:

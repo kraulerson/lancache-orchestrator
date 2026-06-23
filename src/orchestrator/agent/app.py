@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from orchestrator.agent.jobs import AgentJobStore
 from orchestrator.agent.routers import health, pull, stat, steam
 from orchestrator.api.middleware import BearerAuthMiddleware, SourceAllowlistMiddleware
+from orchestrator.core.net import detect_non_loopback_bind
 from orchestrator.core.settings import Settings, get_settings
 from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
 from orchestrator.validator.disk_stat import shutdown_cache_stat_executor
@@ -30,14 +31,9 @@ def _enforce_agent_lan_bind_policy(settings: Settings) -> None:
     """Fail-closed: a non-loopback agent bind MUST declare ORCH_ALLOWED_SOURCE_IPS.
 
     Mirrors the API's _enforce_lan_bind_policy but reads settings.agent_bind_host.
-    The bind-detection helper is imported lazily from orchestrator.api.main to keep
-    the agent module import lightweight (api.main pulls in the full control-plane
-    router/scheduler/db tree, which the agent process never needs at import time).
     """
-    from orchestrator.api.main import _detect_non_loopback_bind
-
     log = structlog.get_logger()
-    bind_signal = _detect_non_loopback_bind(settings.agent_bind_host)
+    bind_signal = detect_non_loopback_bind(settings.agent_bind_host)
     if bind_signal is None:
         return
     if not settings.allowed_source_ips:

@@ -20,7 +20,7 @@ from typing import Any
 
 import structlog
 
-from orchestrator.api.dependencies import (
+from orchestrator.api._constants import (
     AUTH_EXEMPT_PATHS,
     BODY_SIZE_CAP_BYTES,
     LOOPBACK_HOSTS,
