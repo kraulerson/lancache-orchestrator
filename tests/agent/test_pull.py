@@ -64,6 +64,38 @@ def test_pull_rejects_ssrf_urls(monkeypatch, bad_url):
     assert resp.status_code == 400
 
 
+@pytest.mark.parametrize(
+    "bad_host",
+    [
+        "169.254.169.254",  # cloud-metadata IP literal
+        "127.0.0.1",  # loopback
+        "10.0.0.5",  # private range
+        "localhost",  # no dot / not an FQDN
+        "internal-service",  # bare internal name
+        "lancache.steamcontent.com:8080",  # port smuggling
+        "evil.com/path",  # path smuggling
+        "",
+    ],
+)
+def test_pull_rejects_ssrf_hosts(monkeypatch, bad_host):
+    """SEC-2/NEW-8 (review 2026-06-23): the chunk `host` becomes the Host header
+    lancache uses to pick an upstream, so a non-FQDN / IP-literal / internal host
+    is an SSRF vector and must be rejected (mirrors the Epic CDN-host guard)."""
+
+    def handler(request):  # must never be reached for a rejected host
+        raise AssertionError("transport must not be hit for a rejected host")
+
+    client = _client(monkeypatch, handler)
+    resp = client.post(
+        "/v1/pull",
+        json={
+            "chunks": [{"url": f"/depot/1/chunk/{SHA}", "host": bad_host}],
+            "user_agent": "UA/1.0",
+        },
+    )
+    assert resp.status_code == 400
+
+
 def test_pull_unknown_job_404(monkeypatch):
     def handler(request):
         return httpx.Response(200)

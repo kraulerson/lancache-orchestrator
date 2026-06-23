@@ -34,3 +34,24 @@ def test_dedups_across_files():
 
 def test_malformed_returns_empty_not_crash():
     assert parse_chunk_shas(b"\x00\x01\x02not-a-manifest") == set()
+
+
+def _wrap_chunk_id(value: bytes) -> bytes:
+    """Build a minimal Manifest→FileData→ChunkData→ChunkId protobuf for `value`
+    (all lengths < 128 → single-byte varints). Wire-type-2 tag for field 1 = 0x0A."""
+    chunkdata = b"\x0a" + bytes([len(value)]) + value
+    filedata = b"\x0a" + bytes([len(chunkdata)]) + chunkdata
+    return b"\x0a" + bytes([len(filedata)]) + filedata
+
+
+def test_rejects_non_hex_and_wrong_length_chunk_ids():
+    """COR-2 (review 2026-06-23): a ChunkId that isn't a 40-char lowercase-hex
+    SHA1 must be dropped, not surfaced as a bogus SHA (which would derive a wrong
+    cache key and report a false miss)."""
+    valid = b"a" * 40
+    non_hex = b"z" * 40  # 40 chars but not hex
+    too_short = b"abc123"
+    uppercase = b"A" * 40  # not lowercase
+    buf = _wrap_chunk_id(valid) + _wrap_chunk_id(non_hex)
+    buf += _wrap_chunk_id(too_short) + _wrap_chunk_id(uppercase)
+    assert parse_chunk_shas(buf) == {"a" * 40}

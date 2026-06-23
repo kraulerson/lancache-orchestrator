@@ -88,3 +88,35 @@ def test_validate_bad_app_id(tmp_path):
     client = _build(tmp_path, cache_all=False)
     r = client.post("/v1/steam/validate", json={"app_id": -5})
     assert r.status_code == 422
+
+
+def test_validate_skips_corrupt_bin_keeps_valid(tmp_path):
+    """COR-1 (review 2026-06-23): a corrupt/foreign .bin in the cache (here a
+    non-numeric depot field that crashes int(parts[2])) must be skipped, not 500
+    the whole request. The valid manifest still validates normally."""
+    client = _build(tmp_path, cache_all=True)
+    # Drop a corrupt sibling .bin for the SAME app, different (bad) depot field.
+    mcache_v1 = tmp_path / "spcache" / "v1"
+    (mcache_v1 / f"{APP}_{APP}_NOTANINT_{GID}.bin").write_bytes(b"\x00\x01garbage")
+    r = client.post("/v1/steam/validate", json={"app_id": APP})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # The good manifest's 60 chunks still validate; the corrupt bin is ignored.
+    assert body["chunks_total"] == 60
+    assert body["chunks_cached"] == 60
+    assert body["outcome"] == "cached"
+
+
+def test_validate_all_bins_corrupt_is_error_not_500(tmp_path):
+    """COR-1: when manifests EXIST but none can be parsed, return a graceful
+    error outcome (not 'cached' and not HTTP 500)."""
+    client = _build(tmp_path, cache_all=False)
+    mcache_v1 = tmp_path / "spcache" / "v1"
+    other = 222222
+    (mcache_v1 / f"{other}_{other}_BADDEPOT_{GID}.bin").write_bytes(b"\xff\xffnope")
+    r = client.post("/v1/steam/validate", json={"app_id": other})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["chunks_total"] == 0
+    assert body["outcome"] == "error"
+    assert body["error"]

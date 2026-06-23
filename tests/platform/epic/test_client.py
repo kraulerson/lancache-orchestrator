@@ -136,3 +136,29 @@ async def test_library_enumerate_does_not_retry_on_non_401(monkeypatch, tmp_path
     with pytest.raises(ep_lib.EpicLibraryError):
         await client.library_enumerate()
     assert len(refresh_calls) == 1  # no forced refresh on a non-401
+
+
+async def test_concurrent_access_token_refreshes_once(monkeypatch, tmp_path):
+    """COR-5 (review 2026-06-23): concurrent callers that both find the access
+    token stale must serialize on a single refresh — Epic refresh tokens rotate
+    (single-use), so a double refresh with the same token double-spends it and
+    loses the session. The second caller must reuse the freshly-refreshed token."""
+    import asyncio
+
+    s = _settings(tmp_path)
+    ep_oauth.save_refresh_token(str(s.epic_session_path), "RT")
+    refresh_calls = {"n": 0}
+
+    async def fake_refresh(rt, settings):
+        refresh_calls["n"] += 1
+        await asyncio.sleep(0.02)  # yield so the sibling coroutine interleaves
+        return AuthTokens("AT", "RT2", "acc", "Karl", "")
+
+    monkeypatch.setattr(ep_oauth, "refresh", fake_refresh)
+    client = EpicClient(s)
+
+    # Two concurrent token fetches on a cold client: the serialized impl refreshes
+    # ONCE and hands the same token to both. The unlocked impl refreshes twice.
+    results = await asyncio.gather(client._access_token(), client._access_token())
+    assert refresh_calls["n"] == 1, f"refreshed {refresh_calls['n']} times (double-spend)"
+    assert results == ["AT", "AT"]

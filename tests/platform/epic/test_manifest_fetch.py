@@ -74,6 +74,33 @@ async def test_fetch_manifest_size_cap(monkeypatch):
         await ep_man.fetch_manifest("TOK", item, s)
 
 
+async def test_read_body_capped_aborts_early_before_buffering_all():
+    """NEW-4 (review 2026-06-23): the manifest size cap must be enforced WHILE
+    streaming, aborting as soon as the running total exceeds the cap — never
+    after the whole (possibly OOM-sized) body is buffered. Here the source would
+    yield 100 chunks; the reader must stop after the cap is first exceeded."""
+    pulled = 0
+
+    async def gen():
+        nonlocal pulled
+        for _ in range(100):
+            pulled += 1
+            yield b"x" * 10
+
+    with pytest.raises(ep_man.EpicManifestError, match="size cap"):
+        await ep_man._read_body_capped(gen(), cap=25)
+    # 10,20,30 -> exceeds 25 at the 3rd chunk; the rest are never pulled.
+    assert pulled == 3
+
+
+async def test_read_body_capped_returns_under_cap():
+    async def gen():
+        yield b"ab"
+        yield b"cd"
+
+    assert await ep_man._read_body_capped(gen(), cap=10) == b"abcd"
+
+
 async def test_fetch_manifest_rejects_non_fqdn_host_before_get(monkeypatch):
     raw = build_manifest(22, make_chunks(1))
     downloaded = {"hit": False}

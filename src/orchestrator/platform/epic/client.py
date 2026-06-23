@@ -7,6 +7,7 @@ and re-persists a rotated refresh token.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, TypeVar
 
@@ -51,30 +52,40 @@ class EpicClient:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._tokens: AuthTokens | None = None
+        # COR-5: serialize refreshes. Epic refresh tokens rotate (single-use), so
+        # two concurrent callers must not both spend the same one — the loser
+        # would invalidate the winner's session.
+        self._refresh_lock = asyncio.Lock()
 
     async def _access_token(self, *, force: bool = False) -> str:
         buffer_sec = self._settings.epic_refresh_buffer_sec
-        if (
-            not force
-            and self._tokens is not None
-            and not _is_expired(self._tokens.expires_at, buffer_sec)
-        ):
+        current = self._tokens
+        if not force and current is not None and not _is_expired(current.expires_at, buffer_sec):
+            return current.access_token
+        async with self._refresh_lock:
+            # Double-check under the lock: another coroutine may have refreshed
+            # while we waited. If the cached token changed (a fresh refresh) and
+            # is usable, reuse it instead of spending the rotating token again.
+            latest = self._tokens
+            if (
+                latest is not None
+                and latest is not current
+                and (force or not _is_expired(latest.expires_at, buffer_sec))
+            ):
+                return latest.access_token
+            path = str(self._settings.epic_session_path)
+            # Prefer the in-memory refresh token (a rotating session), else the
+            # persisted one. Refresh proactively when the access token is near expiry.
+            rt = (latest.refresh_token if latest else None) or oauth.load_refresh_token(path)
+            if not rt:
+                raise EpicNotAuthenticatedError("no stored Epic refresh token")
+            try:
+                self._tokens = await oauth.refresh(rt, self._settings)
+            except oauth.EpicAuthError as e:
+                raise EpicNotAuthenticatedError(str(e)) from e
+            if self._tokens.refresh_token and self._tokens.refresh_token != rt:
+                oauth.save_refresh_token(path, self._tokens.refresh_token)
             return self._tokens.access_token
-        path = str(self._settings.epic_session_path)
-        # Prefer the in-memory refresh token (a rotating session), else the
-        # persisted one. Refresh proactively when the access token is near expiry.
-        rt = (self._tokens.refresh_token if self._tokens else None) or oauth.load_refresh_token(
-            path
-        )
-        if not rt:
-            raise EpicNotAuthenticatedError("no stored Epic refresh token")
-        try:
-            self._tokens = await oauth.refresh(rt, self._settings)
-        except oauth.EpicAuthError as e:
-            raise EpicNotAuthenticatedError(str(e)) from e
-        if self._tokens.refresh_token and self._tokens.refresh_token != rt:
-            oauth.save_refresh_token(path, self._tokens.refresh_token)
-        return self._tokens.access_token
 
     async def library_enumerate(self) -> list[EpicLibraryItem]:
         async def call(token: str) -> list[EpicLibraryItem]:

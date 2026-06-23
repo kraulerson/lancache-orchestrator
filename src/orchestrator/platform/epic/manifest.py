@@ -21,6 +21,8 @@ import structlog
 from orchestrator.platform.epic.models import EpicChunk, EpicLibraryItem, EpicManifest
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from orchestrator.core.settings import Settings
 
 _log = structlog.get_logger(__name__)
@@ -178,6 +180,19 @@ def _client(settings: Settings) -> httpx.AsyncClient:
     return httpx.AsyncClient(**kwargs)
 
 
+async def _read_body_capped(chunks: AsyncIterator[bytes], cap: int) -> bytes:
+    """Accumulate a streamed response body, raising EpicManifestError as soon as
+    the running total exceeds ``cap``. NEW-4: enforce the manifest size cap WHILE
+    downloading so an oversized (potentially OOM-sized) body from a hostile or
+    misbehaving CDN is rejected early — never buffered in full first."""
+    buf = bytearray()
+    async for chunk in chunks:
+        buf.extend(chunk)
+        if len(buf) > cap:
+            raise EpicManifestError(f"epic manifest exceeds size cap (> {cap} bytes)")
+    return bytes(buf)
+
+
 async def fetch_manifest(
     access_token: str, item: EpicLibraryItem, settings: Settings
 ) -> tuple[EpicManifest, str, str]:
@@ -227,16 +242,13 @@ async def fetch_manifest(
         params: dict[str, str] | None = None
         if "queryParams" in entry:
             params = {str(p["name"]): str(p["value"]) for p in entry["queryParams"]}
-        mresp = await client.get(uri, params=params)
-        if mresp.status_code != 200:
-            raise EpicManifestError(f"epic manifest download failed: HTTP {mresp.status_code}")
-        if len(mresp.content) > settings.manifest_size_cap_bytes:
-            raise EpicManifestError(
-                f"epic manifest exceeds size cap "
-                f"({len(mresp.content)} > {settings.manifest_size_cap_bytes} bytes)"
-            )
-        manifest = parse_manifest(mresp.content)
-        manifest.raw = mresp.content
+        async with client.stream("GET", uri, params=params) as mresp:
+            if mresp.status_code != 200:
+                raise EpicManifestError(f"epic manifest download failed: HTTP {mresp.status_code}")
+            # Stream + cap incrementally so an oversized body never OOMs us (NEW-4).
+            content = await _read_body_capped(mresp.aiter_bytes(), settings.manifest_size_cap_bytes)
+        manifest = parse_manifest(content)
+        manifest.raw = content
         manifest.cdn_base = cdn_base
     return manifest, cdn_host, cdn_base
 
