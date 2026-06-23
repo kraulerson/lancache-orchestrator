@@ -42,21 +42,35 @@ class AgentClient:
         # above any real prefill; the orchestrator job's own timeout is the
         # primary guard, this is the client-side backstop.
         self._poll_timeout = poll_timeout_sec
+        # Re-arch ④ §3b-1: hold ONE persistent AsyncClient, built lazily and
+        # reused across calls (and across the many GET polls in
+        # _post_then_poll). On loopback rebuilding per request was harmless;
+        # once the control plane moves to an LXC every call is a cross-host LAN
+        # round-trip, so connection reuse (keep-alive) matters. Closed on the
+        # API lifespan shutdown via aclose().
+        self._client: httpx.AsyncClient | None = None
 
-    def _new_client(self) -> httpx.AsyncClient:
-        kwargs: dict[str, Any] = {
-            "base_url": self._base_url,
-            "headers": self._headers,
-            "timeout": self._timeout,
-        }
-        if self._transport is not None:
-            kwargs["transport"] = self._transport
-        return httpx.AsyncClient(**kwargs)
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            kwargs: dict[str, Any] = {
+                "base_url": self._base_url,
+                "headers": self._headers,
+                "timeout": self._timeout,
+            }
+            if self._transport is not None:
+                kwargs["transport"] = self._transport
+            self._client = httpx.AsyncClient(**kwargs)
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the persistent client. Idempotent — safe if never built."""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def _request(self, method: str, path: str, **kw: Any) -> httpx.Response:
         try:
-            async with self._new_client() as client:
-                resp = await client.request(method, path, **kw)
+            resp = await self._get_client().request(method, path, **kw)
         except httpx.HTTPError as e:
             raise AgentError(f"agent unreachable: {type(e).__name__}") from e
         if resp.status_code >= 400:
@@ -126,5 +140,14 @@ class AgentClient:
 
     async def auth_status(self) -> dict[str, Any]:
         resp = await self._request("GET", "/v1/steam/auth-status")
+        result: dict[str, Any] = resp.json()
+        return result
+
+    async def agent_health(self) -> dict[str, Any]:
+        # re-arch ④: the agent owns the cache mount, so its liveness probe also
+        # reports its local validator self-test. The control plane (an LXC with
+        # no cache mount) reads validator_healthy from here to gate its own
+        # app.state.validator_healthy.
+        resp = await self._request("GET", "/v1/health")
         result: dict[str, Any] = resp.json()
         return result

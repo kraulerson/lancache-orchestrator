@@ -40,7 +40,10 @@ async def sweep_handler(job: dict[str, Any], deps: Deps) -> None:
     if deps.agent_client is None:
         _log.info("sweep.skipped", job_id=job_id, reason="no_agent_client")
         return
-    if not await validator_self_test(settings):
+    # re-arch ④: pass agent_client so that, when agent_enabled, validator health
+    # is sourced from the agent (which owns the cache mount) rather than the
+    # local path — the control plane on the LXC has no local cache mount.
+    if not await validator_self_test(settings, agent_client=deps.agent_client):
         _log.info("sweep.skipped", job_id=job_id, reason="validator_unhealthy")
         return
 
