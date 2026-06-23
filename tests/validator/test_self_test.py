@@ -54,3 +54,74 @@ async def test_true_when_non_empty_cache(tmp_path):
     (tmp_path / "ab").mkdir()
     s = Settings(orchestrator_token=VALID_TOKEN, lancache_nginx_cache_path=tmp_path)
     assert await validator_self_test(s) is True
+
+
+# --- re-arch ④: agent-sourced validator health (control plane has no cache mount) ---
+
+
+class _StubAgent:
+    """Minimal AgentClient stand-in: agent_health() returns a canned body or
+    raises, so we can exercise validator_self_test's agent branch in isolation."""
+
+    def __init__(self, *, healthy: bool | None = None, raises: bool = False) -> None:
+        self._healthy = healthy
+        self._raises = raises
+
+    async def agent_health(self) -> dict[str, object]:
+        if self._raises:
+            raise RuntimeError("agent unreachable")
+        return {"ok": True, "validator_healthy": self._healthy}
+
+
+async def test_agent_enabled_sources_health_from_agent_true(tmp_path):
+    """With agent_enabled and an agent client, health comes from the agent, not
+    the (absent on the LXC) local cache path."""
+    s = Settings(
+        orchestrator_token=VALID_TOKEN,
+        agent_enabled=True,
+        lancache_nginx_cache_path=tmp_path / "does-not-exist",
+    )
+    assert await validator_self_test(s, agent_client=_StubAgent(healthy=True)) is True
+
+
+async def test_agent_enabled_sources_health_from_agent_false(tmp_path):
+    s = Settings(
+        orchestrator_token=VALID_TOKEN,
+        agent_enabled=True,
+        lancache_nginx_cache_path=tmp_path,
+    )
+    assert await validator_self_test(s, agent_client=_StubAgent(healthy=False)) is False
+
+
+async def test_agent_enabled_agent_raises_returns_false(tmp_path):
+    s = Settings(
+        orchestrator_token=VALID_TOKEN,
+        agent_enabled=True,
+        lancache_nginx_cache_path=tmp_path,
+    )
+    assert await validator_self_test(s, agent_client=_StubAgent(raises=True)) is False
+
+
+async def test_flag_off_still_uses_local_cache_path(tmp_path):
+    """Flag-off (default) is byte-identical: the local cache path is the source of
+    truth and the agent_client argument is ignored entirely."""
+    (tmp_path / "ab").mkdir()
+    s = Settings(orchestrator_token=VALID_TOKEN, lancache_nginx_cache_path=tmp_path)
+    # Even passing an agent that would say False, flag-off must read local → True.
+    assert await validator_self_test(s, agent_client=_StubAgent(healthy=False)) is True
+
+
+async def test_agent_health_missing_key_defaults_false(tmp_path):
+    """An agent body that omits `validator_healthy` defaults to False — locks the
+    `.get(..., False)` contract against an older/partial agent response."""
+
+    class _NoKeyAgent:
+        async def agent_health(self) -> dict[str, object]:
+            return {"ok": True}  # no validator_healthy key
+
+    s = Settings(
+        orchestrator_token=VALID_TOKEN,
+        agent_enabled=True,
+        lancache_nginx_cache_path=tmp_path,
+    )
+    assert await validator_self_test(s, agent_client=_NoKeyAgent()) is False
