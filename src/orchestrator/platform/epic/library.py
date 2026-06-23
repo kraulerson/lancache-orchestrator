@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+# COR-4: bound pagination so a misbehaving/hostile API can't loop forever.
+# A real Epic library is a handful of pages; this is a generous backstop.
+_MAX_PAGES = 10_000
+
 
 class EpicLibraryError(Exception):
     """Epic library enumeration failed.
@@ -68,8 +72,9 @@ async def enumerate_library(access_token: str, settings: Settings) -> list[EpicL
     headers = {"Authorization": f"bearer {access_token}"}
     items: list[EpicLibraryItem] = []
     params: dict[str, Any] = {"includeMetadata": "true"}
+    seen_cursors: set[str] = set()
     async with _client(settings) as client:
-        while True:
+        for _page in range(_MAX_PAGES):
             resp = await client.get(settings.epic_library_url, headers=headers, params=params)
             if resp.status_code != 200:
                 raise EpicLibraryError(
@@ -83,6 +88,12 @@ async def enumerate_library(access_token: str, settings: Settings) -> list[EpicL
                     items.append(item)
             cursor = (data.get("responseMetadata") or {}).get("nextCursor")
             if not cursor:
-                break
+                return items
+            # COR-4: a repeated cursor means the API is looping us — fail loudly
+            # rather than paginate forever.
+            if cursor in seen_cursors:
+                raise EpicLibraryError(f"epic library pagination repeated cursor: {cursor!r}")
+            seen_cursors.add(cursor)
             params["cursor"] = cursor
-    return items
+    # COR-4: exhausted the page cap without a terminal (empty-cursor) page.
+    raise EpicLibraryError(f"epic library pagination exceeded {_MAX_PAGES} pages")

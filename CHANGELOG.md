@@ -19,6 +19,23 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Security — Code-review SEV-3 batch: SSRF + OOM hardening (review 2026-06-23) — 2026-06-23
+
+- **SSRF (SEC-2/NEW-8):** the agent `/v1/pull` `host` field becomes the Host header lancache uses to pick an upstream, so an IP-literal / internal / port-or-path host could drive lancache to proxy-fetch arbitrary hosts (e.g. the `169.254.169.254` cloud-metadata endpoint). It's now validated as a plausible public FQDN, mirroring the Epic CDN-host guard (Steam + Epic CDN FQDNs still pass).
+- **OOM (NEW-4):** the Epic manifest size cap was checked only after the full body was buffered. The download now streams with an incremental cap that aborts as soon as the running total exceeds the limit — a hostile/misbehaving CDN can no longer OOM the prefill.
+
+### Fixed — Code-review SEV-3 batch: robustness/lifecycle (review 2026-06-23) — 2026-06-23
+
+- **NEW-1:** the data-plane agent had no lifespan shutdown; on redeploy the dedicated cache-stat thread pool was leaked and in-flight prefill/pull tasks abandoned. The agent now cancels pending background tasks and shuts the executor down on stop.
+- **COR-4:** `enumerate_library` paginated with an unbounded `while True`; a server returning a repeated cursor (or endless distinct cursors) could loop forever. Added repeated-cursor detection + a page-count backstop.
+- **MEM-2/COR-7:** `AgentClient._post_then_poll` polled forever with no deadline and raised a raw `KeyError` on a 202 body missing `job_id`. Added a bounded poll deadline (`poll_timeout_sec`) and a clean `AgentError` on a malformed 202.
+- **COR-2:** the SteamPrefill `.bin` parser surfaced any ChunkId bytes as a "SHA"; a non-hex / wrong-length / uppercase value would derive a wrong cache key and report a false miss. It now drops anything that isn't a 40-char lowercase-hex SHA1.
+- **COR-5:** `EpicClient` token refresh wasn't serialized; concurrent callers double-spent the rotating (single-use) refresh token, invalidating the session. Refreshes are now serialized with a lock + a token-changed double-check so the loser reuses the fresh token.
+
+### Removed — Code-review SEV-3 batch — 2026-06-23
+
+- **CORE-2:** removed the dead prefill `force` flag — it was read from a job key the job row never carries (always `False` in production). The agent/driver `force` parameters remain (default `False`) for deliberate future use.
+
 ### Removed — Legacy ValvePython Steam worker (re-arch ③c) — 2026-06-22
 
 The gevent/`steam[client]` subprocess worker is fully deleted now that the data-plane agent owns Steam prefill, validation, and library enumeration via SteamPrefill (re-arch ① + ② + ③a/③b, all live).

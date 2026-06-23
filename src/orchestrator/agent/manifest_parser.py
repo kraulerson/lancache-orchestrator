@@ -11,6 +11,14 @@ Pure stdlib -- no protobuf library, no ValvePython, no gevent.
 
 from __future__ import annotations
 
+import re
+
+# A Steam chunk id is a 40-char lowercase-hex SHA1. COR-2: anything else (a
+# non-hex / wrong-length / uppercase ChunkId from a corrupt or unexpected buffer)
+# must be dropped — surfacing it as a "SHA" would derive a wrong cache key and
+# report a false miss.
+_SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
+
 
 def _read_varint(b: bytes, i: int) -> tuple[int, int]:
     val = shift = 0
@@ -62,7 +70,9 @@ def parse_chunk_shas(data: bytes) -> set[str]:
                     continue
                 for idf, val in _length_delimited_fields(chunkdata):  # ChunkData.ChunkId
                     if idf == 1:
-                        shas.add(val.decode("ascii", "replace"))
+                        sha = val.decode("ascii", "replace")
+                        if _SHA1_RE.match(sha):
+                            shas.add(sha)
     except (IndexError, ValueError):
         return set()
     return shas

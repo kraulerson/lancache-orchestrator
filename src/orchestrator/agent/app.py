@@ -3,6 +3,7 @@ SteamPrefillDriver and exposes them over HTTP. Runs on the lancache host."""
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,7 @@ from orchestrator.agent.routers import health, pull, stat, steam
 from orchestrator.api.middleware import BearerAuthMiddleware, SourceAllowlistMiddleware
 from orchestrator.core.settings import Settings, get_settings
 from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
+from orchestrator.validator.disk_stat import shutdown_cache_stat_executor
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -63,7 +65,18 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
                 binary=settings.steam_prefill_binary,
                 config_dir=settings.steam_prefill_config_dir,
             )
-        yield
+        try:
+            yield
+        finally:
+            # NEW-1: tear down on shutdown/redeploy — cancel in-flight
+            # fire-and-forget tasks (prefill/pull) and shut down the dedicated
+            # cache-stat thread pool, so neither is leaked across a restart.
+            pending = list(app.state.agent_bg_tasks)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            shutdown_cache_stat_executor()
 
     app = FastAPI(title="lancache-orchestrator data-plane agent", lifespan=_lifespan)
     # Attach eagerly too, so the POST/GET share ONE store instance whether or not
