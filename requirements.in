@@ -1,7 +1,7 @@
 # Runtime dependencies — lancache_orchestrator
 # Pin to exact versions; pip-compile generates hashes in requirements.txt
 fastapi==0.137.1
-uvicorn[standard]==0.39.0
+uvicorn[standard]==0.49.0
 httpx[http2]==0.28.1
 aiosqlite==0.22.1
 APScheduler==3.11.2
