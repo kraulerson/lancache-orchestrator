@@ -321,6 +321,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await close_pool()
             except PoolError as e:
                 log.error("api.shutdown.pool_close_failed", reason=str(e))
+
+        # Close the persistent data-plane agent client (re-arch ④ §3b-1).
+        # Best-effort: a failed close must not break shutdown.
+        with contextlib.suppress(Exception):
+            await agent_client.aclose()
         # Tear down the dedicated cache-stat thread pool (#123.4). Idempotent and
         # safe even if validation never ran (the executor is created lazily).
         shutdown_cache_stat_executor()

@@ -211,3 +211,58 @@ async def test_steam_validate_uses_long_timeout():
     client = _client(handler)
     await client.steam_validate(1)
     assert seen["timeout"]["read"] == 300.0
+
+
+async def test_reuses_single_client_across_calls():
+    """Re-arch ④ §3b-1: the cross-host client is built once and reused, not
+    rebuilt per request."""
+    built = []
+
+    def handler(request):
+        return httpx.Response(200, json={"cached": 1, "missing": 0})
+
+    transport = httpx.MockTransport(handler)
+    client = AgentClient(base_url="http://agent:8780", token=TOKEN, transport=transport)
+    import orchestrator.clients.agent_client as mod
+
+    real = mod.httpx.AsyncClient
+
+    def counting(*a, **k):
+        c = real(*a, **k)
+        built.append(c)
+        return c
+
+    mod.httpx.AsyncClient = counting  # type: ignore[assignment]
+    try:
+        await client.stat(["a" * 32])
+        await client.stat(["b" * 32])
+    finally:
+        mod.httpx.AsyncClient = real  # type: ignore[assignment]
+        await client.aclose()
+    assert len(built) == 1  # ONE client built, reused for both stat calls
+
+
+async def test_aclose_is_idempotent():
+    client = AgentClient(base_url="http://agent:8780", token=TOKEN)
+    await client.aclose()  # never used → no client built, no error
+    await client.aclose()  # twice → safe
+
+
+async def test_aclose_closes_underlying_and_rebuilds_on_next_call():
+    """aclose() actually closes the underlying httpx client, and the next call
+    transparently rebuilds a fresh one."""
+
+    def handler(request):
+        return httpx.Response(200, json={"cached": 1, "missing": 0})
+
+    client = _client(handler)
+    await client.stat(["a" * 32])  # builds the client
+    underlying = client._client
+    assert underlying is not None and not underlying.is_closed
+    await client.aclose()
+    assert underlying.is_closed
+    assert client._client is None
+    # Next call rebuilds transparently.
+    await client.stat(["b" * 32])
+    assert client._client is not None and not client._client.is_closed
+    await client.aclose()
