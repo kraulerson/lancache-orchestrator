@@ -34,14 +34,14 @@ async def _seed(pool, *, platform="steam", status="up_to_date", app_id="730"):
 def _healthy(monkeypatch):
     """Force the validator self-test to pass so the sweep proceeds."""
 
-    async def _ok(settings):
+    async def _ok(settings, *, agent_client=None):
         return True
 
     monkeypatch.setattr("orchestrator.jobs.handlers.sweep.validator_self_test", _ok)
 
 
 async def test_sweep_skips_when_validator_unhealthy(pool, monkeypatch):
-    async def _unhealthy(settings):
+    async def _unhealthy(settings, *, agent_client=None):
         return False
 
     monkeypatch.setattr("orchestrator.jobs.handlers.sweep.validator_self_test", _unhealthy)
@@ -136,6 +136,59 @@ async def test_sweep_error_outcome_not_counted_as_evicted(pool, monkeypatch):
     assert done, "sweep.completed not logged"
     assert done[0].kwargs["evicted"] == 0  # error != eviction
     assert done[0].kwargs["validation_error"] == 1  # surfaced, not silently absent
+
+
+async def test_sweep_skips_when_agent_reports_validator_unhealthy(pool, monkeypatch, tmp_path):
+    """re-arch ④: when agent_enabled, the sweep's pre-flight self-test sources
+    health from the agent (not the local cache path). Even with a perfectly
+    valid LOCAL cache path, an agent reporting validator_healthy=False must skip
+    the sweep — proving the agent_client is actually threaded into the pre-flight
+    gate. If the agent_client were NOT passed, the valid local path would report
+    healthy and the sweep would proceed to call validate_one_game."""
+    import structlog.testing as st
+
+    import orchestrator.jobs.handlers.sweep as sweep_mod
+    from orchestrator.core.settings import Settings
+
+    (tmp_path / "ab").mkdir()  # a perfectly healthy LOCAL cache dir
+
+    def _agent_settings():
+        return Settings(
+            orchestrator_token="a" * 32,
+            agent_enabled=True,
+            lancache_nginx_cache_path=tmp_path,
+        )
+
+    monkeypatch.setattr(sweep_mod, "get_settings", _agent_settings)
+
+    # If the agent gate were bypassed, the (valid) local path would let the sweep
+    # proceed and this would run, flipping the sentinel.
+    ran = {"validated": False}
+
+    async def _track(*a, **k):
+        ran["validated"] = True
+        from orchestrator.validator.disk_stat import ValidationResult
+
+        return ValidationResult(1, 1, 0, "cached", "100", None)
+
+    monkeypatch.setattr(sweep_mod, "validate_one_game", _track)
+
+    class _UnhealthyAgent:
+        async def agent_health(self):
+            return {"ok": True, "validator_healthy": False}
+
+    cap = st.CapturingLogger()
+    monkeypatch.setattr(sweep_mod, "_log", cap)
+
+    await _seed(pool)
+    await sweep_handler(_job(), Deps(pool=pool, agent_client=_UnhealthyAgent()))
+
+    assert ran["validated"] is False  # sweep never reached validation
+    skips = [c for c in cap.calls if c.args and c.args[0] == "sweep.skipped"]
+    assert skips, "sweep.skipped not logged"
+    assert skips[0].kwargs["reason"] == "validator_unhealthy"
+    g = await pool.read_one("SELECT status FROM games WHERE app_id='730'")
+    assert g["status"] == "up_to_date"  # game untouched
 
 
 async def test_sweep_registered():

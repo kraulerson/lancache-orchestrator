@@ -174,6 +174,20 @@ async def test_steam_validate_unreachable_raises():
         await client.steam_validate(1018130)
 
 
+async def test_agent_health_single_call():
+    """re-arch ④: agent_health() does a single GET /v1/health and returns the
+    body, so the control plane can source validator health from the agent."""
+
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.path == "/v1/health"
+        return httpx.Response(200, json={"ok": True, "validator_healthy": True})
+
+    client = _client(handler)
+    body = await client.agent_health()
+    assert body == {"ok": True, "validator_healthy": True}
+
+
 async def test_steam_validate_uses_long_timeout():
     # A large validate (tens of thousands of chunks) stat's many files over NFS
     # and can take well over the default 30s; steam_validate must use a generous

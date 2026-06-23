@@ -278,7 +278,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # cache-mount check forces /health to 503 until restart.
     from orchestrator.validator.self_test import validator_self_test
 
-    app.state.validator_healthy = await validator_self_test(settings)
+    # re-arch ④: pass agent_client so that, when agent_enabled, validator health
+    # is sourced from the agent (which owns the cache mount). On the LXC control
+    # plane there is no local cache mount, so the local stat would always report
+    # unhealthy; the agent is the source of truth.
+    app.state.validator_healthy = await validator_self_test(settings, agent_client=agent_client)
     log.info("api.boot.validator_self_test", healthy=app.state.validator_healthy)
 
     try:

@@ -128,3 +128,12 @@ class AgentClient:
         resp = await self._request("GET", "/v1/steam/auth-status")
         result: dict[str, Any] = resp.json()
         return result
+
+    async def agent_health(self) -> dict[str, Any]:
+        # re-arch ④: the agent owns the cache mount, so its liveness probe also
+        # reports its local validator self-test. The control plane (an LXC with
+        # no cache mount) reads validator_healthy from here to gate its own
+        # app.state.validator_healthy.
+        resp = await self._request("GET", "/v1/health")
+        result: dict[str, Any] = resp.json()
+        return result
