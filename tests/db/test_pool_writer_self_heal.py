@@ -100,3 +100,46 @@ async def test_writer_raises_poolerror_when_heal_open_fails(db_path: Path, monke
             await asyncio.wait_for(
                 pool.execute_write("INSERT INTO _heal_probe (x) VALUES (1)"), timeout=5.0
             )
+
+
+async def test_write_transaction_commit_failure_not_wedged(db_path: Path, monkeypatch):
+    """CORE-1 (review 2026-06-23): a COMMIT failure in `write_transaction()` must
+    roll back the open transaction, not leave the single writer connection wedged
+    mid-transaction. A non-disk-IO COMMIT error (e.g. SQLITE_BUSY) does NOT trip
+    the writer-replacement path, so on the buggy code the connection stays
+    `in_transaction=True` and the NEXT `write_transaction` fails its
+    `BEGIN IMMEDIATE` with "cannot start a transaction within a transaction" —
+    every subsequent write wedged until a process restart."""
+    async with Pool.create(database_path=db_path, readers_count=2) as pool:
+        await pool.execute_write("CREATE TABLE t (x INTEGER)")
+
+        real_execute = aiosqlite.Connection.execute
+        fail = {"on": True}
+
+        async def fail_on_commit(self, sql, parameters=()):
+            if fail["on"] and sql.strip().upper().startswith("COMMIT"):
+                # SQLITE_BUSY — an OperationalError that is NOT a disk-IO error,
+                # so it doesn't trigger writer replacement; exercises the wedge.
+                raise aiosqlite.OperationalError("database is locked")
+            return await real_execute(self, sql, parameters)
+
+        monkeypatch.setattr(aiosqlite.Connection, "execute", fail_on_commit)
+
+        # The COMMIT fails → the write_transaction must raise...
+        with pytest.raises(aiosqlite.OperationalError):
+            async with pool.write_transaction() as tx:
+                await tx.execute("INSERT INTO t (x) VALUES (1)")
+
+        # ...the writer must have been rolled back, not left mid-transaction.
+        assert pool._writer is not None and not pool._writer.in_transaction
+
+        # The fault clears; the NEXT write_transaction must succeed (buggy code:
+        # BEGIN IMMEDIATE raises "cannot start a transaction within a transaction").
+        fail["on"] = False
+        async with asyncio.timeout(5.0):
+            async with pool.write_transaction() as tx:
+                await tx.execute("INSERT INTO t (x) VALUES (2)")
+
+        rows = await pool.read_all("SELECT x FROM t ORDER BY x")
+        # The failed-commit insert (1) was rolled back; only (2) survives.
+        assert [r["x"] for r in rows] == [2]
