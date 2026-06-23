@@ -246,7 +246,6 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
         raise ValueError(f"game {game_id} platform is {game['platform']!r}, not steam")
 
     job_id = job.get("id")
-    force = bool(job.get("force", False))
     await deps.pool.execute_write("UPDATE games SET status='downloading' WHERE id=?", (game_id,))
     _log.info("prefill.started", job_id=job_id, game_id=game_id)
     try:
@@ -256,7 +255,6 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
             game,
             deps,
             prefill_driver,
-            force=force,
             agent_enabled=settings.agent_enabled,
         )
     except Exception as e:
@@ -279,7 +277,6 @@ async def _steam_prefill_inner(
     deps: Deps,
     prefill_driver: SteamPrefillDriver | None,
     *,
-    force: bool,
     agent_enabled: bool,
 ) -> None:
     try:
@@ -293,13 +290,13 @@ async def _steam_prefill_inner(
         # here so the type checker narrows it (mirrors the Epic seam).
         if deps.agent_client is None:
             raise RuntimeError("agent_client is required when agent_enabled")
-        agent_result = await deps.agent_client.steam_prefill([app_id_int], force=force)
+        agent_result = await deps.agent_client.steam_prefill([app_id_int])
         ok = bool(agent_result["ok"])
         raw = str(agent_result.get("raw", ""))
     else:
         if prefill_driver is None:
             raise RuntimeError("prefill_driver is required for prefill handler")
-        driver_result = await prefill_driver.prefill_apps([app_id_int], force=force)
+        driver_result = await prefill_driver.prefill_apps([app_id_int])
         ok = driver_result.ok
         raw = driver_result.raw
     _log.info(

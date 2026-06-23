@@ -67,11 +67,15 @@ async def test_steam_calls_driver_not_downloader(pool):
     assert driver.calls == [([730], False)]
 
 
-async def test_steam_force_flag_passthrough(pool):
+async def test_steam_prefill_ignores_dead_force_key(pool):
+    """CORE-2 (review 2026-06-23): `force` was read from a job key the job row
+    never carries (always False in prod) — a misleading dead flag. The handler
+    no longer threads a per-job force; even a stray 'force' key is ignored and the
+    driver is called with its default (False)."""
     game_id = await _seed_game(pool, app_id="730")
     driver = _StubDriver(ok=True)
     await prefill_handler(_job(game_id, force=True), _steam_deps(pool, driver))
-    assert driver.calls == [([730], True)]
+    assert driver.calls == [([730], False)]
 
 
 async def test_steam_success_enqueues_validate_and_marks_cached(pool):
@@ -162,7 +166,8 @@ async def test_steam_agent_path_taken_not_driver(pool, monkeypatch):
     assert agent.calls == [([730], False)]
 
 
-async def test_steam_agent_force_passthrough(pool, monkeypatch):
+async def test_steam_agent_prefill_ignores_dead_force_key(pool, monkeypatch):
+    """CORE-2: the agent seam likewise no longer threads a per-job force."""
     _agent_enabled(monkeypatch)
     game_id = await _seed_game(pool, app_id="730")
     agent = _FakeAgent(ok=True)
@@ -172,7 +177,7 @@ async def test_steam_agent_force_passthrough(pool, monkeypatch):
         agent_client=agent,
     )
     await prefill_handler(_job(game_id, force=True), deps)
-    assert agent.calls == [([730], True)]
+    assert agent.calls == [([730], False)]
 
 
 async def test_steam_agent_success_same_db_writes(pool, monkeypatch):

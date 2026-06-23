@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 import structlog
@@ -12,6 +13,14 @@ from pydantic import BaseModel, ConfigDict
 from orchestrator.agent.puller import ChunkSpec, pull_chunks
 
 _log = structlog.get_logger(__name__)
+
+# Anti-SSRF host guard: the chunk `host` becomes the Host header lancache uses to
+# pick an upstream CDN, so it must be a plausible public FQDN — never an IP
+# literal (e.g. the 169.254.169.254 cloud-metadata endpoint), a bare/internal
+# name, or a value carrying a port/path. Mirrors the Epic CDN-host guard in
+# platform/epic/manifest.py so Steam + Epic CDN FQDNs pass while internal targets
+# are rejected (SEC-2/NEW-8).
+_HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
 
 router = APIRouter()
 
@@ -43,10 +52,19 @@ def _validate_pull_url(url: str) -> None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid chunk url")
 
 
+def _validate_pull_host(host: str) -> None:
+    """Anti-SSRF: the Host header lancache uses to route to an upstream must be a
+    plausible public FQDN, never an IP literal / internal name / port-or-path
+    smuggle (SEC-2/NEW-8)."""
+    if not _HOSTNAME_RE.match(host.lower()):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid chunk host")
+
+
 @router.post("/v1/pull", status_code=status.HTTP_202_ACCEPTED)
 async def start_pull(body: PullRequest, request: Request) -> dict[str, str]:
     for c in body.chunks:
         _validate_pull_url(c.url)
+        _validate_pull_host(c.host)
     specs = [ChunkSpec(url=c.url, host=c.host) for c in body.chunks]
     store = request.app.state.agent_jobs
     settings = request.app.state.settings

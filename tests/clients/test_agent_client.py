@@ -111,6 +111,39 @@ async def test_failed_job_raises_agent_error():
         await client.pull([{"url": "/x", "host": "h"}], user_agent="UA/1.0")
 
 
+async def test_post_then_poll_missing_job_id_raises_agent_error():
+    """COR-7 (review 2026-06-23): a 202 body without a job_id must surface a
+    clean AgentError, not a raw KeyError."""
+
+    def handler(request):
+        return httpx.Response(202, json={})  # malformed: no job_id
+
+    client = _client(handler)
+    with pytest.raises(AgentError, match="job_id"):
+        await client.pull([{"url": "/x", "host": "h"}], user_agent="UA/1.0")
+
+
+async def test_post_then_poll_deadline_raises_agent_error():
+    """MEM-2 (review 2026-06-23): a job that never reaches a terminal state must
+    not poll forever — a poll deadline bounds it and raises AgentError."""
+
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(202, json={"job_id": "j"})
+        return httpx.Response(200, json={"state": "running", "done": 1, "total": 2})
+
+    transport = httpx.MockTransport(handler)
+    client = AgentClient(
+        base_url="http://agent:8780",
+        token=TOKEN,
+        transport=transport,
+        poll_interval_sec=0.0,
+        poll_timeout_sec=0.0,  # deadline immediately past → one poll then raise
+    )
+    with pytest.raises(AgentError, match="did not finish"):
+        await client.pull([{"url": "/x", "host": "h"}], user_agent="UA/1.0")
+
+
 async def test_steam_validate_single_call():
     def handler(request):
         assert request.url.path == "/v1/steam/validate"

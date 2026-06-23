@@ -8,6 +8,7 @@ crash-loop)."""
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import httpx
@@ -29,12 +30,18 @@ class AgentClient:
         transport: httpx.AsyncBaseTransport | None = None,
         poll_interval_sec: float = 0.5,
         timeout_sec: float = 30.0,
+        poll_timeout_sec: float = 7200.0,
     ) -> None:
         self._base_url = base_url
         self._headers = {"Authorization": f"Bearer {token}"}
         self._transport = transport
         self._poll = poll_interval_sec
         self._timeout = httpx.Timeout(timeout_sec, connect=10.0)
+        # Overall ceiling for a post-then-poll op (prefill/pull). Bounds the poll
+        # loop so a job stuck 'running' can't poll forever (MEM-2). Default safely
+        # above any real prefill; the orchestrator job's own timeout is the
+        # primary guard, this is the client-side backstop.
+        self._poll_timeout = poll_timeout_sec
 
     def _new_client(self) -> httpx.AsyncClient:
         kwargs: dict[str, Any] = {
@@ -58,8 +65,12 @@ class AgentClient:
 
     async def _post_then_poll(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         resp = await self._request("POST", path, json=payload)
-        job_id = resp.json()["job_id"]
+        # COR-7: tolerate a malformed 202 body (no job_id) with a clean error.
+        job_id = resp.json().get("job_id")
+        if not job_id:
+            raise AgentError(f"agent POST {path} returned no job_id")
         poll_path = f"{path}/{job_id}"
+        deadline = time.monotonic() + self._poll_timeout
         while True:
             snap = (await self._request("GET", poll_path)).json()
             state = snap.get("state")
@@ -67,6 +78,11 @@ class AgentClient:
                 return snap.get("result") or {}
             if state == "failed":
                 raise AgentError(f"agent job failed: {snap.get('error')}")
+            # MEM-2: bound the poll loop — a job stuck 'running' must not spin
+            # forever. Checked AFTER terminal states so a job that finishes right
+            # at the deadline still returns its result.
+            if time.monotonic() >= deadline:
+                raise AgentError(f"agent job {job_id} did not finish within {self._poll_timeout}s")
             await asyncio.sleep(self._poll)
 
     async def pull(
