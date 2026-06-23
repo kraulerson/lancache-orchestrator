@@ -1249,8 +1249,22 @@ class Pool:
                 )
                 raise
             else:
-                # nosem: semgrep.no-f-string-sql  hardcoded SQL control, no user input
-                await conn.execute("COMMIT")
+                try:
+                    # nosem: semgrep.no-f-string-sql  hardcoded SQL control, no user input
+                    await conn.execute("COMMIT")
+                except BaseException:
+                    # CORE-1: a COMMIT failure (e.g. SQLITE_BUSY) that isn't a
+                    # disk-IO error doesn't trip writer replacement, so without an
+                    # explicit rollback the single writer is left mid-transaction
+                    # and every later `write_transaction` wedges on BEGIN IMMEDIATE
+                    # ("cannot start a transaction within a transaction"). Roll back
+                    # the open transaction before re-raising, mirroring
+                    # `execute_write`'s commit-failure handling.
+                    with contextlib.suppress(Exception):
+                        # nosem: semgrep.no-f-string-sql  hardcoded SQL control, no user input
+                        await conn.execute("ROLLBACK")
+                    _log.warning("pool.transaction_commit_failed_rolled_back", role="writer")
+                    raise
 
     # --- Raw acquire --------------------------------------------------
 

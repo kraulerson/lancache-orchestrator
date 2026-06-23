@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,6 +19,8 @@ from orchestrator.validator.cache_key import (
     steam_chunk_uri,
 )
 from orchestrator.validator.disk_stat import validate_chunks
+
+_log = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -126,13 +129,26 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
     seen: set[tuple[int, str]] = set()
     paths: list[Path] = []
     versions: list[str] = []
+    parsed_ok = 0
     for binpath in bins:
-        # filename is {app}_{app}_{depot}_{gid}.bin
-        parts = binpath.stem.split("_")
-        depot_id = int(parts[2])
-        gid = parts[3]
+        # filename is {app}_{app}_{depot}_{gid}.bin. A corrupt/foreign .bin (a
+        # non-numeric depot field, a deleted/unreadable file) must NOT 500 the
+        # whole request — skip it and keep validating the rest (COR-1).
+        try:
+            parts = binpath.stem.split("_")
+            depot_id = int(parts[2])
+            gid = parts[3]
+            chunk_shas = parse_chunk_shas(binpath.read_bytes())
+        except (ValueError, IndexError, OSError) as e:
+            _log.warning(
+                "steam_validate.bin_skipped",
+                bin=binpath.name,
+                reason=f"{type(e).__name__}: {e}"[:200],
+            )
+            continue
+        parsed_ok += 1
         versions.append(f"{depot_id}:{gid}")
-        for sha in parse_chunk_shas(binpath.read_bytes()):
+        for sha in chunk_shas:
             key = (depot_id, sha)
             if key in seen:
                 continue
@@ -140,6 +156,18 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
             uri = steam_chunk_uri(depot_id, sha)
             h = cache_key(identifier, uri, slice_range)
             paths.append(cache_path(cache_root, h, levels))
+
+    if parsed_ok == 0:
+        # Manifests existed but none could be parsed — a genuine error, not a
+        # spurious 'cached' (which _classify would return for an empty path set).
+        return {
+            "chunks_total": 0,
+            "chunks_cached": 0,
+            "chunks_missing": 0,
+            "outcome": "error",
+            "versions": "",
+            "error": "manifest_parse_failed",
+        }
 
     cached, missing = await validate_chunks(paths)
     total = len(paths)

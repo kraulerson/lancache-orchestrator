@@ -38,6 +38,7 @@ from orchestrator.api.routers.prefill_trigger import router as prefill_trigger_r
 from orchestrator.api.routers.status import router as status_router
 from orchestrator.api.routers.sync import router as sync_router
 from orchestrator.api.routers.validate_trigger import router as validate_trigger_router
+from orchestrator.core.logging import configure_logging
 from orchestrator.core.settings import Settings, get_settings
 from orchestrator.db import migrate
 from orchestrator.db.pool import (
@@ -332,6 +333,13 @@ def create_app() -> FastAPI:
       - /api/v1/health router mounted
     """
     settings = get_settings()
+
+    # LOG-1: install the project's structlog chain (JSON + secret redaction)
+    # before the first log line. `python -m uvicorn orchestrator.api.main:app`
+    # builds the app via the lazy module `app`, so this is the API process's
+    # real startup hook — without it prod ran structlog's default ConsoleRenderer
+    # and the redaction processor was never installed.
+    configure_logging(log_level=settings.log_level)
 
     app = FastAPI(
         title="lancache_orchestrator API",
