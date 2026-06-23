@@ -17,18 +17,36 @@ import structlog
 from orchestrator.validator.cache_key import cache_key, cache_path
 
 if TYPE_CHECKING:
+    from orchestrator.clients.agent_client import AgentClient
     from orchestrator.core.settings import Settings
 
 _log = structlog.get_logger(__name__)
 
 
-async def validator_self_test(settings: Settings) -> bool:
+async def validator_self_test(
+    settings: Settings, *, agent_client: AgentClient | None = None
+) -> bool:
     """Return True iff the cache mount is usable and key derivation runs.
+
+    re-arch ④: when `settings.agent_enabled` and an agent client is supplied,
+    validator health is sourced from the AGENT (which owns the cache mount),
+    because the control plane now runs on an LXC with no local cache mount —
+    stat'ing `lancache_nginx_cache_path` there would always (wrongly) report
+    unhealthy. With the flag off (default) the behaviour below is unchanged: the
+    local cache path is the source of truth and `agent_client` is ignored.
 
     1. `lancache_nginx_cache_path` must be an existing, listable directory.
     2. The cache-key derivation must run without error (exercises the
        `cache_key` module end-to-end, no I/O).
     """
+    if settings.agent_enabled and agent_client is not None:
+        try:
+            body = await agent_client.agent_health()
+        except Exception as e:
+            _log.error("validator.self_test.agent_unreachable", reason=str(e)[:200])
+            return False
+        return bool(body.get("validator_healthy", False))
+
     root = Path(settings.lancache_nginx_cache_path)
     try:
         if not root.is_dir():
