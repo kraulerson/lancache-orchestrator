@@ -145,6 +145,21 @@ class TestEnqueueValidationSweep:
         pool.execute_write = AsyncMock(side_effect=PoolError("simulated"))
         assert await enqueue_validation_sweep(pool) == 0  # never raises
 
+    async def test_enqueue_sweep_full_writes_payload(self, pool):
+        """`full=True` carries `{"full": true}` on jobs.payload; explicit source."""
+        n = await enqueue_validation_sweep(pool, full=True, source="api")
+        assert n == 1
+        row = await pool.read_one("SELECT payload, source FROM jobs WHERE kind='sweep'")
+        assert row["payload"] == '{"full": true}'
+        assert row["source"] == "api"
+
+    async def test_enqueue_sweep_default_no_payload(self, pool):
+        """The default (weekly-cron) sweep has a NULL payload and scheduler source."""
+        await enqueue_validation_sweep(pool)
+        row = await pool.read_one("SELECT payload, source FROM jobs WHERE kind='sweep'")
+        assert row["payload"] is None
+        assert row["source"] == "scheduler"
+
 
 async def _seed_game(
     pool, app_id, *, owned=1, current="42", cached=None, status="up_to_date", platform="steam"

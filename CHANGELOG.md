@@ -19,6 +19,18 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — Durable Steam manifest store + validate-all backfill (2026-06-24) — 2026-06-24
+
+Lets the orchestrator validate the *entire* prefilled Steam library, not just the subset SteamPrefill currently has a fresh manifest for. SteamPrefill only writes a manifest `.bin` when an app has new content (and treats saved manifests as temporary via `clear-temp`), so its cache covered ~330 of ~1077 prefilled apps; the other ~747 returned `no_manifest_in_cache` and could never be validated though their ~13 TB of chunks were on disk.
+
+- **Durable manifest archive (agent):** a new append-only archive (`steam_manifest_archive_dir`, default `/manifest-archive`) the agent copies every manifest `.bin` it sees into, immune to SteamPrefill `clear-temp`. Validate + enumerate now read the **union** of the live cache and the archive, newest-`.bin`-per-depot by mtime (which also fixes manifest version drift). An absent/unmounted archive dir is a no-op — byte-identical to prior behavior.
+- **Periodic archive sync (agent):** a background task (`manifest_archive_sync_interval_sec`, default 1800 s; `0` disables) copies new manifests into the archive before any pruning, with an mtime-settle guard so half-written files are skipped, append-only and per-file fault-isolated.
+- **`POST /api/v1/sweep` + `orchestrator-cli cache validate-all`:** trigger a one-shot full validation sweep (`payload {"full": true}`) over EVERY steam game — the validate-all backfill that flips genuinely-cached games to `up_to_date` after seeding the archive. The endpoint reports the actual queued sweep's mode and whether this call queued it; the CLI warns when a non-full sweep is already in flight (so a dedup never masquerades as a backfill).
+
+### Changed — F13 sweep gains a full mode (2026-06-24) — 2026-06-24
+
+- The scheduled-sweep handler honors a `full` flag on the job payload: `full` validates all steam games (`… WHERE platform='steam'`), the default keeps the status-gated candidate set (`up_to_date`/`validation_failed`). The weekly cron stays status-gated; `enqueue_validation_sweep(*, full, source)` carries the flag. No migration — reuses the existing `jobs.payload` column and the `idx_jobs_sweep_inflight` dedup.
+
 ### Changed — Re-arch ④ control-plane-to-LXC prep (2026-06-23) — 2026-06-23
 
 Makes the control plane safe to run off-host (the final re-architecture step: brain → Proxmox LXC, agent stays on the UGREEN NAS). Code merged + Phase 0 live-verified on the NAS; the cutover itself is the operator runbook below.

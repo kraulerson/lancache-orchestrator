@@ -107,6 +107,16 @@ class Settings(BaseSettings):
     # The agent reads SteamPrefill's manifest cache (mounted read-only from the
     # host's /root/.cache/SteamPrefill) to source chunk SHAs for validate.
     steam_manifest_cache_dir: Path = Path("/steamprefill-cache")
+    # Durable manifest archive (2026-06-24). SteamPrefill only writes a manifest
+    # .bin when an app has NEW content, so its live cache covers a shrinking
+    # subset of the prefilled library. The agent copies every manifest it sees
+    # into this permanent, append-only archive (immune to SteamPrefill
+    # `clear-temp`); validate reads the UNION of the live cache + this archive.
+    # An absent/unmounted dir is a no-op — byte-identical to pre-archive behavior.
+    steam_manifest_archive_dir: Path = Path("/manifest-archive")
+    # Agent sync cadence (seconds) for copying live manifests into the archive.
+    # 0 disables the periodic sync.
+    manifest_archive_sync_interval_sec: int = Field(default=1800, ge=0)
     # How many UNCACHED apps library_sync looks up from the Steam store per run
     # (the store API is rate-limited ~200/5min; the rest fill on later syncs).
     steam_store_fetch_budget: int = Field(default=150, ge=0)

@@ -19,36 +19,37 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def list_prefilled_app_ids(*, cache_root: Path) -> list[int]:
-    """Distinct app_ids that have a cached manifest .bin (sorted ascending).
-
-    The .bin filename is {app}_{app}_{depot}_{gid}.bin, so the first field is
-    the app_id. These are the prefilled GAMES (real app_ids), unlike
-    successfullyDownloadedDepots.json whose keys are depot_ids.
-    """
-    v1 = cache_root / "v1"
-    if not v1.is_dir():
-        return []
+def list_prefilled_app_ids(*, cache_roots: list[Path]) -> list[int]:
+    """Distinct app_ids with a cached manifest .bin across all roots (sorted)."""
     apps: set[int] = set()
-    for path in v1.glob("*.bin"):
-        first = path.stem.split("_", 1)[0]
-        if first.isdigit():
-            apps.add(int(first))
+    for root in cache_roots:
+        v1 = root / "v1"
+        if not v1.is_dir():
+            continue
+        for path in v1.glob("*.bin"):
+            first = path.stem.split("_", 1)[0]
+            if first.isdigit():
+                apps.add(int(first))
     return sorted(apps)
 
 
-def locate_manifest_bins(app_id: int, *, cache_root: Path) -> list[Path]:
-    """Return the newest manifest .bin per depot for ``app_id`` (empty if none)."""
-    v1 = cache_root / "v1"
-    if not v1.is_dir():
-        return []
+def locate_manifest_bins(app_id: int, *, cache_roots: list[Path]) -> list[Path]:
+    """Newest manifest .bin per depot for ``app_id`` across all roots (empty if none).
+
+    Roots are searched in order; the newest .bin per depot by mtime wins, so a
+    fresher live-cache manifest supersedes an older archived one for the same
+    depot (and stable apps present only in the archive are still found)."""
     newest_per_depot: dict[str, Path] = {}
-    for path in v1.glob(f"{app_id}_{app_id}_*.bin"):
-        parts = path.stem.split("_")
-        if len(parts) != 4:
+    for root in cache_roots:
+        v1 = root / "v1"
+        if not v1.is_dir():
             continue
-        depot = parts[2]
-        current = newest_per_depot.get(depot)
-        if current is None or path.stat().st_mtime > current.stat().st_mtime:
-            newest_per_depot[depot] = path
+        for path in v1.glob(f"{app_id}_{app_id}_*.bin"):
+            parts = path.stem.split("_")
+            if len(parts) != 4:
+                continue
+            depot = parts[2]
+            current = newest_per_depot.get(depot)
+            if current is None or path.stat().st_mtime > current.stat().st_mtime:
+                newest_per_depot[depot] = path
     return list(newest_per_depot.values())

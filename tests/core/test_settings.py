@@ -708,3 +708,17 @@ class TestSteamWorkerDeletionSettings:
     def test_manifest_cache_dir_default(self):
         s = Settings(orchestrator_token="a" * 32)
         assert s.steam_manifest_cache_dir == Path("/steamprefill-cache")
+
+
+class TestManifestArchiveSettings:
+    def test_manifest_archive_defaults(self):
+        s = Settings(orchestrator_token=VALID_TOKEN)
+        assert str(s.steam_manifest_archive_dir) == "/manifest-archive"
+        assert s.manifest_archive_sync_interval_sec == 1800
+
+    def test_manifest_archive_env_override(self, monkeypatch):
+        monkeypatch.setenv("ORCH_STEAM_MANIFEST_ARCHIVE_DIR", "/opt/arch")
+        monkeypatch.setenv("ORCH_MANIFEST_ARCHIVE_SYNC_INTERVAL_SEC", "0")
+        s = Settings(orchestrator_token=VALID_TOKEN)
+        assert str(s.steam_manifest_archive_dir) == "/opt/arch"
+        assert s.manifest_archive_sync_interval_sec == 0

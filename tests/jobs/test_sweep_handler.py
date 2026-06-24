@@ -196,3 +196,54 @@ async def test_sweep_registered():
 
     _register_builtin_handlers()
     assert "sweep" in HANDLERS
+
+
+def _capture_pool(pool, captured):
+    """Wrap pool.read_all to record the candidate SQL the sweep selects with."""
+    real = pool.read_all
+
+    async def _spy(sql, *args):
+        captured["sql"] = sql
+        return await real(sql, *args)
+
+    pool.read_all = _spy
+    return pool
+
+
+async def test_full_payload_selects_all_steam(pool, monkeypatch):
+    """`{"full": true}` payload => the validate-all candidate SQL (every steam
+    game, no status gate)."""
+    import orchestrator.jobs.handlers.sweep as sweep_mod
+
+    _healthy(monkeypatch)
+    captured: dict[str, str] = {}
+    _capture_pool(pool, captured)
+    job = {"id": 1, "kind": "sweep", "payload": '{"full": true}'}
+    await sweep_handler(job, Deps(pool=pool, agent_client=_Agent()))
+    assert captured["sql"] == sweep_mod._CANDIDATE_SQL_FULL
+    assert "status IN" not in captured["sql"]
+
+
+async def test_default_payload_keeps_status_gated(pool, monkeypatch):
+    """A null payload keeps the status-gated weekly-cron candidate SQL."""
+    import orchestrator.jobs.handlers.sweep as sweep_mod
+
+    _healthy(monkeypatch)
+    captured: dict[str, str] = {}
+    _capture_pool(pool, captured)
+    job = {"id": 1, "kind": "sweep", "payload": None}
+    await sweep_handler(job, Deps(pool=pool, agent_client=_Agent()))
+    assert captured["sql"] == sweep_mod._CANDIDATE_SQL
+    assert "status IN ('up_to_date','validation_failed')" in captured["sql"]
+
+
+async def test_malformed_payload_falls_back_to_gated(pool, monkeypatch):
+    """A non-JSON payload must not raise — fall back to the status-gated sweep."""
+    import orchestrator.jobs.handlers.sweep as sweep_mod
+
+    _healthy(monkeypatch)
+    captured: dict[str, str] = {}
+    _capture_pool(pool, captured)
+    job = {"id": 1, "kind": "sweep", "payload": "not json"}
+    await sweep_handler(job, Deps(pool=pool, agent_client=_Agent()))
+    assert captured["sql"] == sweep_mod._CANDIDATE_SQL

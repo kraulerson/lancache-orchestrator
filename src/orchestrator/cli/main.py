@@ -11,7 +11,7 @@ import os
 
 import click
 
-from orchestrator.cli.commands import auth, config, db, game, jobs, library, status
+from orchestrator.cli.commands import auth, cache, config, db, game, jobs, library, status
 
 _DEFAULT_URL = "http://127.0.0.1:8765"
 
@@ -39,6 +39,7 @@ cli.add_command(game.game)
 cli.add_command(jobs.jobs)
 cli.add_command(db.db)
 cli.add_command(config.config)
+cli.add_command(cache.cache)
 
 
 def main() -> None:
