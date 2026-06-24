@@ -8,6 +8,7 @@ recovery. Pre-flight-skips on validator-unhealthy; per-game errors are isolated.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -26,6 +27,10 @@ _CANDIDATE_SQL = (
     "WHERE platform='steam' AND status IN ('up_to_date','validation_failed') "
     "ORDER BY id"
 )
+
+# `full` mode (validate-all backfill, 2026-06-24): validate EVERY steam game,
+# not just the already-cached subset. Carried on jobs.payload `{"full": true}`.
+_CANDIDATE_SQL_FULL = "SELECT id, status FROM games WHERE platform='steam' ORDER BY id"
 
 
 async def sweep_handler(job: dict[str, Any], deps: Deps) -> None:
@@ -47,8 +52,13 @@ async def sweep_handler(job: dict[str, Any], deps: Deps) -> None:
         _log.info("sweep.skipped", job_id=job_id, reason="validator_unhealthy")
         return
 
-    rows = await deps.pool.read_all(_CANDIDATE_SQL)
-    _log.info("sweep.started", job_id=job_id, candidates=len(rows))
+    try:
+        full = bool(json.loads(job.get("payload") or "{}").get("full", False))
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        full = False
+    candidate_sql = _CANDIDATE_SQL_FULL if full else _CANDIDATE_SQL
+    rows = await deps.pool.read_all(candidate_sql)
+    _log.info("sweep.started", job_id=job_id, candidates=len(rows), full=full)
 
     sem = asyncio.Semaphore(settings.sweep_batch_size)
     counts = {"cached": 0, "partial": 0, "missing": 0, "error": 0}

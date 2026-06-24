@@ -44,3 +44,38 @@ async def test_lifespan_shutdown_tears_down_cache_stat_executor(monkeypatch):
     async with app.router.lifespan_context(app):
         pass
     assert calls["n"] == 1
+
+
+# --- Durable manifest archive: periodic sync task wiring ---
+
+
+async def test_sync_task_wired_when_enabled():
+    app = create_agent_app(
+        settings=Settings(orchestrator_token=TOKEN, manifest_archive_sync_interval_sec=1800)
+    )
+    async with app.router.lifespan_context(app):
+        assert len(app.state.agent_bg_tasks) == 1  # the sync loop task
+
+
+async def test_sync_task_absent_when_disabled():
+    app = create_agent_app(
+        settings=Settings(orchestrator_token=TOKEN, manifest_archive_sync_interval_sec=0)
+    )
+    async with app.router.lifespan_context(app):
+        assert len(app.state.agent_bg_tasks) == 0
+
+
+async def test_loop_runs_immediately(monkeypatch):
+    import contextlib
+    from pathlib import Path
+
+    import orchestrator.agent.manifest_archive as marc
+
+    calls = []
+    monkeypatch.setattr(marc, "sync_manifests_to_archive", lambda *a, **k: calls.append(1) or 0)
+    task = asyncio.create_task(marc.manifest_archive_sync_loop(Path("/live"), Path("/arch"), 3600))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert calls  # ran once immediately, before the first sleep

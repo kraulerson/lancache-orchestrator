@@ -57,22 +57,28 @@ async def enqueue_library_sync(pool: Pool) -> int:
         return 0
 
 
-async def enqueue_validation_sweep(pool: Pool) -> int:
+async def enqueue_validation_sweep(
+    pool: Pool, *, full: bool = False, source: str = "scheduler"
+) -> int:
     """Insert a `sweep` job row if none is queued/running (F13).
 
-    Mirrors `enqueue_library_sync`: at most one in-flight sweep, DB-enforced by
-    `idx_jobs_sweep_inflight` (migration 0005) via `ON CONFLICT DO NOTHING`.
-    Returns the rowcount (1 queued / 0 deduped-or-failed). Never raises — a
-    failing scheduler tick must not degrade APScheduler. The sweep is not
-    platform-scoped, so `platform` is left NULL.
+    ``full=True`` validates EVERY steam game (the validate-all backfill), carried
+    on the job payload `{"full": true}`; the weekly cron uses the default
+    (status-gated) sweep. Mirrors `enqueue_library_sync`: at most one in-flight
+    sweep, DB-enforced by `idx_jobs_sweep_inflight` (migration 0005) via
+    `ON CONFLICT DO NOTHING`. Returns the rowcount (1 queued / 0 deduped-or-failed).
+    Never raises — a failing scheduler tick must not degrade APScheduler. The
+    sweep is not platform-scoped, so `platform` is left NULL.
     """
+    payload = '{"full": true}' if full else None
     try:
         inserted = await pool.execute_write(
-            "INSERT INTO jobs (kind, state, source) "
-            "VALUES ('sweep', 'queued', 'scheduler') ON CONFLICT DO NOTHING"
+            "INSERT INTO jobs (kind, state, source, payload) "
+            "VALUES ('sweep', 'queued', ?, ?) ON CONFLICT DO NOTHING",
+            (source, payload),
         )
         if inserted:
-            _log.info("scheduler.sweep.queued")
+            _log.info("scheduler.sweep.queued", full=full, source=source)
         else:
             _log.info("scheduler.sweep.dedup_skip")
         return inserted

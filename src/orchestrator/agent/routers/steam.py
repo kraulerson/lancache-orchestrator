@@ -83,8 +83,9 @@ async def auth_status(request: Request) -> dict[str, Any]:
 async def prefilled_apps(request: Request) -> dict[str, list[int]]:
     """Distinct app_ids with a cached manifest (real game app_ids from the .bin
     filenames) — the enumeration source for library_sync."""
-    manifest_cache = Path(request.app.state.settings.steam_manifest_cache_dir)
-    return {"app_ids": list_prefilled_app_ids(cache_root=manifest_cache)}
+    s = request.app.state.settings
+    roots = [Path(s.steam_manifest_cache_dir), Path(s.steam_manifest_archive_dir)]
+    return {"app_ids": list_prefilled_app_ids(cache_roots=roots)}
 
 
 class SteamValidateRequest(BaseModel):
@@ -109,9 +110,9 @@ def _classify(total: int, cached: int) -> str:
 async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     cache_root = Path(settings.lancache_nginx_cache_path)
-    manifest_cache = Path(settings.steam_manifest_cache_dir)
+    roots = [Path(settings.steam_manifest_cache_dir), Path(settings.steam_manifest_archive_dir)]
 
-    bins = locate_manifest_bins(body.app_id, cache_root=manifest_cache)
+    bins = locate_manifest_bins(body.app_id, cache_roots=roots)
     if not bins:
         return {
             "chunks_total": 0,

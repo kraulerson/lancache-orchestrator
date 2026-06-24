@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import FastAPI
 
 from orchestrator.agent.jobs import AgentJobStore
+from orchestrator.agent.manifest_archive import manifest_archive_sync_loop
 from orchestrator.agent.routers import health, pull, stat, steam
 from orchestrator.api.middleware import BearerAuthMiddleware, SourceAllowlistMiddleware
 from orchestrator.core.net import detect_non_loopback_bind
@@ -61,6 +63,17 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
                 binary=settings.steam_prefill_binary,
                 config_dir=settings.steam_prefill_config_dir,
             )
+        interval = settings.manifest_archive_sync_interval_sec
+        if interval > 0:
+            sync_task = asyncio.create_task(
+                manifest_archive_sync_loop(
+                    Path(settings.steam_manifest_cache_dir),
+                    Path(settings.steam_manifest_archive_dir),
+                    interval,
+                )
+            )
+            app.state.agent_bg_tasks.add(sync_task)
+            sync_task.add_done_callback(app.state.agent_bg_tasks.discard)
         try:
             yield
         finally:
