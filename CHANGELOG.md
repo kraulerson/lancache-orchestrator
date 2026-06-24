@@ -19,6 +19,18 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Changed — Re-arch ④ control-plane-to-LXC prep (2026-06-23) — 2026-06-23
+
+Makes the control plane safe to run off-host (the final re-architecture step: brain → Proxmox LXC, agent stays on the UGREEN NAS). Code merged + Phase 0 live-verified on the NAS; the cutover itself is the operator runbook below.
+
+- **Validator health gate is agent-aware (§3a):** when `agent_enabled`, `validator_self_test` sources `validator_healthy` from the data-plane agent's `GET /v1/health` (which now reports it, run against the agent's mounted cache) instead of stat-ing a local cache path the LXC won't have. The boot gate and the F13 sweep both pass `agent_client`; flag-off keeps the local-stat path byte-identical.
+- **AgentClient connection reuse (§3b-1):** one persistent `httpx.AsyncClient` reused across calls, closed on lifespan shutdown — the cross-host control→agent link no longer rebuilds a client per request. The per-call 300s validate timeout is preserved.
+- **Agent import decoupling (§3b-2 / ARCH-4):** moved `detect_non_loopback_bind` → `core/net.py` and the pure middleware constants → `api/_constants.py` so the data-plane agent process no longer transitively imports `api.main` or `db.pool` (proven by a subprocess import-graph guard).
+
+### Documentation — LXC cutover runbook (2026-06-23) — 2026-06-23
+
+- `docs/deploy/lxc-cutover-runbook.md`: the operator cutover (provision → parallel bring-up → atomic flip → live-verify) + rollback for moving the control plane to the Proxmox LXC.
+
 ### Removed — Code-review SEV-4 housekeeping (review 2026-06-23) — 2026-06-23
 
 - Deleted the dead `adapters/{steam,epic}` + `status/` stub packages (imported nowhere; superseded by `platform/{steam,epic}`).
