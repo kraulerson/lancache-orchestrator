@@ -120,3 +120,70 @@ def test_validate_all_bins_corrupt_is_error_not_500(tmp_path):
     assert body["chunks_total"] == 0
     assert body["outcome"] == "error"
     assert body["error"]
+
+
+# --- .shas sidecar manifests (apps SteamPrefill never cached) ---
+
+SHAS_APP, SHAS_DEPOT, SHAS_GID = 700330, 700331, 8123456789012345678
+_SHAS_CHUNKS = [f"{i:040x}" for i in range(1, 13)]  # 12 distinct lowercase 40-hex SHAs
+
+
+def _build_shas(tmp_path: Path, *, cache_all: bool) -> TestClient:
+    """Like _build, but the only manifest for SHAS_APP is a .shas sidecar."""
+    mcache = tmp_path / "spcache"
+    (mcache / "v1").mkdir(parents=True)
+    (mcache / "v1" / f"{SHAS_APP}_{SHAS_APP}_{SHAS_DEPOT}_{SHAS_GID}.shas").write_text(
+        "\n".join(_SHAS_CHUNKS) + "\n"
+    )
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "successfullyDownloadedDepots.json").write_text("{}")
+
+    cache_root = tmp_path / "lancache"
+    levels, ident, slice_sz = "2:2", "steam", 10_485_760
+    if cache_all:
+        slice_range = slice_range_zero(slice_sz)
+        for sha in _SHAS_CHUNKS:
+            h = cache_key(ident, steam_chunk_uri(SHAS_DEPOT, sha), slice_range)
+            p = cache_path(cache_root, h, levels)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"data")
+    else:
+        cache_root.mkdir()
+
+    settings = Settings(
+        orchestrator_token=TOKEN,
+        lancache_nginx_cache_path=cache_root,
+        cache_levels=levels,
+        steam_cache_identifier=ident,
+        cache_slice_size_bytes=slice_sz,
+        steam_manifest_cache_dir=mcache,
+        steam_prefill_config_dir=cfg,
+    )
+    app = create_agent_app(settings=settings)
+    client = TestClient(app)
+    client.headers.update({"Authorization": f"Bearer {TOKEN}"})
+    return client
+
+
+def test_validate_shas_all_cached(tmp_path):
+    """A .shas-backed app (no .bin) validates against a real cache outcome —
+    NOT 'no_manifest_in_cache'."""
+    client = _build_shas(tmp_path, cache_all=True)
+    r = client.post("/v1/steam/validate", json={"app_id": SHAS_APP})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["chunks_total"] == len(_SHAS_CHUNKS)
+    assert body["chunks_cached"] == len(_SHAS_CHUNKS)
+    assert body["chunks_missing"] == 0
+    assert body["outcome"] == "cached"
+    assert body["error"] is None
+    assert body["versions"] == f"{SHAS_DEPOT}:{SHAS_GID}"
+
+
+def test_validate_shas_all_missing(tmp_path):
+    client = _build_shas(tmp_path, cache_all=False)
+    body = client.post("/v1/steam/validate", json={"app_id": SHAS_APP}).json()
+    assert body["chunks_total"] == len(_SHAS_CHUNKS)
+    assert body["chunks_cached"] == 0
+    assert body["outcome"] == "missing"
