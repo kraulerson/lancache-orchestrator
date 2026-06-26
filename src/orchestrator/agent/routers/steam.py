@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.agent.manifest_locator import list_prefilled_app_ids, locate_manifest_bins
-from orchestrator.agent.manifest_parser import parse_chunk_shas
+from orchestrator.agent.manifest_parser import parse_chunk_shas, parse_shas
 from orchestrator.validator.cache_key import (
     cache_key,
     cache_path,
@@ -132,14 +132,19 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
     versions: list[str] = []
     parsed_ok = 0
     for binpath in bins:
-        # filename is {app}_{app}_{depot}_{gid}.bin. A corrupt/foreign .bin (a
-        # non-numeric depot field, a deleted/unreadable file) must NOT 500 the
-        # whole request — skip it and keep validating the rest (COR-1).
+        # filename is {app}_{app}_{depot}_{gid}.{bin,shas}. A corrupt/foreign
+        # manifest (a non-numeric depot field, a deleted/unreadable file) must
+        # NOT 500 the whole request — skip it and keep validating the rest
+        # (COR-1). .shas is the fetcher's sidecar (one SHA per line); .bin is
+        # SteamPrefill's protobuf — same {app}_{app}_{depot}_{gid} field layout.
         try:
             parts = binpath.stem.split("_")
             depot_id = int(parts[2])
             gid = parts[3]
-            chunk_shas = parse_chunk_shas(binpath.read_bytes())
+            if binpath.suffix == ".shas":
+                chunk_shas = parse_shas(binpath.read_text())
+            else:
+                chunk_shas = parse_chunk_shas(binpath.read_bytes())
         except (ValueError, IndexError, OSError) as e:
             _log.warning(
                 "steam_validate.bin_skipped",

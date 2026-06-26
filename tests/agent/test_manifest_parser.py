@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from orchestrator.agent.manifest_parser import parse_chunk_shas
+from orchestrator.agent.manifest_parser import parse_chunk_shas, parse_shas
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_manifest.bin"
 
@@ -55,3 +55,36 @@ def test_rejects_non_hex_and_wrong_length_chunk_ids():
     buf = _wrap_chunk_id(valid) + _wrap_chunk_id(non_hex)
     buf += _wrap_chunk_id(too_short) + _wrap_chunk_id(uppercase)
     assert parse_chunk_shas(buf) == {"a" * 40}
+
+
+# --- .shas sidecar manifest parser (one 40-hex SHA1 per line) ---
+
+
+def test_parse_shas_multiline_blob():
+    a, b, c = "a" * 40, "b" * 40, "c" * 40
+    text = f"{a}\n{b}\n{c}\n"
+    assert parse_shas(text) == {a, b, c}
+
+
+def test_parse_shas_ignores_blank_short_and_non_hex_lines():
+    valid = "d" * 40
+    text = "\n".join(
+        [
+            valid,
+            "",  # blank
+            "   ",  # whitespace only
+            "abc123",  # too short
+            "z" * 40,  # 40 chars but not hex
+            ("A" * 40),  # uppercase -> not lowercase hex
+            f"  {valid}  ",  # surrounding whitespace stripped -> still valid
+        ]
+    )
+    assert parse_shas(text) == {valid}
+
+
+def test_parse_shas_empty_is_empty_set():
+    assert parse_shas("") == set()
+
+
+def test_parse_shas_returns_set():
+    assert isinstance(parse_shas("e" * 40), set)
