@@ -60,7 +60,7 @@ class SchedulerManager:
         enabled: bool,
         library_sync_interval_sec: int,
         validation_sweep_enabled: bool = True,
-        validation_sweep_cron: str = "0 3 * * 0",
+        validation_sweep_cron: str = "0 3,9,15,21 * * *",
         scheduled_prefill_enabled: bool = True,
     ) -> None:
         self._pool = pool
