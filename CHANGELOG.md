@@ -19,6 +19,17 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Changed — Validator scopes to prefilled depots; reads `.shas` manifests (2026-06-29) — 2026-06-29
+
+Fixes multi-language Steam titles showing a permanent "Check failed". The validator located **every** depot in an app's manifest set, but SteamPrefill only prefills the operator's selected language/OS depots — so other-language depots (never downloaded) dragged games like Dota 2 (44% cached) and BG3 (53%) to a perpetual `partial`/`missing`.
+
+- **Depot-scoping (`agent/routers/steam.py`):** validation now stats chunks **per depot** and **excludes any depot with zero chunk files on disk** (never prefilled — all chunks absent). Exclusion gates on *presence*, not readability: a depot whose files exist but are unreadable (mode-000, #76/#128) or empty is **kept** and counted in full, so that corruption stays a visible gap instead of being silently dropped as "never prefilled". If *no* depot has any files present the app is `missing` over the union (never a false `cached`); an empty manifest set is still `cached`. Excluded depots are logged (`steam_validate.depots_excluded`). (A depot fully evicted to 0 files is indistinguishable from never-prefilled and is excluded — accepted, as whole-depot eviction-to-zero is rare under per-file LRU.)
+- **`.shas` manifest support** (lands via the independent-fetcher commit): `locate_manifest_bins` globs both `.bin` and `.shas`, and the validate handler parses `.shas` sidecars (one SHA per line) via `parse_shas` — letting the validator cover apps SteamPrefill never wrote a `.bin` for.
+
+### Changed — Scheduled validation sweep now every 6 hours (2026-06-29) — 2026-06-29
+
+- `validation_sweep_cron` default `"0 3 * * 0"` (weekly) → `"0 3,9,15,21 * * *"` (every 6 h at 03/09/15/21 UTC), offset from the host prefill crons (steam 0/6/12/18, epic 1/7/13/19, gog 4/16) so a sweep never overlaps a prefill burst. Keeps cache statuses fresh as eviction/permission drift accumulates. Override via `ORCH_VALIDATION_SWEEP_CRON`.
+
 ### Added — Latest-validation chunk counts on `GET /api/v1/games` (2026-06-28) — 2026-06-28
 
 `GET /api/v1/games` now returns `chunks_cached` and `chunks_total` per game, sourced from the **newest** `validation_history` row (by `started_at`, `id` tie-break) via correlated scalar subqueries — same EXISTS-not-JOIN rationale as `blocked`, served by `idx_vh_game`. Both are `null` for games that have never been validated. This lets a UI render a "Partial · N%" badge for `validation_failed` games (and a cached-fraction for any game) without a second round-trip to `validation_history`. Purely additive to the response model; no migration.

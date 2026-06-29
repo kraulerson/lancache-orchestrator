@@ -57,6 +57,13 @@ def _length_delimited_fields(b: bytes) -> list[tuple[int, bytes]]:
     return out
 
 
+def parse_shas(text: str) -> set[str]:
+    """Extract chunk SHA1s from a ``.shas`` sidecar manifest: one lowercase
+    40-hex SHA1 per line. Blank/short/non-hex/uppercase lines are dropped
+    (same COR-2 guard as the .bin parser). Returns the deduped set."""
+    return {line.strip() for line in text.splitlines() if _SHA1_RE.match(line.strip())}
+
+
 def parse_chunk_shas(data: bytes) -> set[str]:
     """Extract the deduped set of chunk SHA1 hex strings from a .bin. A
     malformed/unrecognized buffer yields an empty set (never raises)."""

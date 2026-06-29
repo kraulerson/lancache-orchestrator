@@ -99,3 +99,34 @@ def test_list_prefilled_app_ids_union(tmp_path):
     _write_bin(live, 440, 441, 1)
     _write_bin(arch, 730, 731, 1)
     assert list_prefilled_app_ids(cache_roots=[live, arch]) == [440, 730]
+
+
+# --- .shas sidecar manifests (fetcher writes {app}_{app}_{depot}_{gid}.shas) ---
+
+
+def test_locates_shas_only_app(tmp_path):
+    # An app whose ONLY manifest is a .shas (SteamPrefill never cached it).
+    _write(tmp_path, "900_900_901_777.shas", 1000)
+    found = [p.name for p in locate_manifest_bins(900, cache_roots=[tmp_path])]
+    assert found == ["900_900_901_777.shas"]
+
+
+def test_bin_and_shas_same_depot_newest_mtime_wins(tmp_path):
+    # A .bin and a .shas for the SAME app+depot de-dupe to the newer mtime.
+    _write(tmp_path, "440_440_440_111.bin", 1000)
+    newer = _write(tmp_path, "440_440_440_222.shas", 2000)
+    found = locate_manifest_bins(440, cache_roots=[tmp_path])
+    assert [p.name for p in found] == [newer.name]
+
+
+def test_bin_wins_when_bin_is_newer_than_shas(tmp_path):
+    _write(tmp_path, "440_440_440_111.shas", 1000)
+    newer = _write(tmp_path, "440_440_440_222.bin", 2000)
+    found = locate_manifest_bins(440, cache_roots=[tmp_path])
+    assert [p.name for p in found] == [newer.name]
+
+
+def test_shas_only_app_in_list_prefilled_app_ids(tmp_path):
+    _write(tmp_path, "440_440_440_111.bin", 1000)  # .bin app
+    _write(tmp_path, "900_900_901_777.shas", 1000)  # .shas-only app
+    assert list_prefilled_app_ids(cache_roots=[tmp_path]) == [440, 900]

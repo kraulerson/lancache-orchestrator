@@ -169,7 +169,10 @@ class Settings(BaseSettings):
     scheduler_library_sync_interval_sec: int = Field(default=21600, ge=60, le=86400)
     # F13 — scheduled validation sweep.
     validation_sweep_enabled: bool = True
-    validation_sweep_cron: str = "0 3 * * 0"  # 5-field cron (min hour dom mon dow), UTC
+    # Every 6h at 03/09/15/21 UTC — offset from the host prefill crons
+    # (steam 0/6/12/18, epic 1/7/13/19, gog 4/16) so a sweep never overlaps a
+    # prefill burst. 5-field cron (min hour dom mon dow), UTC.
+    validation_sweep_cron: str = "0 3,9,15,21 * * *"
     # F8: the scheduled prefill driver runs on the library-sync interval.
     scheduled_prefill_enabled: bool = True
     sweep_batch_size: int = Field(default=10, ge=1)

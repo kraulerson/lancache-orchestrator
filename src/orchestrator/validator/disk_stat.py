@@ -69,15 +69,18 @@ def shutdown_cache_stat_executor() -> None:
         _cache_stat_executor = None
 
 
-def _stat_batch(paths: list[Path]) -> tuple[int, int]:
-    """Count (cached, errors) for a batch. Runs in a thread.
+def _stat_batch(paths: list[Path]) -> tuple[int, int, int]:
+    """Count (cached, present, errors) for a batch. Runs in a thread.
 
-    Cached = a regular file with non-empty size. Symlinks are NOT followed
-    (a cache path that is a symlink is not a genuine cached chunk).
-    `errors` counts unexpected OSErrors (e.g. EACCES) — a plain missing
-    file is not an error.
+    cached  = a regular file with non-empty size AND the owner-read bit set.
+    present = the file exists on disk (stat succeeds, not a symlink) regardless
+              of size/mode — lets callers tell a never-prefilled chunk (absent)
+              from a prefilled-but-unreadable one (mode-000) or an empty one.
+    errors  = unexpected OSErrors (e.g. EACCES on a directory, EIO). A plain
+              missing file is not an error.
     """
     cached = 0
+    present = 0
     errors = 0
     for p in paths:
         try:
@@ -85,6 +88,7 @@ def _stat_batch(paths: list[Path]) -> tuple[int, int]:
             if p.is_symlink():
                 continue
             st = p.stat()
+            present += 1  # file exists on disk (stat() needs only dir traversal)
             # F5/#128: lancache (www-data, the file owner) must be able to
             # READ the file to serve it. ~1.7% of cache files are mode-000 —
             # they exist with size>0 but are unreadable, so lancache returns
@@ -98,7 +102,7 @@ def _stat_batch(paths: list[Path]) -> tuple[int, int]:
             pass  # plain cache miss — expected, not an error
         except OSError:
             errors += 1  # EACCES, EIO, etc. — surfaced via the run WARN
-    return cached, errors
+    return cached, present, errors
 
 
 async def validate_chunks(paths: list[Path], *, batch_size: int = 256) -> tuple[int, int]:
@@ -115,12 +119,36 @@ async def validate_chunks(paths: list[Path], *, batch_size: int = 256) -> tuple[
     errors = 0
     for i in range(0, len(paths), batch_size):
         batch = paths[i : i + batch_size]
-        batch_cached, batch_errors = await loop.run_in_executor(executor, _stat_batch, batch)
+        batch_cached, _batch_present, batch_errors = await loop.run_in_executor(
+            executor, _stat_batch, batch
+        )
         cached += batch_cached
         errors += batch_errors
     if errors:
         _log.warning("validate.stat_errors", error_count=errors, total=len(paths))
     return cached, len(paths) - cached
+
+
+async def validate_chunks_scoped(paths: list[Path], *, batch_size: int = 256) -> tuple[int, int]:
+    """Return (cached, present) for a chunk list.
+
+    ``present`` counts files that exist on disk regardless of readability, so a
+    caller can distinguish a never-prefilled depot (present == 0, all absent)
+    from one whose files exist but aren't valid/readable (present > 0 — e.g.
+    mode-000 corruption, #76/#128). The latter must stay visible as a real gap,
+    NOT be silently dropped as "never prefilled". Same bounded executor + batching
+    as `validate_chunks`.
+    """
+    loop = asyncio.get_running_loop()
+    executor = _get_cache_stat_executor()
+    cached = 0
+    present = 0
+    for i in range(0, len(paths), batch_size):
+        batch = paths[i : i + batch_size]
+        batch_cached, batch_present, _err = await loop.run_in_executor(executor, _stat_batch, batch)
+        cached += batch_cached
+        present += batch_present
+    return cached, present
 
 
 async def validate_game(

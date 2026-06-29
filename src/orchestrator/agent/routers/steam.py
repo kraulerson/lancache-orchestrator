@@ -11,14 +11,14 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.agent.manifest_locator import list_prefilled_app_ids, locate_manifest_bins
-from orchestrator.agent.manifest_parser import parse_chunk_shas
+from orchestrator.agent.manifest_parser import parse_chunk_shas, parse_shas
 from orchestrator.validator.cache_key import (
     cache_key,
     cache_path,
     slice_range_zero,
     steam_chunk_uri,
 )
-from orchestrator.validator.disk_stat import validate_chunks
+from orchestrator.validator.disk_stat import validate_chunks_scoped
 
 _log = structlog.get_logger(__name__)
 
@@ -128,18 +128,23 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
     levels = settings.cache_levels
 
     seen: set[tuple[int, str]] = set()
-    paths: list[Path] = []
+    depot_paths: dict[int, list[Path]] = {}
     versions: list[str] = []
     parsed_ok = 0
     for binpath in bins:
-        # filename is {app}_{app}_{depot}_{gid}.bin. A corrupt/foreign .bin (a
-        # non-numeric depot field, a deleted/unreadable file) must NOT 500 the
-        # whole request — skip it and keep validating the rest (COR-1).
+        # filename is {app}_{app}_{depot}_{gid}.{bin,shas}. A corrupt/foreign
+        # manifest (a non-numeric depot field, a deleted/unreadable file) must
+        # NOT 500 the whole request — skip it and keep validating the rest
+        # (COR-1). .shas is the fetcher's sidecar (one SHA per line); .bin is
+        # SteamPrefill's protobuf — same {app}_{app}_{depot}_{gid} field layout.
         try:
             parts = binpath.stem.split("_")
             depot_id = int(parts[2])
             gid = parts[3]
-            chunk_shas = parse_chunk_shas(binpath.read_bytes())
+            if binpath.suffix == ".shas":
+                chunk_shas = parse_shas(binpath.read_text())
+            else:
+                chunk_shas = parse_chunk_shas(binpath.read_bytes())
         except (ValueError, IndexError, OSError) as e:
             _log.warning(
                 "steam_validate.bin_skipped",
@@ -149,6 +154,7 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
             continue
         parsed_ok += 1
         versions.append(f"{depot_id}:{gid}")
+        dpaths = depot_paths.setdefault(depot_id, [])
         for sha in chunk_shas:
             key = (depot_id, sha)
             if key in seen:
@@ -156,7 +162,7 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
             seen.add(key)
             uri = steam_chunk_uri(depot_id, sha)
             h = cache_key(identifier, uri, slice_range)
-            paths.append(cache_path(cache_root, h, levels))
+            dpaths.append(cache_path(cache_root, h, levels))
 
     if parsed_ok == 0:
         # Manifests existed but none could be parsed — a genuine error, not a
@@ -170,12 +176,60 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
             "error": "manifest_parse_failed",
         }
 
-    cached, missing = await validate_chunks(paths)
-    total = len(paths)
+    # Depot-scoping: SteamPrefill only prefills the operator's selected
+    # language/OS depots, but the located manifest set can include extra depots
+    # (other languages / optional content) the fetcher mapped but whose chunks
+    # were never downloaded. A depot with NO chunk files on disk (present == 0)
+    # was never prefilled, so it must NOT count against the game — otherwise
+    # multi-language titles are perpetually 'partial'.
+    #
+    # We gate exclusion on `present`, NOT on `cached`: a depot whose files EXIST
+    # but are unreadable (mode-000, #76/#128) or empty has present > 0 and is
+    # KEPT, so that corruption stays visible as a gap instead of being silently
+    # dropped as "never prefilled". (A depot fully evicted to 0 files on disk is
+    # indistinguishable from never-prefilled and is excluded — accepted: whole-
+    # depot eviction-to-zero is rare under per-file LRU.)
+    total = 0
+    cached = 0
+    included = 0
+    excluded: list[int] = []
+    for depot_id, dpaths in sorted(depot_paths.items()):
+        if not dpaths:
+            continue
+        d_cached, d_present = await validate_chunks_scoped(dpaths)
+        if d_present == 0:
+            excluded.append(depot_id)
+            continue
+        total += len(dpaths)
+        cached += d_cached
+        included += 1
+
+    if excluded:
+        _log.info(
+            "steam_validate.depots_excluded",
+            app_id=body.app_id,
+            excluded=excluded,
+            included=included,
+        )
+
+    if included == 0:
+        # No depot has any cached chunks. If there were chunks to cache at all
+        # the app is genuinely not cached ('missing'); if the manifests held no
+        # chunks there's nothing to cache ('cached', matching _classify).
+        union_total = sum(len(p) for p in depot_paths.values())
+        return {
+            "chunks_total": union_total,
+            "chunks_cached": 0,
+            "chunks_missing": union_total,
+            "outcome": "missing" if union_total else "cached",
+            "versions": ",".join(sorted(versions)),
+            "error": None,
+        }
+
     return {
         "chunks_total": total,
         "chunks_cached": cached,
-        "chunks_missing": missing,
+        "chunks_missing": total - cached,
         "outcome": _classify(total, cached),
         "versions": ",".join(sorted(versions)),
         "error": None,
