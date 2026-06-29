@@ -30,6 +30,10 @@ Fixes multi-language Steam titles showing a permanent "Check failed". The valida
 
 - `validation_sweep_cron` default `"0 3 * * 0"` (weekly) → `"0 3,9,15,21 * * *"` (every 6 h at 03/09/15/21 UTC), offset from the host prefill crons (steam 0/6/12/18, epic 1/7/13/19, gog 4/16) so a sweep never overlaps a prefill burst. Keeps cache statuses fresh as eviction/permission drift accumulates. Override via `ORCH_VALIDATION_SWEEP_CRON`.
 
+### Added — Latest-validation chunk counts on `GET /api/v1/games` (2026-06-28) — 2026-06-28
+
+`GET /api/v1/games` now returns `chunks_cached` and `chunks_total` per game, sourced from the **newest** `validation_history` row (by `started_at`, `id` tie-break) via correlated scalar subqueries — same EXISTS-not-JOIN rationale as `blocked`, served by `idx_vh_game`. Both are `null` for games that have never been validated. This lets a UI render a "Partial · N%" badge for `validation_failed` games (and a cached-fraction for any game) without a second round-trip to `validation_history`. Purely additive to the response model; no migration.
+
 ### Added — Durable Steam manifest store + validate-all backfill (2026-06-24) — 2026-06-24
 
 Lets the orchestrator validate the *entire* prefilled Steam library, not just the subset SteamPrefill currently has a fresh manifest for. SteamPrefill only writes a manifest `.bin` when an app has new content (and treats saved manifests as temporary via `clear-temp`), so its cache covered ~330 of ~1077 prefilled apps; the other ~747 returned `no_manifest_in_cache` and could never be validated though their ~13 TB of chunks were on disk.
