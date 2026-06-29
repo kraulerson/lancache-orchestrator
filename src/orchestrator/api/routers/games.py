@@ -109,6 +109,11 @@ class GameResponse(BaseModel):
     last_error: str | None
     metadata: dict[str, Any] | None
     blocked: bool
+    # Latest validation_history counts (newest row by started_at) so the UI can
+    # render a "Partial · N%" badge without a second round-trip. Both null when
+    # the game has never been validated.
+    chunks_cached: int | None
+    chunks_total: int | None
 
 
 class GamesMeta(BaseModel):
@@ -191,10 +196,21 @@ async def list_games(
     # F8: `blocked` via a correlated EXISTS subquery (NOT a JOIN) so the
     # allow-list `where_sql`/`order_sql` (bare `games` column names) stay
     # unambiguous — block_list also has platform/app_id columns.
+    # F7/UI: the latest validation_history counts via correlated scalar
+    # subqueries (NOT a JOIN), same rationale as `blocked` above — keeps the
+    # allow-list where_sql/order_sql on bare `games` columns unambiguous.
+    # idx_vh_game(game_id, started_at DESC) serves the ORDER/LIMIT; the `id DESC`
+    # tie-break makes both subqueries pick the SAME row on same-second ties.
     rows_sql = (
         f"SELECT {_GAMES_COLUMNS}, "  # noqa: S608
         "EXISTS(SELECT 1 FROM block_list b "
-        "WHERE b.platform=games.platform AND b.app_id=games.app_id) AS blocked "
+        "WHERE b.platform=games.platform AND b.app_id=games.app_id) AS blocked, "
+        "(SELECT vh.chunks_cached FROM validation_history vh "
+        " WHERE vh.game_id=games.id ORDER BY vh.started_at DESC, vh.id DESC LIMIT 1) "
+        "AS chunks_cached, "
+        "(SELECT vh.chunks_total FROM validation_history vh "
+        " WHERE vh.game_id=games.id ORDER BY vh.started_at DESC, vh.id DESC LIMIT 1) "
+        "AS chunks_total "
         f"FROM games {where_sql} {order_sql} LIMIT ? OFFSET ?"
     ).strip()
     rows_params = [*where_params, pagination.limit, pagination.offset]
@@ -274,6 +290,8 @@ async def list_games(
                     last_error=last_error,
                     metadata=metadata,
                     blocked=bool(row["blocked"]),
+                    chunks_cached=row["chunks_cached"],
+                    chunks_total=row["chunks_total"],
                 )
             )
         except ValidationError as e:

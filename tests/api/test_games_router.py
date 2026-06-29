@@ -88,6 +88,8 @@ class TestGamesHappyPath:
                 "last_error",
                 "metadata",
                 "blocked",
+                "chunks_cached",
+                "chunks_total",
             }
 
 
@@ -545,6 +547,8 @@ class TestGamesMetadata:
                     "last_error": None,
                     "metadata": {"already-decoded": True},  # non-buffer type
                     "blocked": 0,
+                    "chunks_cached": None,
+                    "chunks_total": None,
                 }
             ]
 
@@ -584,6 +588,8 @@ class TestGamesMetadata:
                     "last_error": None,
                     "metadata": None,
                     "blocked": 0,
+                    "chunks_cached": None,
+                    "chunks_total": None,
                 },
                 {
                     "id": 2,
@@ -600,6 +606,8 @@ class TestGamesMetadata:
                     "last_error": None,
                     "metadata": None,
                     "blocked": 0,
+                    "chunks_cached": None,
+                    "chunks_total": None,
                 },
             ]
 
@@ -663,3 +671,95 @@ class TestGamesBlockedField:
         assert match["blocked"] is True
         others = [x for x in body["games"] if x["id"] != first["id"]]
         assert all(x["blocked"] is False for x in others)
+
+
+class TestGamesValidationChunks:
+    """The latest validation_history counts are surfaced per game so the UI can
+    render a 'Partial · N%' badge without a second round-trip."""
+
+    async def _vh(self, pool, game_id, *, started_at, total, cached, outcome):
+        await pool.execute_write(
+            "INSERT INTO validation_history "
+            "(game_id, manifest_version, started_at, finished_at, method, "
+            " chunks_total, chunks_cached, chunks_missing, outcome) "
+            "VALUES (?, '1.0', ?, ?, 'disk_stat', ?, ?, ?, ?)",
+            (game_id, started_at, started_at, total, cached, total - cached, outcome),
+        )
+
+    async def test_latest_validation_counts_surface(self, client, populated_pool):
+        # Two rows for game 1; the NEWEST (started_at) must win.
+        await self._vh(
+            populated_pool,
+            1,
+            started_at="2026-05-01T00:00:00Z",
+            total=100,
+            cached=50,
+            outcome="partial",
+        )
+        await self._vh(
+            populated_pool,
+            1,
+            started_at="2026-06-01T00:00:00Z",
+            total=100,
+            cached=90,
+            outcome="partial",
+        )
+        body = (
+            await client.get(
+                "/api/v1/games?limit=500", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+            )
+        ).json()
+        game = next(g for g in body["games"] if g["id"] == 1)
+        assert game["chunks_total"] == 100
+        assert game["chunks_cached"] == 90  # newest row, not the older 50
+
+    async def test_no_validation_history_is_null(self, client, populated_pool):
+        # game 4 has no validation_history row.
+        body = (
+            await client.get(
+                "/api/v1/games?limit=500", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+            )
+        ).json()
+        game = next(g for g in body["games"] if g["id"] == 4)
+        assert game["chunks_total"] is None
+        assert game["chunks_cached"] is None
+
+    async def test_fully_cached_counts_surface(self, client, populated_pool):
+        await self._vh(
+            populated_pool,
+            2,
+            started_at="2026-06-02T00:00:00Z",
+            total=2430,
+            cached=2430,
+            outcome="cached",
+        )
+        body = (
+            await client.get(
+                "/api/v1/games?limit=500", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+            )
+        ).json()
+        game = next(g for g in body["games"] if g["id"] == 2)
+        assert game["chunks_total"] == 2430
+        assert game["chunks_cached"] == 2430
+
+    async def test_same_second_tie_break_by_id(self, client, populated_pool):
+        # Two rows with the IDENTICAL started_at (validate stamps CURRENT_TIMESTAMP
+        # at second resolution, so same-second ties are real). The row inserted
+        # last has the higher AUTOINCREMENT id and must win — this is exactly the
+        # `id DESC` tie-break, and it also guarantees both subqueries pick the
+        # SAME row (cached/total can't come from different rows).
+        same_ts = "2026-06-03T00:00:00Z"
+        await self._vh(
+            populated_pool, 3, started_at=same_ts, total=100, cached=10, outcome="partial"
+        )
+        await self._vh(
+            populated_pool, 3, started_at=same_ts, total=100, cached=88, outcome="partial"
+        )
+        body = (
+            await client.get(
+                "/api/v1/games?limit=500", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+            )
+        ).json()
+        game = next(g for g in body["games"] if g["id"] == 3)
+        assert game["chunks_total"] == 100
+        assert game["chunks_cached"] == 88  # the later-inserted (higher-id) row
