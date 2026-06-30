@@ -42,14 +42,25 @@ def list_prefilled_app_ids(*, cache_roots: list[Path]) -> list[int]:
     return sorted(apps)
 
 
-def locate_manifest_bins(app_id: int, *, cache_roots: list[Path]) -> list[Path]:
-    """Newest manifest per depot for ``app_id`` across all roots (empty if none).
+def locate_manifest_bins(
+    app_id: int, *, cache_roots: list[Path], prefilled_gids: set[str] | None = None
+) -> list[Path]:
+    """One manifest per depot for ``app_id`` across all roots (empty if none).
 
-    Matches both .bin and .shas manifests. Roots are searched in order; the
-    newest file per depot by mtime wins regardless of extension, so a fresher
-    live-cache manifest supersedes an older archived one for the same depot (and
-    a .bin and .shas for the same depot de-dupe to whichever is newer)."""
-    newest_per_depot: dict[str, Path] = {}
+    Matches both .bin and .shas. By default the newest file per depot by mtime
+    wins (a fresher live/archived manifest supersedes an older one; a .bin and a
+    .shas for the same depot de-dupe to whichever is newer).
+
+    ``prefilled_gids`` (the set of gids SteamPrefill's own record says it
+    prefilled for this app, supplied by the caller — the locator never reads
+    that file itself, see the module docstring) is a per-depot SELECTION
+    *preference*, not an enumeration index: for any depot that has a candidate
+    whose gid is in the set, that gid is chosen (newest among the matching) even
+    if a different gid is newer by mtime — so validation pins to the version that
+    was actually prefilled rather than the latest manifest on disk. A depot with
+    no matching candidate (not in the record, or a .shas sidecar) falls back to
+    newest-by-mtime. None/empty preserves the pure newest-by-mtime behavior."""
+    candidates: dict[str, list[Path]] = {}
     for root in cache_roots:
         v1 = root / "v1"
         if not v1.is_dir():
@@ -59,8 +70,14 @@ def locate_manifest_bins(app_id: int, *, cache_roots: list[Path]) -> list[Path]:
                 parts = path.stem.split("_")
                 if len(parts) != 4:
                     continue
-                depot = parts[2]
-                current = newest_per_depot.get(depot)
-                if current is None or path.stat().st_mtime > current.stat().st_mtime:
-                    newest_per_depot[depot] = path
-    return list(newest_per_depot.values())
+                candidates.setdefault(parts[2], []).append(path)
+
+    result: list[Path] = []
+    for paths in candidates.values():
+        pool = paths
+        if prefilled_gids:
+            matching = [p for p in paths if p.stem.split("_")[3] in prefilled_gids]
+            if matching:
+                pool = matching
+        result.append(max(pool, key=lambda p: p.stat().st_mtime))
+    return result

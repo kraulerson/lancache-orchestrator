@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from fastapi.testclient import TestClient
 
 from orchestrator.agent.app import create_agent_app
@@ -40,9 +42,75 @@ def test_steam_prefill_runs_to_done():
         snap = client.get(f"/v1/steam/prefill/{job_id}").json()
         if snap["state"] == "done":
             break
+        time.sleep(0.02)  # let the offloaded capture (asyncio.to_thread) finish
     assert snap["state"] == "done"
     assert snap["result"] == {"ok": True, "raw": "OK done"}
     assert driver.calls == [([440], False)]
+
+
+def test_prefill_captures_manifest_to_archive(tmp_path):
+    """After a successful prefill, the manifest SteamPrefill wrote to its HOME
+    cache (steam_prefill_live_cache_dir) is captured into the durable archive —
+    so agent-driven force-prefills' manifests get validated against instead of a
+    stale archived version (the false-Partial root cause)."""
+    live = tmp_path / "live"
+    archive = tmp_path / "archive"
+    (live / "v1").mkdir(parents=True)
+
+    class _ManifestWritingDriver(_FakeDriver):
+        async def prefill_apps(self, app_ids, *, force=False):
+            # SteamPrefill writes its manifest to its HOME cache during a prefill.
+            (live / "v1" / "440_440_441_777.bin").write_bytes(b"manifest")
+            return await super().prefill_apps(app_ids, force=force)
+
+    app = create_agent_app(
+        settings=Settings(
+            orchestrator_token="a" * 32,
+            steam_prefill_live_cache_dir=live,
+            steam_manifest_archive_dir=archive,
+        )
+    )
+    app.state.prefill_driver = _ManifestWritingDriver()
+    client = TestClient(app, headers={"Authorization": "Bearer " + "a" * 32})
+
+    job_id = client.post("/v1/steam/prefill", json={"app_ids": [440], "force": False}).json()[
+        "job_id"
+    ]
+    for _ in range(50):
+        snap = client.get(f"/v1/steam/prefill/{job_id}").json()
+        if snap["state"] == "done":
+            break
+        time.sleep(0.02)  # let the offloaded capture (asyncio.to_thread) finish
+    assert snap["state"] == "done"
+    assert (archive / "v1" / "440_440_441_777.bin").exists()
+
+
+def test_prefill_capture_failure_does_not_fail_the_job(tmp_path):
+    """A capture failure (e.g. unwritable archive) must never fail the prefill."""
+
+    class _ManifestWritingDriver(_FakeDriver):
+        async def prefill_apps(self, app_ids, *, force=False):
+            return await super().prefill_apps(app_ids, force=force)
+
+    app = create_agent_app(
+        settings=Settings(
+            orchestrator_token="a" * 32,
+            steam_prefill_live_cache_dir=tmp_path / "missing-live",  # no /v1 -> sync is a no-op
+            steam_manifest_archive_dir=tmp_path / "archive",
+        )
+    )
+    app.state.prefill_driver = _ManifestWritingDriver()
+    client = TestClient(app, headers={"Authorization": "Bearer " + "a" * 32})
+    job_id = client.post("/v1/steam/prefill", json={"app_ids": [440], "force": False}).json()[
+        "job_id"
+    ]
+    for _ in range(50):
+        snap = client.get(f"/v1/steam/prefill/{job_id}").json()
+        if snap["state"] == "done":
+            break
+        time.sleep(0.02)  # let the offloaded capture (asyncio.to_thread) finish
+    assert snap["state"] == "done"
+    assert snap["result"]["ok"] is True
 
 
 def test_downloaded_state():

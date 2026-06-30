@@ -114,6 +114,14 @@ class Settings(BaseSettings):
     # `clear-temp`); validate reads the UNION of the live cache + this archive.
     # An absent/unmounted dir is a no-op — byte-identical to pre-archive behavior.
     steam_manifest_archive_dir: Path = Path("/manifest-archive")
+    # The agent's OWN SteamPrefill cache. When the agent runs SteamPrefill it does
+    # so with HOME=/tmp, so SteamPrefill writes its manifests to
+    # $HOME/.cache/SteamPrefill — NOT the host's /root/.cache (the read-only
+    # steam_manifest_cache_dir). The post-prefill capture copies manifests from
+    # here into the durable archive so agent-driven (force-)prefills' manifests
+    # get validated against, instead of falling back to a stale archived version
+    # (the false-Partial root cause). Must equal the agent's $HOME/.cache/SteamPrefill.
+    steam_prefill_live_cache_dir: Path = Path("/tmp/.cache/SteamPrefill")  # noqa: S108  agent container $HOME/.cache (HOME=/tmp), not an insecure temp file
     # Agent sync cadence (seconds) for copying live manifests into the archive.
     # 0 disables the periodic sync.
     manifest_archive_sync_interval_sec: int = Field(default=1800, ge=0)
