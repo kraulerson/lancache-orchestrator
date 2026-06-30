@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,9 +26,16 @@ class SteamAuthStatus:
 
 
 class SteamPrefillDriver:
-    def __init__(self, *, binary: Path, config_dir: Path) -> None:
+    def __init__(self, *, binary: Path, config_dir: Path, home: Path | None = None) -> None:
         self._binary = Path(binary)
         self._config_dir = Path(config_dir)
+        # SteamPrefill writes its manifest cache to ``$HOME/.cache/SteamPrefill``.
+        # When ``home`` is set, the subprocess HOME is pinned so manifests land
+        # where the durable-archive capture reads (steam_prefill_live_cache_dir),
+        # regardless of the container's inherited HOME — otherwise a deploy that
+        # omits ``-e HOME=/tmp`` silently strands manifests and re-introduces the
+        # false-Partial bug (UAT-13 F2 / #211). None preserves prior env-inherit.
+        self._home = None if home is None else Path(home)
 
     @property
     def _selection_path(self) -> Path:
@@ -45,9 +53,11 @@ class SteamPrefillDriver:
             # of our config_dir so ./Config maps to exactly config_dir —
             # otherwise it finds no account.config and login fails (the failure
             # is masked by a Spectre.Console crash; see the 2026-06-21 flip).
+            env = None if self._home is None else {**os.environ, "HOME": str(self._home)}
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 cwd=str(self._config_dir.parent),
+                env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )

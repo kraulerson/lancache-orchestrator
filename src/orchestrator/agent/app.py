@@ -62,6 +62,10 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
             app.state.prefill_driver = SteamPrefillDriver(
                 binary=settings.steam_prefill_binary,
                 config_dir=settings.steam_prefill_config_dir,
+                # Pin SteamPrefill's HOME so its $HOME/.cache/SteamPrefill manifest
+                # cache is steam_prefill_live_cache_dir (the dir the capture reads),
+                # by construction — not by relying on the deploy env (UAT-13 F2).
+                home=Path(settings.steam_prefill_live_cache_dir).parent.parent,
             )
         interval = settings.manifest_archive_sync_interval_sec
         if interval > 0:
@@ -97,6 +101,7 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
     app.state.prefill_driver = SteamPrefillDriver(
         binary=settings.steam_prefill_binary,
         config_dir=settings.steam_prefill_config_dir,
+        home=Path(settings.steam_prefill_live_cache_dir).parent.parent,
     )
     app.include_router(health.router)
     app.include_router(pull.router)

@@ -49,6 +49,20 @@ async def start_prefill(body: SteamPrefillRequest, request: Request) -> dict[str
         try:
             result = await driver.prefill_apps(body.app_ids, force=body.force)
             if result.ok:
+                # A successful prefill always writes its manifest(s) to the HOME
+                # cache, so a MISSING live cache dir means SteamPrefill's HOME and
+                # steam_prefill_live_cache_dir have drifted apart — the capture
+                # would silently no-op and false-Partial badges would silently
+                # return. Make that loud (UAT-13 F2b). (The driver pins HOME from
+                # this same setting, so this should never fire — it's the canary.)
+                live_v1 = Path(settings.steam_prefill_live_cache_dir) / "v1"
+                if not live_v1.is_dir():
+                    _log.warning(
+                        "steam_prefill.live_cache_missing",
+                        job_id=job_id,
+                        live_cache=str(live_v1),
+                        hint="HOME/.cache path mismatch; manifests NOT captured — check agent HOME",
+                    )
                 # Capture the manifest(s) SteamPrefill just wrote to its HOME
                 # cache (the agent runs it with HOME=/tmp) into the durable
                 # archive. The periodic archive-sync only reads the host cache, so

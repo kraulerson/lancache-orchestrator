@@ -52,6 +52,39 @@ async def test_prefill_apps_runs_from_config_parent_cwd(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_prefill_apps_pins_subprocess_home(tmp_path):
+    # SteamPrefill writes its manifest cache to $HOME/.cache/SteamPrefill; the
+    # driver must pin the subprocess HOME so manifests land where the capture
+    # reads, regardless of the container's inherited HOME (UAT-13 F2 / #211).
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    home = tmp_path / "pinned_home"
+    marker = tmp_path / "home.txt"
+    bin_path = tmp_path / "FakeSteamPrefill"
+    bin_path.write_text(f'#!/bin/sh\nprintf %s "$HOME" > "{marker}"\nexit 0\n')
+    bin_path.chmod(bin_path.stat().st_mode | stat.S_IEXEC)
+    d = SteamPrefillDriver(binary=bin_path, config_dir=cfg, home=home)
+    await d.prefill_apps([730])
+    assert marker.read_text().strip() == str(home)
+
+
+@pytest.mark.asyncio
+async def test_prefill_apps_home_none_inherits_env(tmp_path, monkeypatch):
+    # Default home=None preserves prior behavior: the subprocess inherits the
+    # process environment's HOME (no env override).
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "inherited"))
+    marker = tmp_path / "home.txt"
+    bin_path = tmp_path / "FakeSteamPrefill"
+    bin_path.write_text(f'#!/bin/sh\nprintf %s "$HOME" > "{marker}"\nexit 0\n')
+    bin_path.chmod(bin_path.stat().st_mode | stat.S_IEXEC)
+    d = SteamPrefillDriver(binary=bin_path, config_dir=cfg)
+    await d.prefill_apps([730])
+    assert marker.read_text().strip() == str(tmp_path / "inherited")
+
+
+@pytest.mark.asyncio
 async def test_prefill_apps_nonzero_exit_not_ok(tmp_path):
     cfg = tmp_path / "Config"
     cfg.mkdir()

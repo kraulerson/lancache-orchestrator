@@ -65,8 +65,8 @@ async def _live_steam_auth_status(request: Request) -> str | None:
     driver, each of which stats the persisted ``account.config``. Returns
     ``"ok"``/``"expired"``, or ``None`` when it can't be determined (agent down /
     no driver) so the caller falls back to the stored column value. Never raises."""
-    settings = get_settings()
     try:
+        settings = get_settings()
         if settings.agent_enabled:
             client = getattr(request.app.state, "agent_client", None)
             if client is None:

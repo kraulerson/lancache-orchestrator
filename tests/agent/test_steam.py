@@ -113,6 +113,66 @@ def test_prefill_capture_failure_does_not_fail_the_job(tmp_path):
     assert snap["result"]["ok"] is True
 
 
+def test_prefill_warns_when_live_cache_dir_missing(tmp_path):
+    """A successful prefill whose live cache /v1 dir is absent (the HOME-drift
+    symptom) must log a loud WARNING — otherwise the capture silently no-ops and
+    false-Partial badges silently return (UAT-13 F2b / #211)."""
+    import structlog
+
+    app = create_agent_app(
+        settings=Settings(
+            orchestrator_token="a" * 32,
+            steam_prefill_live_cache_dir=tmp_path / "missing-live",  # no /v1 subdir
+            steam_manifest_archive_dir=tmp_path / "archive",
+        )
+    )
+    app.state.prefill_driver = _FakeDriver()
+    client = TestClient(app, headers={"Authorization": "Bearer " + "a" * 32})
+    with structlog.testing.capture_logs() as logs:
+        job_id = client.post("/v1/steam/prefill", json={"app_ids": [440], "force": False}).json()[
+            "job_id"
+        ]
+        for _ in range(50):
+            snap = client.get(f"/v1/steam/prefill/{job_id}").json()
+            if snap["state"] == "done":
+                break
+            time.sleep(0.02)
+    assert snap["state"] == "done"
+    warnings = [m for m in logs if m.get("event") == "steam_prefill.live_cache_missing"]
+    assert warnings, "expected a live_cache_missing warning when the live cache dir is absent"
+    assert warnings[0]["log_level"] == "warning"
+
+
+def test_prefill_no_warning_when_live_cache_dir_present(tmp_path):
+    """The drift warning must NOT fire on the normal path (live cache dir exists,
+    even if nothing new was copied) — it is a path-mismatch signal, not a
+    nothing-to-capture signal."""
+    import structlog
+
+    live = tmp_path / "live"
+    (live / "v1").mkdir(parents=True)
+    app = create_agent_app(
+        settings=Settings(
+            orchestrator_token="a" * 32,
+            steam_prefill_live_cache_dir=live,
+            steam_manifest_archive_dir=tmp_path / "archive",
+        )
+    )
+    app.state.prefill_driver = _FakeDriver()  # writes no manifest -> 0 copied, dir present
+    client = TestClient(app, headers={"Authorization": "Bearer " + "a" * 32})
+    with structlog.testing.capture_logs() as logs:
+        job_id = client.post("/v1/steam/prefill", json={"app_ids": [440], "force": False}).json()[
+            "job_id"
+        ]
+        for _ in range(50):
+            snap = client.get(f"/v1/steam/prefill/{job_id}").json()
+            if snap["state"] == "done":
+                break
+            time.sleep(0.02)
+    assert snap["state"] == "done"
+    assert not [m for m in logs if m.get("event") == "steam_prefill.live_cache_missing"]
+
+
 def test_downloaded_state():
     client = _client(_FakeDriver())
     resp = client.get("/v1/steam/downloaded-state")

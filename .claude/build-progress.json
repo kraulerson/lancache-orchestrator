@@ -27,12 +27,12 @@
     "steam-auth-status-live",
     "validate-gid-match"
   ],
-  "features_since_last_test": 2,
+  "features_since_last_test": 0,
   "features_since_last_health_check": 4,
   "test_interval": 2,
   "last_test_session": "2026-06-30",
-  "testing_required": true,
+  "testing_required": false,
   "tester_count": 1,
   "bug_tracker": "github_issues",
-  "sessions_completed": 12
+  "sessions_completed": 13
 }

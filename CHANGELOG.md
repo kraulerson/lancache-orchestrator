@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — UAT-13 hardening: status-page never-raises + deterministic manifest-capture path (2026-06-30) — 2026-06-30
+
+UAT-13 adversarial review of #208/#209 surfaced two verified SEV-2 silent-failure modes (both confirmed *not* breaking the live deployment — hardening, fixed test-first). See #210, #211.
+
+- **`api/routers/platforms.py` (#210):** `_live_steam_auth_status()` called `get_settings()` *outside* its try/except, so a settings failure (e.g. a future runtime reload with invalid config) would have propagated uncaught and 500'd the status page — violating the function's documented "Never raises" contract. `get_settings()` is now inside the try, so any failure falls back to the stored column value.
+- **`platform/steam/prefill_driver.py` + `agent/app.py` (#211, prevention):** the capture's source path assumed the agent's `HOME=/tmp` but nothing enforced it — a deploy that omitted the env would silently strand SteamPrefill's manifests and re-introduce the false-Partial bug. `SteamPrefillDriver` now accepts `home` and pins the SteamPrefill subprocess `HOME` (derived from the same `steam_prefill_live_cache_dir` the capture reads), so SteamPrefill writes where the capture reads *by construction*. Identical live behavior (`HOME` stays `/tmp`); the control-plane fallback driver is unchanged (it delegates to the agent).
+- **`agent/routers/steam.py` (#211, observability):** after a successful prefill, the agent now logs a `steam_prefill.live_cache_missing` **warning** if the live cache `/v1` dir is absent — the unambiguous HOME-drift symptom — so a path mismatch is loud instead of a silent `copied=0`. Does not false-positive on the normal already-archived→0-copied case. 5 new tests; no migration.
+
 ### Fixed — False "Partial" badges: validate now pins to the prefilled manifest gid + captures agent manifests (2026-06-30) — 2026-06-30
 
 A force-prefilled game (e.g. "All Hail the Orb") could sit at a stable "Partial · 71%" even though it was fully cached for its current version. Root cause (live-traced): the agent runs SteamPrefill with `HOME=/tmp`, so SteamPrefill writes its manifest to `/tmp/.cache/SteamPrefill` — **not** the host cache (`steam_manifest_cache_dir`) the durable archive-sync reads — so agent-driven (force-)prefills' manifests were never archived. The validator then fell back to the **newest archived manifest by mtime**, which for these games was a months-old build; the chunks unique to that stale version no longer exist, so they counted "missing" forever and no prefill could close the gap.
