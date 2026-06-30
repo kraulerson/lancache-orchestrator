@@ -84,6 +84,56 @@ def test_validate_no_manifest(tmp_path):
     assert "no_manifest" in body["error"]
 
 
+def test_validate_pins_to_prefilled_gid_not_newest_mtime(tmp_path):
+    """Validate selects the manifest gid SteamPrefill actually prefilled (from
+    successfullyDownloadedDepots.json), even when a STALE newer-mtime manifest
+    for the same depot exists — the false-Partial root cause (a force prefill
+    caches the current version while validate measured an older archived one)."""
+    import os
+
+    stale_gid = 9999999999999999999
+    mcache = tmp_path / "spcache"
+    (mcache / "v1").mkdir(parents=True)
+    prefilled = mcache / "v1" / f"{APP}_{APP}_{DEPOT}_{GID}.bin"
+    stale = mcache / "v1" / f"{APP}_{APP}_{DEPOT}_{stale_gid}.bin"
+    prefilled.write_bytes(FIXTURE.read_bytes())
+    stale.write_bytes(FIXTURE.read_bytes())
+    os.utime(prefilled, (1000, 1000))  # prefilled gid is OLDER
+    os.utime(stale, (2000, 2000))  # stale gid is NEWER by mtime
+
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "successfullyDownloadedDepots.json").write_text(json.dumps({str(APP): [GID]}))
+
+    cache_root = tmp_path / "lancache"
+    levels, ident, slice_sz = "2:2", "steam", 10_485_760
+    slice_range = slice_range_zero(slice_sz)
+    for sha in parse_chunk_shas(FIXTURE.read_bytes()):
+        p = cache_path(
+            cache_root, cache_key(ident, steam_chunk_uri(DEPOT, sha), slice_range), levels
+        )
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"data")
+
+    settings = Settings(
+        orchestrator_token=TOKEN,
+        lancache_nginx_cache_path=cache_root,
+        cache_levels=levels,
+        steam_cache_identifier=ident,
+        cache_slice_size_bytes=slice_sz,
+        steam_manifest_cache_dir=mcache,
+        steam_prefill_config_dir=cfg,
+    )
+    client = TestClient(create_agent_app(settings=settings))
+    client.headers.update({"Authorization": f"Bearer {TOKEN}"})
+    body = client.post("/v1/steam/validate", json={"app_id": APP}).json()
+
+    # The PREFILLED gid's manifest was selected (not the newer-mtime stale one).
+    assert f"{DEPOT}:{GID}" in body["versions"]
+    assert str(stale_gid) not in body["versions"]
+    assert body["chunks_cached"] == 60
+
+
 def test_validate_bad_app_id(tmp_path):
     client = _build(tmp_path, cache_all=False)
     r = client.post("/v1/steam/validate", json={"app_id": -5})

@@ -85,6 +85,7 @@ class TestDefaults:
             ("db_journal_size_limit_bytes", 67_108_864),
             ("steam_store_fetch_budget", 150),
             ("steam_store_fetch_delay_sec", 1.5),
+            ("steam_prefill_live_cache_dir", Path("/tmp/.cache/SteamPrefill")),  # noqa: S108
         ],
     )
     def test_default_value(self, settings, field, expected):

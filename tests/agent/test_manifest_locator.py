@@ -56,6 +56,47 @@ def test_list_prefilled_app_ids_no_cache(tmp_path):
     assert list_prefilled_app_ids(cache_roots=[tmp_path / "missing"]) == []
 
 
+# --- prefilled_gids: per-depot gid preference (validate against the gid
+#     SteamPrefill actually prefilled, not just the newest file by mtime) ---
+
+
+def test_prefers_prefilled_gid_over_newer_mtime(tmp_path):
+    # Depot 441 has two manifests: gid 222 (the PREFILLED gid, OLDER mtime) and
+    # gid 333 (newer mtime but a stale version). The prefilled gid must win.
+    _write(tmp_path, "440_440_441_222.bin", 1000)  # prefilled, older
+    _write(tmp_path, "440_440_441_333.bin", 2000)  # newer mtime, stale version
+    found = locate_manifest_bins(440, cache_roots=[tmp_path], prefilled_gids={"222"})
+    assert [p.name for p in found] == ["440_440_441_222.bin"]
+
+
+def test_depot_not_in_prefilled_record_falls_back_to_mtime(tmp_path):
+    # Depot 441 has a prefilled gid; depot 442 is NOT in the record (the record
+    # lists only a subset of depots) -> 442 falls back to newest-by-mtime.
+    _write(tmp_path, "440_440_441_222.bin", 1000)  # prefilled
+    _write(tmp_path, "440_440_442_555.bin", 1000)
+    _write(tmp_path, "440_440_442_666.bin", 2000)  # newer for depot 442 (not in record)
+    found = sorted(
+        p.name for p in locate_manifest_bins(440, cache_roots=[tmp_path], prefilled_gids={"222"})
+    )
+    assert found == ["440_440_441_222.bin", "440_440_442_666.bin"]
+
+
+def test_shas_sidecar_with_no_recorded_gid_falls_back(tmp_path):
+    # A .shas (fetcher sidecar) whose gid isn't in the prefilled record is kept
+    # via the per-depot mtime fallback, not dropped.
+    _write(tmp_path, "440_440_441_999.shas", 1000)
+    found = locate_manifest_bins(440, cache_roots=[tmp_path], prefilled_gids={"222"})
+    assert [p.name for p in found] == ["440_440_441_999.shas"]
+
+
+def test_prefilled_gids_none_keeps_newest_mtime(tmp_path):
+    # Backward-compatible: no record -> the original newest-by-mtime behavior.
+    _write(tmp_path, "440_440_441_222.bin", 1000)
+    _write(tmp_path, "440_440_441_333.bin", 2000)
+    found = locate_manifest_bins(440, cache_roots=[tmp_path], prefilled_gids=None)
+    assert [p.name for p in found] == ["440_440_441_333.bin"]
+
+
 # --- Union read across multiple cache roots (durable manifest archive) ---
 
 

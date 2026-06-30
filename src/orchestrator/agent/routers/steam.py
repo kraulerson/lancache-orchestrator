@@ -10,6 +10,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.agent.manifest_archive import sync_manifests_to_archive
 from orchestrator.agent.manifest_locator import list_prefilled_app_ids, locate_manifest_bins
 from orchestrator.agent.manifest_parser import parse_chunk_shas, parse_shas
 from orchestrator.validator.cache_key import (
@@ -40,12 +41,36 @@ def _validate_app_ids(app_ids: list[int]) -> None:
 async def start_prefill(body: SteamPrefillRequest, request: Request) -> dict[str, str]:
     _validate_app_ids(body.app_ids)
     driver = request.app.state.prefill_driver
+    settings = request.app.state.settings
     store = request.app.state.agent_jobs
     job_id = store.create()
 
     async def _run() -> None:
         try:
             result = await driver.prefill_apps(body.app_ids, force=body.force)
+            if result.ok:
+                # Capture the manifest(s) SteamPrefill just wrote to its HOME
+                # cache (the agent runs it with HOME=/tmp) into the durable
+                # archive. The periodic archive-sync only reads the host cache, so
+                # without this an agent-driven (force-)prefill's manifest is never
+                # archived and validate falls back to a stale older manifest — the
+                # false-Partial root cause. The run is finished so settle_seconds=0.
+                # Synchronous: it's a bounded, fast copy of the few new .bin
+                # manifests this prefill produced (not the whole library), so it
+                # isn't worth offloading. A capture failure must never fail the job.
+                try:
+                    copied = sync_manifests_to_archive(
+                        Path(settings.steam_prefill_live_cache_dir),
+                        Path(settings.steam_manifest_archive_dir),
+                        settle_seconds=0.0,
+                    )
+                    _log.info("steam_prefill.manifests_captured", job_id=job_id, copied=copied)
+                except Exception as e:
+                    _log.warning(
+                        "steam_prefill.capture_failed",
+                        job_id=job_id,
+                        reason=f"{type(e).__name__}: {e}"[:200],
+                    )
             store.set_done(job_id, {"ok": result.ok, "raw": result.raw})
         except Exception as e:  # record, never crash the loop
             store.set_failed(job_id, f"{type(e).__name__}: {e}"[:200])
@@ -112,7 +137,20 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
     cache_root = Path(settings.lancache_nginx_cache_path)
     roots = [Path(settings.steam_manifest_cache_dir), Path(settings.steam_manifest_archive_dir)]
 
-    bins = locate_manifest_bins(body.app_id, cache_roots=roots)
+    # Pin manifest selection to the gid SteamPrefill actually prefilled for this
+    # app (its own downloaded record), so validate measures the CURRENT version
+    # rather than the newest manifest on disk — which can be a stale older build
+    # and is the cause of false-Partial badges. Per-depot fallback to newest-by-
+    # mtime when there's no record; tolerant of a missing/unreadable driver/file.
+    try:
+        state = request.app.state.prefill_driver.downloaded_state()
+        prefilled_gids = {str(g) for g in state.get(body.app_id, [])}
+    except Exception:
+        prefilled_gids = set()
+
+    bins = locate_manifest_bins(
+        body.app_id, cache_roots=roots, prefilled_gids=prefilled_gids or None
+    )
     if not bins:
         return {
             "chunks_total": 0,
