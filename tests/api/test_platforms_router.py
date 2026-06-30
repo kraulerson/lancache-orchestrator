@@ -436,6 +436,20 @@ class TestSteamAuthLive:
         steam = await self._steam_row(unit_app)
         assert steam["auth_status"] == "expired"  # exception -> None -> DB fallback
 
+    async def test_get_settings_error_falls_back_to_db(self, unit_app, populated_pool, monkeypatch):
+        # The docstring promises "Never raises". A get_settings() failure (e.g. a
+        # future runtime reload with invalid config) must fall back to the stored
+        # column value, NOT 500 the status page (UAT-13 F1 / #210).
+        def _boom():
+            raise RuntimeError("settings boom")
+
+        monkeypatch.setattr("orchestrator.api.routers.platforms.get_settings", _boom)
+        await populated_pool.execute_write(
+            "UPDATE platforms SET auth_status='ok' WHERE name='steam'"
+        )
+        steam = await self._steam_row(unit_app)  # asserts HTTP 200 internally
+        assert steam["auth_status"] == "ok"  # get_settings() raised -> None -> DB fallback
+
     async def test_epic_auth_status_unaffected(self, unit_app, populated_pool, monkeypatch):
         self._co_located(monkeypatch)
         await populated_pool.execute_write(
