@@ -28,15 +28,27 @@ class AgentClient:
         base_url: str,
         token: str,
         transport: httpx.AsyncBaseTransport | None = None,
-        poll_interval_sec: float = 0.5,
+        poll_interval_sec: float = 3.0,
         timeout_sec: float = 30.0,
         poll_timeout_sec: float = 7200.0,
+        connect_retries: int = 2,
+        connect_retry_backoff_sec: float = 0.5,
     ) -> None:
         self._base_url = base_url
         self._headers = {"Authorization": f"Bearer {token}"}
         self._transport = transport
+        # UAT-12: poll at 3s (was 0.5s) — a multi-hour job needs far fewer
+        # connects, cutting the chance of landing on a connect blip ~6x.
         self._poll = poll_interval_sec
-        self._timeout = httpx.Timeout(timeout_sec, connect=10.0)
+        # UAT-12: connect timeout 15s (was 10s) absorbs brief accept-lag in one
+        # attempt; the retry below is the backstop for a harder blip.
+        self._timeout = httpx.Timeout(timeout_sec, connect=15.0)
+        # UAT-12: bounded retry on connect-phase failures (see _request). The
+        # agent's single uvicorn listener can be briefly CPU-starved by a heavy
+        # SteamPrefill --force on the steal-bound VM, lagging accept() past the
+        # connect timeout; one such blip must not kill a multi-hour prefill.
+        self._connect_retries = connect_retries
+        self._connect_backoff = connect_retry_backoff_sec
         # Overall ceiling for a post-then-poll op (prefill/pull). Bounds the poll
         # loop so a job stuck 'running' can't poll forever (MEM-2). Default safely
         # above any real prefill; the orchestrator job's own timeout is the
@@ -69,10 +81,28 @@ class AgentClient:
             self._client = None
 
     async def _request(self, method: str, path: str, **kw: Any) -> httpx.Response:
-        try:
-            resp = await self._get_client().request(method, path, **kw)
-        except httpx.HTTPError as e:
-            raise AgentError(f"agent unreachable: {type(e).__name__}") from e
+        attempt = 0
+        while True:
+            try:
+                resp = await self._get_client().request(method, path, **kw)
+                break
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+                # UAT-12: a connect-phase failure means no connection was
+                # established, so the request never reached the agent — safe to
+                # retry for ANY method (no duplicate side effects). Bounded by
+                # _connect_retries; a transient blip mid-prefill must not fail the
+                # job, but a genuinely-down agent must still surface promptly.
+                if attempt >= self._connect_retries:
+                    raise AgentError(f"agent unreachable: {type(e).__name__}") from e
+                attempt += 1
+                _log.warning(
+                    "agent.connect_retry", path=path, attempt=attempt, error=type(e).__name__
+                )
+                await asyncio.sleep(self._connect_backoff * attempt)
+            except httpx.HTTPError as e:
+                # Non-connect transport error (e.g. ReadTimeout after the request
+                # was sent): not safe to blind-retry a POST, so surface it.
+                raise AgentError(f"agent unreachable: {type(e).__name__}") from e
         if resp.status_code >= 400:
             raise AgentError(f"agent returned {resp.status_code} for {path}")
         return resp

@@ -74,17 +74,27 @@ async def trigger_prefill(
             # swallowed by the in-flight dedup (migration-0006 allows only one
             # prefill per game). A RUNNING prefill can't change mid-flight, so
             # it's returned as-is.
+            upgraded = 0
             if force and existing["state"] == "queued" and existing["payload"] != _FORCE_PAYLOAD:
-                await pool.execute_write(
-                    "UPDATE jobs SET payload=? WHERE id=?",
+                # `AND state='queued'` closes a TOCTOU race: if the worker claimed
+                # this job (-> 'running') between the read above and this UPDATE,
+                # it already read the row's (non-force) payload, so rewriting the
+                # now-running row would make the DB falsely record that force ran.
+                # The guard makes the UPDATE a no-op in that race (rowcount 0).
+                upgraded = await pool.execute_write(
+                    "UPDATE jobs SET payload=? WHERE id=? AND state='queued'",
                     (_FORCE_PAYLOAD, existing["id"]),
                 )
+            if upgraded:
                 _log.info(
                     "prefill_trigger.force_upgraded",
                     game_id=game_id,
                     existing_job_id=int(existing["id"]),
                 )
             else:
+                # Plain dedup hit — either no force was requested, the job was
+                # already force, or it was claimed mid-flight (force too late;
+                # the operator can re-run --force once the current run finishes).
                 _log.info(
                     "prefill_trigger.dedup_hit",
                     game_id=game_id,

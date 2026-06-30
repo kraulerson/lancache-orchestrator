@@ -19,6 +19,16 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Agent-RPC resilience: a transient connect blip no longer kills a long job (2026-06-30) — 2026-06-30
+
+UAT-12. The control plane reaches the data-plane agent over HTTP with no retry, so a single transient `ConnectTimeout` — e.g. the agent's single uvicorn listener briefly CPU-starved by a heavy `SteamPrefill --force` on the steal-bound VM, lagging `accept()` past the 10s connect timeout — failed the **entire** multi-hour job. Observed live (A Plague Tale `--force` left a residual gap until a clean re-run reached 99.998%).
+
+- **`clients/agent_client.py`:** bounded **connect-phase retry in `_request`** (`ConnectError`/`ConnectTimeout`/`PoolTimeout` mean the request never reached the agent → safe to retry any method, no duplicate side effects; default 2 retries with backoff). Connect timeout **10s → 15s** absorbs brief accept-lag in one attempt; poll interval **0.5s → 3s** cuts the connect count ~6×. One change hardens the Steam-prefill poll, Epic `pull` poll, `steam_validate`, and `library_sync`, and largely stops `/health` flapping. HTTP-status errors and `agent job failed` still propagate immediately; non-connect transport errors are not blind-retried (POST-safety).
+
+### Fixed — Force-prefill dedup-upgrade TOCTOU race (2026-06-30) — 2026-06-30
+
+UAT-12. The force dedup-upgrade `UPDATE jobs SET payload=? WHERE id=?` (from the force-prefill feature below) had no state guard: if the worker claimed the queued prefill (→ `running`, reading its non-force payload) between the API's dedup read and the UPDATE, the UPDATE rewrote the running job's payload to `force=true` — so the DB falsely recorded that force ran when it didn't. Added `AND state='queued'` + rowcount-aware logging (only log `force_upgraded` when it actually applied; otherwise a too-late dedup hit). `api/routers/prefill_trigger.py`.
+
 ### Added — Force prefill option (`--force` / `?force=true`) (2026-06-29) — 2026-06-29
 
 A normal prefill skips any app SteamPrefill's own state already considers complete, so a game left `partial` by **lancache eviction** (chunks evicted from disk, but SteamPrefill still records them as downloaded) is never refilled — triggering a plain prefill does nothing. A **forced** prefill re-requests *every* chunk (SteamPrefill `--force`): lancache serves still-cached chunks as LAN hits and re-fetches only the evicted/missing ones from the Steam CDN, repairing the partial. It never re-downloads a whole game from the internet — only the genuinely-missing chunks cost WAN.

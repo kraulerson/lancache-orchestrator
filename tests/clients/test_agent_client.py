@@ -19,6 +19,7 @@ def _client(handler) -> AgentClient:
         token=TOKEN,
         transport=transport,
         poll_interval_sec=0.0,
+        connect_retry_backoff_sec=0.0,
     )
 
 
@@ -163,6 +164,93 @@ async def test_steam_validate_single_call():
     res = await client.steam_validate(1018130)
     assert res["chunks_cached"] == 60
     assert res["outcome"] == "cached"
+
+
+# --- UAT-12: agent-call resilience (transient connect-blip tolerance) ---
+
+
+async def test_poll_tolerates_transient_connect_blip():
+    """A transient connect blip on a GET poll is retried inside _request, so a
+    single hiccup mid-prefill does not kill the whole multi-hour job. The agent's
+    uvicorn listener can be briefly CPU-starved during a heavy prefill on the
+    steal-bound VM, lagging accept() past the connect timeout."""
+    state = {"polls": 0}
+
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(202, json={"job_id": "s1"})
+        state["polls"] += 1
+        if state["polls"] <= 2:  # two transient connect failures, then done
+            raise httpx.ConnectTimeout("listener starved")
+        return httpx.Response(200, json={"state": "done", "result": {"ok": True}})
+
+    client = _client(handler)
+    result = await client.steam_prefill([440])
+    assert result["ok"] is True
+    assert state["polls"] == 3  # 2 blips retried + 1 success
+
+
+async def test_connect_failure_exhausts_retries_then_raises():
+    """A persistent connect failure still raises AgentError, but only after the
+    bounded retries (default 2 → 3 attempts) — not on the first blip."""
+    state = {"attempts": 0}
+
+    def handler(request):
+        state["attempts"] += 1
+        raise httpx.ConnectError("refused")
+
+    client = _client(handler)
+    with pytest.raises(AgentError):
+        await client.stat(["a" * 32])
+    assert state["attempts"] == 3  # 1 initial + 2 retries
+
+
+async def test_http_status_error_is_not_retried():
+    """A real HTTP error response (e.g. 500) is NOT a transient connect blip —
+    it propagates immediately without consuming the connect-retry budget."""
+    state = {"attempts": 0}
+
+    def handler(request):
+        state["attempts"] += 1
+        return httpx.Response(500)
+
+    client = _client(handler)
+    with pytest.raises(AgentError, match="returned 500"):
+        await client.stat(["a" * 32])
+    assert state["attempts"] == 1  # not retried
+
+
+async def test_post_connect_blip_is_retried():
+    """A connect blip on the dispatch POST is safe to retry — the connection was
+    never established so the request never reached the agent (no duplicate job)."""
+    state = {"posts": 0}
+
+    def handler(request):
+        if request.method == "POST":
+            state["posts"] += 1
+            if state["posts"] == 1:
+                raise httpx.ConnectTimeout("starved")
+            return httpx.Response(202, json={"job_id": "s1"})
+        return httpx.Response(200, json={"state": "done", "result": {"ok": True}})
+
+    client = _client(handler)
+    result = await client.steam_prefill([440])
+    assert result["ok"] is True
+    assert state["posts"] == 2  # first POST blipped, retried to success
+
+
+async def test_default_connect_timeout_raised_to_15s():
+    """Default connect timeout bumped 10s -> 15s to absorb brief accept-lag on the
+    CPU-contended agent VM in a single attempt."""
+    c = AgentClient(base_url="http://agent:8780", token=TOKEN)
+    assert c._timeout.connect == 15.0
+
+
+async def test_default_poll_interval_raised_to_3s():
+    """Default poll interval bumped 0.5s -> 3s: a multi-hour job needs far fewer
+    connects, cutting the chance of hitting a connect blip ~6x."""
+    c = AgentClient(base_url="http://agent:8780", token=TOKEN)
+    assert c._poll == 3.0
 
 
 async def test_steam_validate_unreachable_raises():
