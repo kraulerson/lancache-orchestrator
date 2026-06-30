@@ -167,3 +167,78 @@ class TestPoolFailure:
                 headers={"Authorization": f"Bearer {VALID_TOKEN}"},
             )
         assert r.status_code == 503
+
+
+class TestForce:
+    async def test_force_true_sets_payload(self, client, populated_pool):
+        game_id = await _ensure_steam_game(populated_pool, app_id="force-1", title="t")
+        r = await client.post(
+            f"/api/v1/games/{game_id}/prefill?force=true",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 202
+        row = await populated_pool.read_one(
+            "SELECT payload FROM jobs WHERE id=?", (r.json()["job_id"],)
+        )
+        assert row["payload"] == '{"force": true}'
+
+    async def test_default_has_null_payload(self, client, populated_pool):
+        game_id = await _ensure_steam_game(populated_pool, app_id="force-2", title="t")
+        r = await client.post(
+            f"/api/v1/games/{game_id}/prefill",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 202
+        row = await populated_pool.read_one(
+            "SELECT payload FROM jobs WHERE id=?", (r.json()["job_id"],)
+        )
+        assert row["payload"] is None
+
+    async def test_force_upgrades_queued_nonforce_job(self, client, populated_pool):
+        """A force request that dedups onto a QUEUED non-force prefill upgrades
+        that job's payload to force, so the force is not silently dropped by the
+        in-flight dedup (migration-0006 allows only one prefill per game)."""
+        game_id = await _ensure_steam_game(populated_pool, app_id="force-3", title="t")
+        await populated_pool.execute_write(
+            "INSERT INTO jobs (kind, game_id, platform, state, source) "
+            "VALUES ('prefill', ?, 'steam', 'queued', 'api')",
+            (game_id,),
+        )
+        existing = await populated_pool.read_one(
+            "SELECT id FROM jobs WHERE kind='prefill' AND game_id=? AND state='queued'",
+            (game_id,),
+        )
+        r = await client.post(
+            f"/api/v1/games/{game_id}/prefill?force=true",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 202
+        assert r.json()["job_id"] == existing["id"]
+        row = await populated_pool.read_one(
+            "SELECT payload FROM jobs WHERE id=?", (existing["id"],)
+        )
+        assert row["payload"] == '{"force": true}'
+
+    async def test_force_does_not_upgrade_running_job(self, client, populated_pool):
+        """A RUNNING prefill cannot be changed mid-flight: a force request dedups
+        onto it and returns it, but its payload is left as-is (NULL)."""
+        game_id = await _ensure_steam_game(populated_pool, app_id="force-4", title="t")
+        await populated_pool.execute_write(
+            "INSERT INTO jobs (kind, game_id, platform, state, source) "
+            "VALUES ('prefill', ?, 'steam', 'running', 'api')",
+            (game_id,),
+        )
+        existing = await populated_pool.read_one(
+            "SELECT id FROM jobs WHERE kind='prefill' AND game_id=? AND state='running'",
+            (game_id,),
+        )
+        r = await client.post(
+            f"/api/v1/games/{game_id}/prefill?force=true",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 202
+        assert r.json()["job_id"] == existing["id"]
+        row = await populated_pool.read_one(
+            "SELECT payload FROM jobs WHERE id=?", (existing["id"],)
+        )
+        assert row["payload"] is None

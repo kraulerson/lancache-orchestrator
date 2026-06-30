@@ -78,6 +78,33 @@ async def test_steam_prefill_ignores_dead_force_key(pool):
     assert driver.calls == [([730], False)]
 
 
+async def test_steam_prefill_payload_force_threads_force(pool):
+    """Force-prefill: a job whose payload carries {"force": true} threads
+    force=True into the driver. This is the live re-introduction of a per-job
+    force — sourced from the job payload (which the worker selects), NOT the
+    top-level dead key the CORE-2 cleanup removed."""
+    game_id = await _seed_game(pool, app_id="730")
+    driver = _StubDriver(ok=True)
+    await prefill_handler(_job(game_id, payload='{"force": true}'), _steam_deps(pool, driver))
+    assert driver.calls == [([730], True)]
+
+
+async def test_steam_prefill_payload_without_force_is_false(pool):
+    """A payload that omits force (e.g. {}) leaves force at its default False."""
+    game_id = await _seed_game(pool, app_id="730")
+    driver = _StubDriver(ok=True)
+    await prefill_handler(_job(game_id, payload="{}"), _steam_deps(pool, driver))
+    assert driver.calls == [([730], False)]
+
+
+async def test_steam_prefill_malformed_payload_is_false(pool):
+    """A non-JSON / unexpected payload must not crash the handler — force=False."""
+    game_id = await _seed_game(pool, app_id="730")
+    driver = _StubDriver(ok=True)
+    await prefill_handler(_job(game_id, payload="not-json"), _steam_deps(pool, driver))
+    assert driver.calls == [([730], False)]
+
+
 async def test_steam_success_enqueues_validate_and_marks_cached(pool):
     game_id = await _seed_game(pool, app_id="730")
     await pool.execute_write("UPDATE games SET current_version='42' WHERE id=?", (game_id,))
@@ -178,6 +205,17 @@ async def test_steam_agent_prefill_ignores_dead_force_key(pool, monkeypatch):
     )
     await prefill_handler(_job(game_id, force=True), deps)
     assert agent.calls == [([730], False)]
+
+
+async def test_steam_agent_payload_force_threads_force(pool, monkeypatch):
+    """Force-prefill, agent seam: payload {"force": true} threads force=True to
+    agent_client.steam_prefill (matching the in-process driver path)."""
+    _agent_enabled(monkeypatch)
+    game_id = await _seed_game(pool, app_id="730")
+    agent = _FakeAgent(ok=True)
+    deps = Deps(pool=pool, prefill_driver=_ExplodingDriver(), agent_client=agent)
+    await prefill_handler(_job(game_id, payload='{"force": true}'), deps)
+    assert agent.calls == [([730], True)]
 
 
 async def test_steam_agent_success_same_db_writes(pool, monkeypatch):

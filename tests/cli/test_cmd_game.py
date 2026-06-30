@@ -49,6 +49,25 @@ def test_game_prefill_triggers(mock):
     assert r.exit_code == 0 and "50" in r.output
 
 
+def test_game_prefill_force_sends_force_param(mock):
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/api/v1/games/5/prefill"
+        assert dict(req.url.params).get("force") == "true"
+        return httpx.Response(202, json={"job_id": 52})
+
+    r = mock(["game", "prefill", "5", "--force"], handler)
+    assert r.exit_code == 0 and "52" in r.output
+
+
+def test_game_prefill_without_force_omits_param(mock):
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert "force" not in dict(req.url.params)
+        return httpx.Response(202, json={"job_id": 53})
+
+    r = mock(["game", "prefill", "5"], handler)
+    assert r.exit_code == 0
+
+
 def test_game_validate_triggers(mock):
     def handler(req: httpx.Request) -> httpx.Response:
         assert req.url.path == "/api/v1/games/5/validate"

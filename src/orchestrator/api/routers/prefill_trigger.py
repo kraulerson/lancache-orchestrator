@@ -27,6 +27,13 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/v1/games", tags=["prefill"])
 
+# Job-payload marker for a FORCED prefill — threads SteamPrefill `--force`, which
+# re-requests every chunk so lancache refills evicted/partial games (a normal
+# prefill skips an app SteamPrefill's own state thinks is already complete).
+# Single source of truth for the INSERT, the dedup force-upgrade, and the
+# handler's payload parse (jobs/handlers/prefill.py:_payload_force).
+_FORCE_PAYLOAD = '{"force": true}'
+
 
 @router.post(
     "/{game_id}/prefill",
@@ -40,6 +47,7 @@ router = APIRouter(prefix="/api/v1/games", tags=["prefill"])
 )
 async def trigger_prefill(
     game_id: int,
+    force: bool = False,
     pool: Pool = Depends(get_pool_dep),  # noqa: B008
 ) -> JSONResponse:
     try:
@@ -54,18 +62,34 @@ async def trigger_prefill(
             )
 
         existing = await pool.read_one(
-            "SELECT id FROM jobs "
+            "SELECT id, state, payload FROM jobs "
             "WHERE kind='prefill' AND game_id=? "
             "AND state IN ('queued','running') "
             "ORDER BY id LIMIT 1",
             (game_id,),
         )
         if existing is not None:
-            _log.info(
-                "prefill_trigger.dedup_hit",
-                game_id=game_id,
-                existing_job_id=existing["id"],
-            )
+            # Force-upgrade: a force request that dedups onto a still-QUEUED
+            # non-force prefill rewrites its payload so the force isn't silently
+            # swallowed by the in-flight dedup (migration-0006 allows only one
+            # prefill per game). A RUNNING prefill can't change mid-flight, so
+            # it's returned as-is.
+            if force and existing["state"] == "queued" and existing["payload"] != _FORCE_PAYLOAD:
+                await pool.execute_write(
+                    "UPDATE jobs SET payload=? WHERE id=?",
+                    (_FORCE_PAYLOAD, existing["id"]),
+                )
+                _log.info(
+                    "prefill_trigger.force_upgraded",
+                    game_id=game_id,
+                    existing_job_id=int(existing["id"]),
+                )
+            else:
+                _log.info(
+                    "prefill_trigger.dedup_hit",
+                    game_id=game_id,
+                    existing_job_id=existing["id"],
+                )
             return JSONResponse(status_code=202, content={"job_id": int(existing["id"])})
 
         # ON CONFLICT DO NOTHING + the migration-0006 partial UNIQUE index make
@@ -73,9 +97,9 @@ async def trigger_prefill(
         # an in-flight prefill for this game, our INSERT is a no-op and we return
         # the winner's job_id below — no duplicate prefill row, no duplicate work.
         await pool.execute_write(
-            "INSERT INTO jobs (kind, game_id, platform, state, source) "
-            "VALUES ('prefill', ?, ?, 'queued', 'api') ON CONFLICT DO NOTHING",
-            (game_id, platform),
+            "INSERT INTO jobs (kind, game_id, platform, state, source, payload) "
+            "VALUES ('prefill', ?, ?, 'queued', 'api', ?) ON CONFLICT DO NOTHING",
+            (game_id, platform, _FORCE_PAYLOAD if force else None),
         )
         new_row = await pool.read_one(
             "SELECT id FROM jobs WHERE kind='prefill' AND game_id=? "

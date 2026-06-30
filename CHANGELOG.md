@@ -19,6 +19,16 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — Force prefill option (`--force` / `?force=true`) (2026-06-29) — 2026-06-29
+
+A normal prefill skips any app SteamPrefill's own state already considers complete, so a game left `partial` by **lancache eviction** (chunks evicted from disk, but SteamPrefill still records them as downloaded) is never refilled — triggering a plain prefill does nothing. A **forced** prefill re-requests *every* chunk (SteamPrefill `--force`): lancache serves still-cached chunks as LAN hits and re-fetches only the evicted/missing ones from the Steam CDN, repairing the partial. It never re-downloads a whole game from the internet — only the genuinely-missing chunks cost WAN.
+
+- **API:** `POST /api/v1/games/{id}/prefill?force=true` (bearer-gated; default false → fully backward-compatible). The flag rides in the job's existing `payload` column as `{"force": true}` — **no migration**.
+- **Dedup upgrade:** a force request that dedups onto a still-**queued** non-force prefill rewrites that job's payload to force, so the in-flight dedup (migration-0006, one prefill per game) doesn't silently swallow the force; a **running** prefill is returned unchanged (can't switch mid-run).
+- **Handler (`jobs/handlers/prefill.py`):** `_steam_prefill` parses `payload.force` (robust to NULL / non-JSON → False) and threads it through the existing `force=` seam to `SteamPrefillDriver.prefill_apps` / the agent's `POST /v1/steam/prefill`. **Steam only**; Epic ignores it.
+- **CLI:** `orchestrator-cli game prefill <id> --force` / `-f`.
+- Re-introduces a per-job force the 2026-06-23 CORE-2 cleanup removed as a *dead* top-level key — now sourced from the `payload` the worker actually selects, so it is live, not dead.
+
 ### Changed — Validator scopes to prefilled depots; reads `.shas` manifests (2026-06-29) — 2026-06-29
 
 Fixes multi-language Steam titles showing a permanent "Check failed". The validator located **every** depot in an app's manifest set, but SteamPrefill only prefills the operator's selected language/OS depots — so other-language depots (never downloaded) dragged games like Dota 2 (44% cached) and BG3 (53%) to a perpetual `partial`/`missing`.
