@@ -208,6 +208,23 @@ async def _epic_prefill_inner(
     )
 
 
+def _payload_force(job: dict[str, Any]) -> bool:
+    """Read a per-job ``force`` flag from the job ``payload`` JSON (set by the
+    prefill trigger's ``?force=true``). Robust: a missing/NULL/non-JSON payload,
+    or one without a ``force`` key, means False. Unlike the CORE-2 dead top-level
+    key, this is sourced from the ``payload`` column the worker actually selects,
+    so a force prefill genuinely re-requests every chunk (SteamPrefill ``--force``)
+    to repair lancache-evicted / partial games."""
+    raw = job.get("payload")
+    if not raw:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    return bool(parsed.get("force")) if isinstance(parsed, dict) else False
+
+
 async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
     """Prefill one Steam game through the host-installed SteamPrefill binary (F5).
 
@@ -246,8 +263,9 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
         raise ValueError(f"game {game_id} platform is {game['platform']!r}, not steam")
 
     job_id = job.get("id")
+    force = _payload_force(job)
     await deps.pool.execute_write("UPDATE games SET status='downloading' WHERE id=?", (game_id,))
-    _log.info("prefill.started", job_id=job_id, game_id=game_id)
+    _log.info("prefill.started", job_id=job_id, game_id=game_id, force=force)
     try:
         await _steam_prefill_inner(
             job_id,
@@ -256,6 +274,7 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
             deps,
             prefill_driver,
             agent_enabled=settings.agent_enabled,
+            force=force,
         )
     except Exception as e:
         # Never leave the game stuck in 'downloading'. The non-ok-exit path
@@ -278,6 +297,7 @@ async def _steam_prefill_inner(
     prefill_driver: SteamPrefillDriver | None,
     *,
     agent_enabled: bool,
+    force: bool = False,
 ) -> None:
     try:
         app_id_int = int(game["app_id"])
@@ -290,13 +310,13 @@ async def _steam_prefill_inner(
         # here so the type checker narrows it (mirrors the Epic seam).
         if deps.agent_client is None:
             raise RuntimeError("agent_client is required when agent_enabled")
-        agent_result = await deps.agent_client.steam_prefill([app_id_int])
+        agent_result = await deps.agent_client.steam_prefill([app_id_int], force=force)
         ok = bool(agent_result["ok"])
         raw = str(agent_result.get("raw", ""))
     else:
         if prefill_driver is None:
             raise RuntimeError("prefill_driver is required for prefill handler")
-        driver_result = await prefill_driver.prefill_apps([app_id_int])
+        driver_result = await prefill_driver.prefill_apps([app_id_int], force=force)
         ok = driver_result.ok
         raw = driver_result.raw
     _log.info(

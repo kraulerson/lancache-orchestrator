@@ -968,6 +968,14 @@ the feature that generates the content F7 checks, closing the prefill → cache
 F6 (Epic) deferred. Bundled a small F7 fix to stop counting mode-000
 unreadable cache files.
 
+**Enhancement — Force prefill (2026-06-29):** `?force=true` on the prefill
+trigger (CLI `game prefill --force` / `-f`) threads SteamPrefill `--force` via
+the job `payload` `{"force": true}`, re-requesting every chunk to refill a game
+left `partial` by lancache eviction (a normal prefill skips apps SteamPrefill's
+own state deems complete, so it would refill nothing). The trigger dedup-upgrades
+a still-queued non-force prefill to force; Steam only (Epic ignores it). No
+migration — reuses the existing `jobs.payload` column. See CHANGELOG (2026-06-29).
+
 **Key Interfaces:**
   - `src/orchestrator/prefill/downloader.py` — `prefill_chunks` (async httpx,
     bounded `Semaphore`, stream+discard, retry/backoff) + `PrefillResult`

@@ -78,19 +78,32 @@ def game_show(ctx: click.Context, game_id: int) -> None:
         click.echo(f"{key:18} {rendered}")
 
 
-def _trigger(ctx: click.Context, game_id: int, path: str, name: str) -> None:
+def _trigger(
+    ctx: click.Context,
+    game_id: int,
+    path: str,
+    name: str,
+    params: dict[str, str] | None = None,
+) -> None:
     client = make_client(ctx)
-    resp = client.post(f"/api/v1/games/{game_id}/{path}")
+    resp = client.post(f"/api/v1/games/{game_id}/{path}", params=params)
     output.success(f"queued {name} for game {game_id} (job_id={resp['job_id']}).")
 
 
 @game.command("prefill")
 @click.argument("game_id", type=int, callback=_positive_int)
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Re-request every chunk (SteamPrefill --force) to refill an evicted/partial game "
+    "that a normal prefill would skip as already complete.",
+)
 @click.pass_context
 @handles_api_errors
-def game_prefill(ctx: click.Context, game_id: int) -> None:
-    """Trigger a prefill."""
-    _trigger(ctx, game_id, "prefill", "prefill")
+def game_prefill(ctx: click.Context, game_id: int, force: bool) -> None:
+    """Trigger a prefill (use --force to refill an already-'complete' partial game)."""
+    _trigger(ctx, game_id, "prefill", "prefill", params={"force": "true"} if force else None)
 
 
 @game.command("validate")
