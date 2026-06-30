@@ -19,6 +19,10 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Steam auth status was a stale orphaned column; now sourced live (2026-06-30) — 2026-06-30
+
+`GET /api/v1/platforms` (read by the CLI `status` and the Game_shelf cache dashboard) reported Steam's `auth_status` from the `platforms.auth_status` DB column — but that column has had **no Steam writer since re-arch ③c** (the legacy ValvePython worker that wrote it was deleted), so it was frozen at a stale `expired` and would have read `expired` forever regardless of the real SteamPrefill session (which was healthy — `--force` prefills ran fine). The fix overrides the **steam** row's `auth_status` with the same LIVE signal `/health` already uses — `agent_client.auth_status()` when `agent_enabled`, else `prefill_driver.auth_status()`, each of which stats the persisted `account.config` — and clears the equally-stale `last_error`. Defensive: when the signal can't be determined (agent down / no driver / any error) it falls back to the stored value and never raises. Epic is unchanged (it has a real writer). `api/routers/platforms.py`; 6 new tests; no migration.
+
 ### Fixed — Agent-RPC resilience: a transient connect blip no longer kills a long job (2026-06-30) — 2026-06-30
 
 UAT-12. The control plane reaches the data-plane agent over HTTP with no retry, so a single transient `ConnectTimeout` — e.g. the agent's single uvicorn listener briefly CPU-starved by a heavy `SteamPrefill --force` on the steal-bound VM, lagging `accept()` past the 10s connect timeout — failed the **entire** multi-hour job. Observed live (A Plague Tale `--force` left a residual gap until a clean re-run reached 99.998%).

@@ -357,3 +357,116 @@ class TestPlatformsOrdering:
         )
         names = [p["name"] for p in r.json()["platforms"]]
         assert names == ["steam", "epic"]
+
+
+# ---------------------------------------------------------------------------
+# Steam auth_status sourced from the live agent/driver signal (the platforms
+# column has had NO Steam writer since re-arch ③c — it's orphaned/stale).
+# ---------------------------------------------------------------------------
+
+
+class TestSteamAuthLive:
+    class _StubDriver:
+        def __init__(self, ok):
+            self._ok = ok
+
+        def auth_status(self):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(ok=self._ok)
+
+    def _co_located(self, monkeypatch):
+        from orchestrator.core.settings import Settings
+
+        monkeypatch.setattr(
+            "orchestrator.api.routers.platforms.get_settings",
+            lambda: Settings(orchestrator_token="a" * 32, agent_enabled=False),
+        )
+
+    async def _steam_row(self, unit_app):
+        import httpx
+
+        transport = httpx.ASGITransport(app=unit_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            r = await c.get("/api/v1/platforms", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
+        assert r.status_code == 200
+        return next(p for p in r.json()["platforms"] if p["name"] == "steam")
+
+    async def test_live_driver_ok_overrides_stale_expired_column(
+        self, unit_app, populated_pool, monkeypatch
+    ):
+        self._co_located(monkeypatch)
+        await populated_pool.execute_write(
+            "UPDATE platforms SET auth_status='expired', last_error='stale' WHERE name='steam'"
+        )
+        unit_app.state.prefill_driver = self._StubDriver(ok=True)
+        steam = await self._steam_row(unit_app)
+        assert steam["auth_status"] == "ok"
+        assert steam["last_error"] is None  # stale last_error cleared on override
+
+    async def test_live_driver_not_ok_reports_expired(self, unit_app, populated_pool, monkeypatch):
+        self._co_located(monkeypatch)
+        await populated_pool.execute_write(
+            "UPDATE platforms SET auth_status='ok' WHERE name='steam'"
+        )
+        unit_app.state.prefill_driver = self._StubDriver(ok=False)
+        steam = await self._steam_row(unit_app)
+        assert steam["auth_status"] == "expired"
+
+    async def test_no_live_signal_falls_back_to_db(self, unit_app, populated_pool, monkeypatch):
+        # agent_enabled but no agent_client (or no driver) -> indeterminate -> DB value.
+        self._co_located(monkeypatch)  # co-located, but no prefill_driver on app.state
+        await populated_pool.execute_write(
+            "UPDATE platforms SET auth_status='expired' WHERE name='steam'"
+        )
+        steam = await self._steam_row(unit_app)
+        assert steam["auth_status"] == "expired"  # unchanged (defensive fallback)
+
+    async def test_live_check_error_falls_back_to_db(self, unit_app, populated_pool, monkeypatch):
+        self._co_located(monkeypatch)
+
+        class _BoomDriver:
+            def auth_status(self):
+                raise RuntimeError("driver boom")
+
+        await populated_pool.execute_write(
+            "UPDATE platforms SET auth_status='expired' WHERE name='steam'"
+        )
+        unit_app.state.prefill_driver = _BoomDriver()
+        steam = await self._steam_row(unit_app)
+        assert steam["auth_status"] == "expired"  # exception -> None -> DB fallback
+
+    async def test_epic_auth_status_unaffected(self, unit_app, populated_pool, monkeypatch):
+        self._co_located(monkeypatch)
+        await populated_pool.execute_write(
+            "UPDATE platforms SET auth_status='ok' WHERE name='epic'"
+        )
+        unit_app.state.prefill_driver = self._StubDriver(ok=False)  # would flip steam expired
+        import httpx
+
+        transport = httpx.ASGITransport(app=unit_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            r = await c.get("/api/v1/platforms", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
+        epic = next(p for p in r.json()["platforms"] if p["name"] == "epic")
+        assert epic["auth_status"] == "ok"  # epic read from DB, never overridden
+
+    async def test_live_agent_signal_overrides_when_agent_enabled(
+        self, unit_app, populated_pool, monkeypatch
+    ):
+        from orchestrator.core.settings import Settings
+
+        monkeypatch.setattr(
+            "orchestrator.api.routers.platforms.get_settings",
+            lambda: Settings(orchestrator_token="a" * 32, agent_enabled=True),
+        )
+
+        class _StubAgent:
+            async def auth_status(self):
+                return {"ok": True}
+
+        await populated_pool.execute_write(
+            "UPDATE platforms SET auth_status='expired' WHERE name='steam'"
+        )
+        unit_app.state.agent_client = _StubAgent()
+        steam = await self._steam_row(unit_app)
+        assert steam["auth_status"] == "ok"
