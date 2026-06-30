@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from orchestrator.api._query_helpers import ERROR_TRUNCATE_BYTES
 from orchestrator.api.dependencies import get_pool_dep
+from orchestrator.core.settings import get_settings
 from orchestrator.db.pool import PoolError
 
 if TYPE_CHECKING:
@@ -54,6 +55,30 @@ class PlatformListResponse(BaseModel):
 
 
 router = APIRouter(prefix="/api/v1", tags=["platforms"])
+
+
+async def _live_steam_auth_status(request: Request) -> str | None:
+    """Steam's ``platforms.auth_status`` column has had NO writer since re-arch
+    ③c (the legacy ValvePython worker that wrote it was deleted), so it's frozen
+    at a stale value. Source Steam auth from the same LIVE signal ``/health``
+    uses — the data-plane agent (``agent_enabled``) or the local SteamPrefill
+    driver, each of which stats the persisted ``account.config``. Returns
+    ``"ok"``/``"expired"``, or ``None`` when it can't be determined (agent down /
+    no driver) so the caller falls back to the stored column value. Never raises."""
+    settings = get_settings()
+    try:
+        if settings.agent_enabled:
+            client = getattr(request.app.state, "agent_client", None)
+            if client is None:
+                return None
+            st = await client.auth_status()
+            return "ok" if bool(st["ok"]) else "expired"
+        driver = getattr(request.app.state, "prefill_driver", None)
+        if driver is None:
+            return None
+        return "ok" if driver.auth_status().ok else "expired"
+    except Exception:  # a live-check failure must never break the platforms read
+        return None
 
 
 @router.get(
@@ -106,19 +131,26 @@ async def list_platforms(
     # UAT-5 U5-2 parity: defensive per-row construction. Out-of-Literal
     # values in `name`/`auth_status`/`auth_method` would otherwise raise
     # ValidationError → 500.
+    live_steam = await _live_steam_auth_status(request)
     items: list[PlatformResponse] = []
     for row in rows:
+        auth_status = row["auth_status"]
+        last_error = row["last_error"]
+        # Steam's stored auth_status is orphaned (no writer since re-arch ③c) —
+        # override it with the live agent/driver signal when determinable, and
+        # clear the equally-stale last_error. Epic keeps its real DB value.
+        if row["name"] == "steam" and live_steam is not None:
+            auth_status = live_steam
+            last_error = None
         try:
             items.append(
                 PlatformResponse(
                     name=row["name"],
-                    auth_status=row["auth_status"],
+                    auth_status=auth_status,
                     auth_method=row["auth_method"],
                     auth_expires_at=row["auth_expires_at"],
                     last_sync_at=row["last_sync_at"],
-                    last_error=(
-                        row["last_error"][:ERROR_TRUNCATE_BYTES] if row["last_error"] else None
-                    ),
+                    last_error=(last_error[:ERROR_TRUNCATE_BYTES] if last_error else None),
                 )
             )
         except ValidationError as e:
