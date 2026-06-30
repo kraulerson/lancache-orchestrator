@@ -242,3 +242,54 @@ class TestForce:
             "SELECT payload FROM jobs WHERE id=?", (existing["id"],)
         )
         assert row["payload"] is None
+
+    async def test_force_upgrade_skips_concurrently_claimed_job(self, unit_app, populated_pool):
+        """TOCTOU (UAT-12): if the worker claims the queued prefill (-> running,
+        reading its payload as non-force) between the API's dedup read and the
+        upgrade UPDATE, the state-guarded UPDATE must NOT rewrite the now-running
+        job's payload — otherwise the DB would falsely record that force ran."""
+        import httpx
+
+        from orchestrator.api.dependencies import get_pool_dep
+
+        game_id = await _ensure_steam_game(populated_pool, app_id="race-p", title="t")
+        # The real row is RUNNING (already claimed by the worker, payload NULL).
+        await populated_pool.execute_write(
+            "INSERT INTO jobs (kind, game_id, platform, state, source) "
+            "VALUES ('prefill', ?, 'steam', 'running', 'api')",
+            (game_id,),
+        )
+        running = await populated_pool.read_one(
+            "SELECT id FROM jobs WHERE kind='prefill' AND game_id=? AND state='running'",
+            (game_id,),
+        )
+
+        class _StaleReadPool:
+            """Reports the in-flight prefill as 'queued' to the dedup read (the
+            stale snapshot the API saw before the worker claimed it), but the real
+            row is 'running' — so the guarded UPDATE hits a running row."""
+
+            def __init__(self, real):
+                self._real = real
+
+            async def read_one(self, query, params=()):
+                row = await self._real.read_one(query, params)
+                if row is not None and "FROM jobs" in query and "state IN" in query:
+                    return {**row, "state": "queued"}  # stale: looked queued
+                return row
+
+            async def execute_write(self, *a, **kw):
+                return await self._real.execute_write(*a, **kw)
+
+        unit_app.dependency_overrides[get_pool_dep] = lambda: _StaleReadPool(populated_pool)
+        transport = httpx.ASGITransport(app=unit_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            r = await c.post(
+                f"/api/v1/games/{game_id}/prefill?force=true",
+                headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            )
+        assert r.status_code == 202
+        assert r.json()["job_id"] == running["id"]
+        # The running job's payload was NOT rewritten — force did not falsely apply.
+        row = await populated_pool.read_one("SELECT payload FROM jobs WHERE id=?", (running["id"],))
+        assert row["payload"] is None
