@@ -202,11 +202,21 @@ async def _epic_prefill_inner(
             game_id=game_id,
             hit_ratio=round(hit_ratio, 3),
         )
+    # Parity with steam (ID5): enqueue a real disk-stat validate — it sets the
+    # accurate status (a "complete" prefill can be a true Partial). Do NOT
+    # optimistically pre-set status='up_to_date' from the sample HIT-check above;
+    # let the validate decide. ON CONFLICT DO NOTHING dedups against an in-flight
+    # validate for this game (migration-0006 partial UNIQUE index).
+    await deps.pool.execute_write(
+        "INSERT INTO jobs (kind, game_id, platform, state, source) "
+        "VALUES ('validate', ?, 'epic', 'queued', 'scheduler') ON CONFLICT DO NOTHING",
+        (game_id,),
+    )
     # F8: Epic prefill always fetches a FRESH manifest (signed URLs expire), so
     # the cache now reflects current_version — adopt it so the scheduled diff
-    # stops re-enqueuing this game every cycle.
+    # stops re-enqueuing this game every cycle (the validate above re-affirms).
     await deps.pool.execute_write(
-        "UPDATE games SET status='up_to_date', last_prefilled_at=CURRENT_TIMESTAMP, "
+        "UPDATE games SET last_prefilled_at=CURRENT_TIMESTAMP, "
         "cached_version=current_version WHERE id=?",
         (game_id,),
     )

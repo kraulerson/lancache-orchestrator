@@ -35,7 +35,7 @@ def cache_fetch_manifests(ctx: click.Context) -> None:
 @click.pass_context
 @handles_api_errors
 def cache_validate_all(ctx: click.Context) -> None:
-    """Enqueue a full validation sweep over EVERY steam game (backfill).
+    """Enqueue a full validation sweep over ALL games across platforms (backfill).
 
     Use after seeding the durable manifest archive so genuinely-cached games are
     re-checked and flip to up_to_date."""

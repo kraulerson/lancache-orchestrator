@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api/v1/games", tags=["validate"])
     "/{game_id}/validate",
     responses={
         202: {"description": "Validate job queued or existing in-flight job returned"},
-        400: {"description": "Game is on a non-steam platform"},
+        400: {"description": "Game is on an unsupported platform (not steam/epic)"},
         401: {"description": "Missing/invalid bearer"},
         404: {"description": "Game not found"},
         503: {"description": "Database unavailable"},
@@ -43,10 +43,11 @@ async def trigger_validate(
         game = await pool.read_one("SELECT id, platform FROM games WHERE id=?", (game_id,))
         if game is None:
             raise HTTPException(status_code=404, detail=f"game {game_id} not found")
-        if game["platform"] != "steam":
+        platform = game["platform"]
+        if platform not in ("steam", "epic"):
             raise HTTPException(
                 status_code=400,
-                detail=f"validate only supports steam (got {game['platform']!r})",
+                detail=f"validate only supports steam/epic (got {platform!r})",
             )
 
         existing = await pool.read_one(
@@ -69,8 +70,8 @@ async def trigger_validate(
         # this game makes our INSERT a no-op and we return the winner's job_id.
         await pool.execute_write(
             "INSERT INTO jobs (kind, game_id, platform, state, source) "
-            "VALUES ('validate', ?, 'steam', 'queued', 'api') ON CONFLICT DO NOTHING",
-            (game_id,),
+            "VALUES ('validate', ?, ?, 'queued', 'api') ON CONFLICT DO NOTHING",
+            (game_id, platform),
         )
         new_row = await pool.read_one(
             "SELECT id FROM jobs WHERE kind='validate' AND game_id=? "

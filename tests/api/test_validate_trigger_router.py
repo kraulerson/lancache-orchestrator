@@ -42,6 +42,29 @@ class TestQueueJob:
             "source": "api",
         }
 
+    async def test_epic_game_queues_with_epic_platform(self, client, populated_pool):
+        """Epic parity: a per-game validate trigger for an epic game must queue a
+        validate job carrying platform='epic' (Game_shelf's Validate button hits
+        this endpoint). The job's real platform is what validate_game dispatches on."""
+        row = await populated_pool.read_one("SELECT id FROM games WHERE platform='epic' LIMIT 1")
+        assert row is not None
+        r = await client.post(
+            f"/api/v1/games/{row['id']}/validate",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 202
+        jrow = await populated_pool.read_one(
+            "SELECT kind, game_id, platform, state, source FROM jobs WHERE id=?",
+            (r.json()["job_id"],),
+        )
+        assert jrow == {
+            "kind": "validate",
+            "game_id": row["id"],
+            "platform": "epic",
+            "state": "queued",
+            "source": "api",
+        }
+
 
 class TestDedup:
     async def test_concurrent_calls_return_same_job_id(self, client, populated_pool):
@@ -123,15 +146,31 @@ class TestErrors:
         assert r.status_code == 404
         assert "not found" in r.json()["detail"]
 
-    async def test_non_steam_game_returns_400(self, client, populated_pool):
-        row = await populated_pool.read_one("SELECT id FROM games WHERE platform='epic' LIMIT 1")
-        assert row is not None
-        r = await client.post(
-            f"/api/v1/games/{row['id']}/validate",
-            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
-        )
+    async def test_unsupported_platform_returns_400(self, unit_app):
+        """A platform outside steam/epic is rejected (defensive; the games CHECK
+        constrains to steam/epic, so this uses a mock pool to reach the branch)."""
+        import httpx
+
+        from orchestrator.api.dependencies import get_pool_dep
+
+        class _GogPool:
+            async def read_one(self, query, *_a, **_kw):
+                if "FROM games" in query:
+                    return {"id": 7, "platform": "gog"}
+                return None
+
+            async def execute_write(self, *_a, **_kw):
+                return 1
+
+        unit_app.dependency_overrides[get_pool_dep] = lambda: _GogPool()
+        transport = httpx.ASGITransport(app=unit_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            r = await c.post(
+                "/api/v1/games/7/validate",
+                headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            )
         assert r.status_code == 400
-        assert "steam" in r.json()["detail"]
+        assert "gog" in r.json()["detail"]
 
 
 class TestAuthBoundary:
