@@ -445,6 +445,34 @@ def _make_unreachable_verify():
     return _verify
 
 
+async def test_epic_manifest_stores_cdn_base(pool, monkeypatch):
+    """Epic prefill must persist manifest.cdn_base in the manifests row so the
+    Epic validator can compute the lancache cache-key without re-fetching a signed
+    manifest. Before the fix the INSERT omits cdn_base and the row is NULL."""
+    import orchestrator.jobs.handlers.prefill as ph
+
+    settings = Settings(orchestrator_token="a" * 32, agent_enabled=True)
+    monkeypatch.setattr(ph, "get_settings", lambda: settings)
+
+    async def _fake_verify(paths, host, base, settings, **kw):
+        return 1.0
+
+    monkeypatch.setattr(ph, "epic_verify_cached", _fake_verify)
+
+    manifest = _epic_manifest()  # cdn_base="/base"
+    gid = await _seed_epic_game(pool, app_id="AppCdnBase")
+    deps = Deps(
+        pool=pool,
+        epic_client=_StubEpic(manifest),
+        agent_client=_FakeEpicAgent(),
+    )
+    await prefill_handler(_job(gid, platform="epic"), deps)
+
+    m = await pool.read_one("SELECT cdn_base FROM manifests WHERE game_id=?", (gid,))
+    assert m is not None
+    assert m["cdn_base"] == manifest.cdn_base
+
+
 async def test_steam_nonnumeric_app_id_raises(pool):
     game_id = await _seed_game(pool, app_id="not-a-number")
     driver = _StubDriver(ok=True)

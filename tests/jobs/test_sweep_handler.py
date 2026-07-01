@@ -60,14 +60,15 @@ async def test_sweep_skips_when_no_agent_client(pool):
     assert g["status"] == "up_to_date"
 
 
-async def test_sweep_validates_only_candidate_steam_games(pool, monkeypatch):
-    # candidates: up_to_date + validation_failed steam. NOT: epic, blocked, not_downloaded.
+async def test_sweep_validates_candidate_games_all_platforms(pool, monkeypatch):
+    # candidates: up_to_date + validation_failed, any platform.
+    # NOT: blocked, not_downloaded (regardless of platform).
     _healthy(monkeypatch)
     g_ok = await _seed(pool, status="up_to_date", app_id="1")
     g_vf = await _seed(pool, status="validation_failed", app_id="2")
     await _seed(pool, status="blocked", app_id="3")
     await _seed(pool, status="not_downloaded", app_id="4")
-    await _seed(pool, platform="epic", status="up_to_date", app_id="5")
+    g_epic = await _seed(pool, platform="epic", status="up_to_date", app_id="5")
 
     seen: list[int] = []
 
@@ -86,7 +87,8 @@ async def test_sweep_validates_only_candidate_steam_games(pool, monkeypatch):
 
     monkeypatch.setattr("orchestrator.jobs.handlers.sweep.validate_one_game", fake_validate_one)
     await sweep_handler(_job(), Deps(pool=pool, agent_client=_Agent()))
-    assert sorted(seen) == sorted([g_ok, g_vf])
+    # Steam + epic both swept; blocked / not_downloaded excluded regardless of platform.
+    assert sorted(seen) == sorted([g_ok, g_vf, g_epic])
 
 
 async def test_sweep_isolates_per_game_errors(pool, monkeypatch):
@@ -210,9 +212,9 @@ def _capture_pool(pool, captured):
     return pool
 
 
-async def test_full_payload_selects_all_steam(pool, monkeypatch):
-    """`{"full": true}` payload => the validate-all candidate SQL (every steam
-    game, no status gate)."""
+async def test_full_payload_selects_all_platforms(pool, monkeypatch):
+    """`{"full": true}` payload => the validate-all candidate SQL (every game,
+    all platforms, no status gate)."""
     import orchestrator.jobs.handlers.sweep as sweep_mod
 
     _healthy(monkeypatch)
@@ -247,3 +249,53 @@ async def test_malformed_payload_falls_back_to_gated(pool, monkeypatch):
     job = {"id": 1, "kind": "sweep", "payload": "not json"}
     await sweep_handler(job, Deps(pool=pool, agent_client=_Agent()))
     assert captured["sql"] == sweep_mod._CANDIDATE_SQL
+
+
+# ---------------------------------------------------------------------------
+# Task 8: un-scope sweep to include Epic games
+# ---------------------------------------------------------------------------
+
+
+async def test_sweep_includes_epic_games_status_gated(pool, monkeypatch):
+    """Status-gated sweep must validate Epic games (up_to_date / validation_failed)
+    alongside Steam games — not just Steam (Task 8, epic-validation-parity)."""
+    _healthy(monkeypatch)
+    steam_id = await _seed(pool, platform="steam", status="up_to_date", app_id="1")
+    epic_id = await _seed(pool, platform="epic", status="up_to_date", app_id="fortnite")
+    epic_vf_id = await _seed(pool, platform="epic", status="validation_failed", app_id="turaco")
+
+    seen: list[int] = []
+
+    async def fake_validate_one(pool_, deps_, game_id, settings):
+        seen.append(game_id)
+        from orchestrator.validator.disk_stat import ValidationResult
+
+        return ValidationResult(1, 1, 0, "cached", "100", None)
+
+    monkeypatch.setattr("orchestrator.jobs.handlers.sweep.validate_one_game", fake_validate_one)
+    await sweep_handler(_job(), Deps(pool=pool, agent_client=_Agent()))
+    assert steam_id in seen, "steam game must be validated"
+    assert epic_id in seen, "epic up_to_date game must be validated"
+    assert epic_vf_id in seen, "epic validation_failed game must be validated"
+
+
+async def test_sweep_includes_epic_games_full(pool, monkeypatch):
+    """Full-mode sweep must validate Epic games alongside Steam games
+    (Task 8, epic-validation-parity)."""
+    _healthy(monkeypatch)
+    steam_id = await _seed(pool, platform="steam", status="not_downloaded", app_id="10")
+    epic_id = await _seed(pool, platform="epic", status="not_downloaded", app_id="nd_epic")
+
+    seen: list[int] = []
+
+    async def fake_validate_one(pool_, deps_, game_id, settings):
+        seen.append(game_id)
+        from orchestrator.validator.disk_stat import ValidationResult
+
+        return ValidationResult(1, 1, 0, "cached", "100", None)
+
+    monkeypatch.setattr("orchestrator.jobs.handlers.sweep.validate_one_game", fake_validate_one)
+    job = {"id": 1, "kind": "sweep", "payload": '{"full": true}'}
+    await sweep_handler(job, Deps(pool=pool, agent_client=_Agent()))
+    assert steam_id in seen, "steam game must be validated in full mode"
+    assert epic_id in seen, "epic game must be validated in full mode"

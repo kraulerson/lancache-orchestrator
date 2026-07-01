@@ -23,18 +23,17 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 _CANDIDATE_SQL = (
-    "SELECT id, status FROM games "
-    "WHERE platform='steam' AND status IN ('up_to_date','validation_failed') "
-    "ORDER BY id"
+    "SELECT id, status FROM games WHERE status IN ('up_to_date','validation_failed') ORDER BY id"
 )
 
-# `full` mode (validate-all backfill, 2026-06-24): validate EVERY steam game,
-# not just the already-cached subset. Carried on jobs.payload `{"full": true}`.
-_CANDIDATE_SQL_FULL = "SELECT id, status FROM games WHERE platform='steam' ORDER BY id"
+# `full` mode (validate-all backfill, 2026-06-24): validate EVERY game across
+# all platforms, not just the already-cached subset. Carried on jobs.payload
+# `{"full": true}`.
+_CANDIDATE_SQL_FULL = "SELECT id, status FROM games ORDER BY id"
 
 
 async def sweep_handler(job: dict[str, Any], deps: Deps) -> None:
-    """Validate every cached, non-blocked Steam game in batches (F13).
+    """Validate every cached, non-blocked game (Steam or Epic) in batches (F13).
 
     Best-effort: an unhealthy validator or a missing agent client is a SKIP (the
     job succeeds — nothing to do), and a per-game failure never aborts the sweep.

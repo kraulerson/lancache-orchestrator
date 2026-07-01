@@ -1000,6 +1000,19 @@ def test_migration_0008_creates_steam_app_info_table(db_path: Path) -> None:
         conn.close()
 
 
+def test_migration_0010_adds_cdn_base_to_manifests(db_path: Path) -> None:
+    """0010 adds a nullable cdn_base TEXT column to manifests so the Epic
+    validator can compute lancache cache-keys from the CDN base path stored
+    at prefill time. Simple ADD COLUMN — no table recreate required."""
+    migrate.run_migrations(db_path)  # default packaged source includes 0010
+    conn = sqlite3.connect(db_path)
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(manifests)").fetchall()]
+        assert "cdn_base" in cols
+    finally:
+        conn.close()
+
+
 def test_migration_0004_cleanup_keeps_earliest_inflight_per_platform() -> None:
     """SEV-3 (review 2026-06-02): migration 0004's one-time cleanup cancels
     all-but-earliest in-flight library_sync per platform BEFORE creating the

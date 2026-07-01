@@ -42,8 +42,8 @@ async def validate_one_game(
 ) -> ValidationResult:
     """Validate one game against the on-disk cache, record a validation_history
     row, and update games.status. Shared by the validate job handler (F7) and the
-    scheduled sweep (F13). Assumes the caller has confirmed the game's steam
-    platform."""
+    scheduled sweep (F13). Handles both steam and epic platforms — platform
+    dispatch is done inside ``validate_game`` using the game's stored platform."""
     started_row = await pool.read_one("SELECT CURRENT_TIMESTAMP AS t")
     started_at = started_row["t"] if started_row is not None else None
 
@@ -88,20 +88,19 @@ async def validate_handler(job: dict[str, Any], deps: Deps) -> None:
     """Validate one game's cached chunks (F7).
 
     Raises:
-        ValueError — non-steam platform or unknown game.
+        ValueError — unsupported platform (not steam or epic) or unknown game.
     """
     platform = job.get("platform")
-    if platform != "steam":
-        raise ValueError(f"validate only supports steam (got {platform!r})")
+    if platform not in ("steam", "epic"):
+        raise ValueError(f"validate supports steam+epic (got {platform!r})")
     game_id = job.get("game_id")
     if game_id is None:
         raise ValueError("validate job has no game_id")
 
-    game = await deps.pool.read_one("SELECT id, platform FROM games WHERE id=?", (game_id,))
+    game = await deps.pool.read_one("SELECT id FROM games WHERE id=?", (game_id,))
     if game is None:
         raise ValueError(f"game {game_id} not found in games table")
-    if game["platform"] != "steam":
-        raise ValueError(f"game {game_id} platform is {game['platform']!r}, not steam")
+    # validate_game dispatches internally by the game's stored platform.
 
     job_id = job.get("id")
     settings = get_settings()
