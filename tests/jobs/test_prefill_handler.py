@@ -376,10 +376,12 @@ async def test_epic_agent_path_pulls_through_agent_not_downloader(pool, monkeypa
     assert len(verify_calls) == 1
 
 
-async def test_epic_agent_success_same_db_writes(pool, monkeypatch):
-    """The Epic agent happy path produces the SAME final DB writes as the flag-off
-    Epic path: status up_to_date, cached_version=current_version, last_prefilled_at,
-    and the manifest upsert + size_bytes."""
+async def test_epic_agent_success_enqueues_validate(pool, monkeypatch):
+    """Parity with steam (ID5): a successful Epic prefill ENQUEUES a disk-stat
+    validate (which sets the real status) instead of optimistically pre-setting
+    status='up_to_date' from the 20-chunk sample HIT-check. It still adopts
+    cached_version=current_version + last_prefilled_at (F8 diff-skip) and upserts
+    the manifest + size_bytes. Status stays 'downloading' until the validate runs."""
     import orchestrator.jobs.handlers.prefill as ph
 
     settings = Settings(orchestrator_token="a" * 32, agent_enabled=True)
@@ -402,10 +404,16 @@ async def test_epic_agent_success_same_db_writes(pool, monkeypatch):
     g = await pool.read_one(
         "SELECT status, size_bytes, cached_version, last_prefilled_at FROM games WHERE id=?", (gid,)
     )
-    assert g["status"] == "up_to_date"
+    # No optimistic up_to_date: the enqueued validate finalizes status.
+    assert g["status"] == "downloading"
     assert g["size_bytes"] == 500
     assert g["cached_version"] == "bv-1"
     assert g["last_prefilled_at"] is not None
+    vj = await pool.read_one(
+        "SELECT kind, game_id, platform, state FROM jobs WHERE kind='validate' AND game_id=?",
+        (gid,),
+    )
+    assert vj == {"kind": "validate", "game_id": gid, "platform": "epic", "state": "queued"}
     m = await pool.read_one(
         "SELECT chunk_count, total_bytes FROM manifests WHERE game_id=?", (gid,)
     )

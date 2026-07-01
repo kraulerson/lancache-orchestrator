@@ -69,7 +69,7 @@ def _manifest():
     return EpicManifest(version=22, chunks=chunks, cdn_base="/base", raw=b"BINARY-MANIFEST")
 
 
-async def test_epic_prefill_downloads_stores_manifest_marks_up_to_date(pool, monkeypatch):
+async def test_epic_prefill_downloads_stores_manifest_enqueues_validate(pool, monkeypatch):
     gid = await _seed_epic_game(pool)
     stub = _StubEpic(manifest=_manifest())
 
@@ -85,8 +85,14 @@ async def test_epic_prefill_downloads_stores_manifest_marks_up_to_date(pool, mon
     await prefill_handler(_job("prefill", gid), Deps(pool=pool, epic_client=stub))
 
     g = await pool.read_one("SELECT status, size_bytes FROM games WHERE id=?", (gid,))
-    assert g["status"] == "up_to_date"
+    # Parity with steam: a disk-stat validate (enqueued below) finalizes status;
+    # prefill no longer optimistically marks up_to_date from the sample check.
+    assert g["status"] == "downloading"
     assert g["size_bytes"] == 500
+    vj = await pool.read_one(
+        "SELECT platform, state FROM jobs WHERE kind='validate' AND game_id=?", (gid,)
+    )
+    assert vj == {"platform": "epic", "state": "queued"}
     m = await pool.read_one(
         "SELECT version, chunk_count, total_bytes FROM manifests WHERE game_id=?", (gid,)
     )
@@ -97,7 +103,8 @@ async def test_epic_prefill_downloads_stores_manifest_marks_up_to_date(pool, mon
 async def test_epic_prefill_low_hit_ratio_is_non_gating(pool, monkeypatch):
     """A low post-prefill HIT ratio logs a warning but does NOT fail the job —
     lancache caches asynchronously, so an immediate re-request can legitimately
-    MISS; download success is the success signal (UAT-10 #8)."""
+    MISS; download success is the success signal (UAT-10 #8). The disk-stat
+    validate is still enqueued regardless of the sample ratio."""
     gid = await _seed_epic_game(pool, app_id="AppE")
     stub = _StubEpic(manifest=_manifest())
 
@@ -112,7 +119,9 @@ async def test_epic_prefill_low_hit_ratio_is_non_gating(pool, monkeypatch):
 
     await prefill_handler(_job("prefill", gid), Deps(pool=pool, epic_client=stub))
     g = await pool.read_one("SELECT status FROM games WHERE id=?", (gid,))
-    assert g["status"] == "up_to_date"  # informational, not a failure
+    assert g["status"] != "failed"  # non-gating: a low sample ratio doesn't fail prefill
+    vj = await pool.read_one("SELECT id FROM jobs WHERE kind='validate' AND game_id=?", (gid,))
+    assert vj is not None  # validate enqueued regardless of the sample hit ratio
 
 
 async def test_epic_prefill_failed_chunks_marks_failed(pool, monkeypatch):

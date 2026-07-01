@@ -62,7 +62,8 @@ async def enqueue_validation_sweep(
 ) -> int:
     """Insert a `sweep` job row if none is queued/running (F13).
 
-    ``full=True`` validates EVERY steam game (the validate-all backfill), carried
+    ``full=True`` validates EVERY game across all platforms (the validate-all
+    backfill), carried
     on the job payload `{"full": true}`; the weekly cron uses the default
     (status-gated) sweep. Mirrors `enqueue_library_sync`: at most one in-flight
     sweep, DB-enforced by `idx_jobs_sweep_inflight` (migration 0005) via
