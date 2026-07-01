@@ -19,6 +19,26 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Security — Epic validator: no network / no auth at validate time (2026-07-01) — 2026-07-01
+
+The new Epic disk-stat validator (`POST /v1/epic/validate` on the agent) performs zero network I/O and holds no credentials at validate time. It base64-decodes the manifest bytes it is given, derives cache-key paths, and stats local files — nothing else. The `cdn_base` and manifest bytes originate from the control-plane DB, where they were SSRF/traversal-validated at Epic prefill time: `fetch_manifest` enforces `_HOSTNAME_RE` (plausible public FQDN, no bare labels / IPs) on the CDN host and a `".." in cdn_base` guard before any download, and the manifest is capped during streaming (`manifest_size_cap_bytes`) and at decompression (`_MAX_DECOMPRESSED_BYTES = 256 MiB`). See `docs/security-audits/epic-validation-parity-security-audit.md`.
+
+### Added — Epic disk-stat validation parity with Steam F7 (2026-07-01) — 2026-07-01
+
+Epic games now get real per-chunk, on-disk validation — parity with Steam's F7 cache-stat validator — producing true `Partial · N%` badges, `up_to_date`/`validation_failed` status, and `validate-all` sweep coverage for Epic without any Epic API call at validate time.
+
+- **Agent `POST /v1/epic/validate`** (`agent/routers/epic.py`, bearer-gated): accepts `{app_id, version, cdn_base, raw_manifest_b64}`, parses the Epic binary manifest, derives each chunk's lancache cache-key (`md5(identifier + cdn_base/chunk_path + "bytes=0-10485759")` — identical formula to Steam, proven live against real cached Epic chunks), stats `/data/cache` via the bounded cache-stat executor, and returns `{chunks_total, chunks_cached, chunks_missing, outcome, versions, error}` — the same shape Steam returns.
+- **Present-if-any semantics** (`validator/disk_stat.py::validate_chunks_any`): a chunk counts cached if it exists under **any** of the configured Epic identifiers (`epicgames`, `egs-cloudfront-chunks.epicgamescdn.com`). Epic content is commonly cached under both; checking all identifiers catches chunks regardless of which CDN host served them at prefill time.
+- **`epic_cache_identifiers` setting** (`core/settings.py`, env `ORCH_EPIC_CACHE_IDENTIFIERS`, comma-separated, default `["epicgames", "egs-cloudfront-chunks.epicgamescdn.com"]`): the set of lancache cache identifiers Epic content is stored under. Configurable so a new Epic CDN host can be added without a code change. Confirmed complete against the live lancache access log (62388 `epicgames` lines + 25625 `egs-cloudfront-chunks.epicgamescdn.com` lines on `ChunksV*`/`.chunk` requests).
+- **`AgentClient.epic_validate`** (`clients/agent_client.py`): single `POST /v1/epic/validate` (300s timeout, same pattern as `steam_validate`). No polling — Epic validation is synchronous.
+- **Platform-agnostic validate + sweep** (`jobs/handlers/validate.py`, `jobs/handlers/sweep.py`): `validate_handler` now accepts `platform='epic'`; `validate_game` dispatches by platform (Steam path unchanged; Epic reads the stored manifest + `cdn_base` from the DB and calls the agent). The sweep candidate SQL drops `platform='steam'`, so Epic games at `up_to_date`/`validation_failed` (and in `--full` mode, all Epic games) are now swept on the 6h/weekly cadence. `validate_one_game`'s recording (validation_history + games.status + chunks_cached/total) is reused unchanged — it was already platform-agnostic.
+- **Cache-key proven live at scale**: 600 deduplicated Epic chunk URLs from the live access log → 587/600 (97.8%) present on disk; the 13 misses are chunks of one partially-evicted game, not formula errors.
+
+### Data Model — migration 0010: `manifests.cdn_base` (2026-07-01) — 2026-07-01
+
+- **`db/migrations/0010_manifests_cdn_base.sql`:** adds `cdn_base TEXT` (nullable) to the `manifests` table. Required for Epic disk-stat validation: the cache-key is `md5(identifier + cdn_base/chunk_path + slice)`, so `cdn_base` must be persisted alongside the manifest. Simple `ALTER TABLE … ADD COLUMN` — no table recreate. Pre-existing Epic manifest rows have `cdn_base=NULL` and return `outcome="error", error="no_cdn_base"` (status unchanged) until the next nightly Epic prefill re-populates `cdn_base` and self-heals. Steam manifest rows leave `cdn_base=NULL` (unused by the Steam validator).
+- **`jobs/handlers/prefill.py`:** Epic prefill upsert now writes `manifest.cdn_base` (set by `fetch_manifest` from the signed CDN URI's directory path, stable per game version because lancache strips the short-lived query string).
+
 ### Fixed — Steam manifest fetcher: enumeration source + DepotDownloader session path (go-live, 2026-07-01) — 2026-07-01
 
 Two bugs found during live go-live (both in `platform/steam/manifest_fetcher.py`), fixed with the operator's 2FA session preserved (no re-login):

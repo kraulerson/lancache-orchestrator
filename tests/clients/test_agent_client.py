@@ -385,3 +385,38 @@ async def test_aclose_closes_underlying_and_rebuilds_on_next_call():
     await client.stat(["b" * 32])
     assert client._client is not None and not client._client.is_closed
     await client.aclose()
+
+
+async def test_epic_validate_single_call():
+    def handler(request):
+        assert request.method == "POST"
+        assert request.url.path == "/v1/epic/validate"
+        body = request.content
+        import json
+
+        payload = json.loads(body)
+        assert payload["app_id"] == 1449820
+        assert payload["version"] == "21.0"
+        assert payload["cdn_base"] == "https://epicgames-download.akamaized.net"
+        assert payload["raw_manifest_b64"] == "dGVzdA=="
+        return httpx.Response(
+            200,
+            json={
+                "chunks_total": 120,
+                "chunks_cached": 85,
+                "chunks_missing": 35,
+                "outcome": "partial",
+                "versions": "21.0:x",
+                "error": None,
+            },
+        )
+
+    client = _client(handler)
+    res = await client.epic_validate(
+        app_id=1449820,
+        version="21.0",
+        cdn_base="https://epicgames-download.akamaized.net",
+        raw_manifest_b64="dGVzdA==",
+    )
+    assert res["chunks_cached"] == 85
+    assert res["outcome"] == "partial"

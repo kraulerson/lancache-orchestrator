@@ -140,11 +140,53 @@ async def test_error_unsticks_transient_downloading(pool):
     assert g["status"] == "failed"  # transient 'downloading' resolved, not stuck
 
 
-async def test_non_steam_raises(pool):
-    game_id = await _seed_game(pool, platform="epic", app_id="fort")
+async def test_unknown_platform_raises(pool):
+    """An unrecognised platform (not steam or epic) still raises ValueError."""
+    game_id = await _seed_game(pool)
     deps = Deps(pool=pool, agent_client=_StubAgent(_vresp(0, 0, 0, "error")))
-    with pytest.raises(ValueError, match="steam"):
-        await validate_handler(_job(game_id, platform="epic"), deps)
+    with pytest.raises(ValueError):
+        await validate_handler(_job(game_id, platform="playstation"), deps)
+
+
+class _StubEpicAgent:
+    """Stand-in for AgentClient — returns a canned epic_validate response."""
+
+    def __init__(self, response):
+        self._response = response
+        self.calls: list[int] = []
+
+    async def epic_validate(
+        self, *, app_id: int, version: str, cdn_base: str, raw_manifest_b64: str
+    ) -> dict:
+        self.calls.append(app_id)
+        return self._response
+
+
+async def test_epic_platform_does_not_raise(pool):
+    """After the fix, validate_handler accepts platform='epic' without raising.
+    It routes through validate_game → _validate_epic_game → epic_validate."""
+    game_id = await _seed_game(pool, platform="epic", app_id="12345")
+    await pool.execute_write(
+        "INSERT INTO manifests (game_id, version, raw, chunk_count, total_bytes, cdn_base) "
+        "VALUES (?, 'v1', ?, 0, 0, 'https://cdn.epicgames.com')",
+        (game_id, b"manifest"),
+    )
+    agent = _StubEpicAgent(
+        {
+            "chunks_total": 5,
+            "chunks_cached": 5,
+            "chunks_missing": 0,
+            "outcome": "cached",
+            "versions": "v1",
+            "error": None,
+        }
+    )
+    deps = Deps(pool=pool, agent_client=agent)
+    # Must not raise; validates successfully and records a validation_history row.
+    await validate_handler(_job(game_id, platform="epic"), deps)
+    vh = await pool.read_one("SELECT outcome FROM validation_history WHERE game_id=?", (game_id,))
+    assert vh is not None
+    assert vh["outcome"] == "cached"
 
 
 async def test_unknown_game_raises(pool):

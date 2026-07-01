@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 from orchestrator.core.settings import Settings
 from orchestrator.jobs.worker import Deps
-from orchestrator.validator.disk_stat import validate_chunks, validate_game
+from orchestrator.validator.disk_stat import validate_chunks, validate_chunks_any, validate_game
 
 pytestmark = pytest.mark.asyncio
 
@@ -126,6 +128,70 @@ async def test_shutdown_cache_stat_executor_is_idempotent_and_recreates(tmp_path
     disk_stat.shutdown_cache_stat_executor()
 
 
+# --- validate_chunks_any -----------------------------------------------
+
+
+def _mk(p):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"x")
+
+
+async def test_validate_chunks_any_counts_present_under_any_candidate(tmp_path):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    c = tmp_path / "c"
+    _mk(b)  # chunk1: only its 2nd candidate exists -> cached
+    # chunk2: neither candidate exists -> missing
+    result = await validate_chunks_any([[a, b], [c, tmp_path / "d"]])
+    assert result == (1, 1)  # (cached, present): chunk1 hits via b, chunk2 misses
+
+
+async def test_validate_chunks_any_empty(tmp_path):
+    assert await validate_chunks_any([]) == (0, 0)
+
+
+async def test_validate_chunks_any_present_size_zero_not_cached(tmp_path):
+    """A candidate that exists on disk but is 0 bytes counts as present but NOT
+    cached — an empty file has no real content, so it must not count as a hit."""
+    p = tmp_path / "empty"
+    p.write_bytes(b"")
+    result = await validate_chunks_any([[p]])
+    assert result == (0, 1)  # present=1, cached=0
+
+
+async def test_validate_chunks_any_present_mode000_not_cached(tmp_path):
+    """A non-empty candidate file with mode 000 is present but NOT cached (#76/#128).
+    The owner-read bit must be set for lancache to serve it; mode-000 files exist
+    on disk but lancache cannot read them, so they must not count as cached.
+    If the test runner is root, chmod 000 may still be readable — skip in that case."""
+    import os
+
+    f = tmp_path / "mode000"
+    f.write_bytes(b"data")
+    os.chmod(f, 0o000)
+    try:
+        result = await validate_chunks_any([[f]])
+    finally:
+        os.chmod(f, 0o644)  # restore so tmp cleanup can remove it
+    # If running as root, stat() sees size>0 and mode 000 but root bypasses mode checks —
+    # the kernel sets all mode bits for root, so 0o400 would appear set. Skip that case.
+    if result == (1, 1):
+        pytest.skip("test runner is root; chmod 000 is readable, skipping mode-000 sub-case")
+    assert result == (0, 1)  # present=1, cached=0
+
+
+async def test_validate_chunks_any_symlink_skipped(tmp_path):
+    """A candidate that is a symlink to a real non-empty file is skipped — symlinks
+    are never genuine nginx cache files. The chunk counts as neither present nor
+    cached, so the result is (0, 0)."""
+    target = tmp_path / "real_file"
+    target.write_bytes(b"content")
+    link = tmp_path / "symlink_chunk"
+    link.symlink_to(target)
+    result = await validate_chunks_any([[link]])
+    assert result == (0, 0)  # symlink skipped → not present, not cached
+
+
 # --- validate_game (delegates to the agent's steam_validate) -----------
 
 
@@ -207,3 +273,115 @@ async def test_validate_nonnumeric_app_id_is_error(pool):
     result = await validate_game(pool, deps, game_id, _settings())
     assert result.outcome == "error"
     assert agent.calls == []  # bad app_id rejected before the agent call
+
+
+# --- validate_game — Epic platform dispatch --------------------------------
+
+
+class _FakeAgentEV:
+    """Records epic_validate keyword-arg calls and returns a fixed validate dict."""
+
+    def __init__(self, response):
+        self._response = response
+        self.calls: list[dict] = []
+
+    async def epic_validate(
+        self,
+        *,
+        app_id: int,
+        version: str,
+        cdn_base: str,
+        raw_manifest_b64: str,
+    ) -> dict:
+        self.calls.append(
+            {
+                "app_id": app_id,
+                "version": version,
+                "cdn_base": cdn_base,
+                "raw_manifest_b64": raw_manifest_b64,
+            }
+        )
+        return self._response
+
+
+async def _seed_manifest(
+    pool,
+    game_id: int,
+    *,
+    version: str = "1.0",
+    cdn_base: str | None = "https://cdn.example.com",
+    raw: bytes = b"manifest-raw",
+) -> None:
+    await pool.execute_write(
+        "INSERT INTO manifests (game_id, version, raw, chunk_count, total_bytes, cdn_base) "
+        "VALUES (?, ?, ?, 0, 0, ?)",
+        (game_id, version, raw, cdn_base),
+    )
+
+
+async def test_validate_epic_calls_agent_and_maps_result(pool):
+    """validate_game for an epic game reads the stored manifest, b64-encodes raw,
+    and forwards app_id + version + cdn_base + raw_manifest_b64 to epic_validate.
+    The returned dict is shaped into a ValidationResult identical to the steam path."""
+    raw = b"epic-raw-manifest"
+    game_id = await _seed_game(pool, platform="epic", app_id="12345")
+    await _seed_manifest(
+        pool, game_id, version="v1.2", cdn_base="https://cdn.epicgames.com", raw=raw
+    )
+    agent = _FakeAgentEV(
+        {
+            "chunks_total": 10,
+            "chunks_cached": 8,
+            "chunks_missing": 2,
+            "outcome": "partial",
+            "versions": "v1.2",
+            "error": None,
+        }
+    )
+    deps = Deps(pool=pool, agent_client=agent)
+
+    result = await validate_game(pool, deps, game_id, _settings())
+
+    expected_b64 = base64.b64encode(raw).decode("ascii")
+    assert len(agent.calls) == 1
+    call = agent.calls[0]
+    assert call["app_id"] == 12345
+    assert call["version"] == "v1.2"
+    assert call["cdn_base"] == "https://cdn.epicgames.com"
+    assert call["raw_manifest_b64"] == expected_b64
+    assert result.chunks_total == 10
+    assert result.chunks_cached == 8
+    assert result.chunks_missing == 2
+    assert result.outcome == "partial"
+    assert result.manifest_version == "v1.2"
+
+
+async def test_validate_epic_no_cdn_base_is_error(pool):
+    """Epic manifest with NULL cdn_base → error='no_cdn_base'; agent NOT called.
+    Affects pre-migration rows (re-prefill heals by writing cdn_base).
+    The real manifest version is returned (not '') so callers have context."""
+    game_id = await _seed_game(pool, platform="epic", app_id="99001")
+    await _seed_manifest(pool, game_id, cdn_base=None)  # version defaults to "1.0"
+    agent = _FakeAgentEV({})
+    deps = Deps(pool=pool, agent_client=agent)
+
+    result = await validate_game(pool, deps, game_id, _settings())
+
+    assert result.outcome == "error"
+    assert result.error == "no_cdn_base"
+    assert agent.calls == []
+    assert result.manifest_version == "1.0"  # intentional: returns real version, not ""
+
+
+async def test_validate_epic_no_manifest_is_error(pool):
+    """Epic game with no manifests row → error='no_manifest'; agent NOT called."""
+    game_id = await _seed_game(pool, platform="epic", app_id="99002")
+    # No manifest seeded intentionally.
+    agent = _FakeAgentEV({})
+    deps = Deps(pool=pool, agent_client=agent)
+
+    result = await validate_game(pool, deps, game_id, _settings())
+
+    assert result.outcome == "error"
+    assert result.error == "no_manifest"
+    assert agent.calls == []

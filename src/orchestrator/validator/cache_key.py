@@ -36,12 +36,12 @@ def steam_chunk_uri(depot_id: int, sha_hex: str) -> str:
 
 
 def epic_chunk_uri(chunk_path: str, cdn_base_path: str) -> str:
-    """URI path of an Epic chunk through the lancache: ``<cdn_base>/<chunk_path>``.
+    """Build the URI nginx caches an Epic chunk under: ``<cdn_base>/<chunk_path>``.
 
-    Staged for the deferred F7-Epic disk-stat validator (F6). The Epic on-disk
-    cache-key derivation (the A4-equivalent for Epic) needs real cached Epic
-    chunks and so is a post-live-UAT follow-up — this helper is not yet wired
-    into ``disk_stat``.
+    This is the live Epic cache-key URI builder used by the agent's Epic
+    validator (``agent/routers/epic.py``): it combines the per-manifest
+    ``cdn_base`` with each chunk's ``chunk_path`` to produce the ``uri`` fed
+    into ``cache_key(identifier, uri, slice_range)``.
     """
     return f"{cdn_base_path.rstrip('/')}/{chunk_path}"
 
