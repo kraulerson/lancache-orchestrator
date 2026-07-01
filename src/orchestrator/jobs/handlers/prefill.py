@@ -49,14 +49,18 @@ def _failure_suffix(failure_reasons: dict[str, int]) -> str:
 
 # Epic manifest upsert (depot_id is NULL — Epic has no depots). Keyed on
 # (game_id, version); a re-fetch updates the existing row.
+# cdn_base (migration 0010) is required by the Epic disk-stat validator to
+# reconstruct lancache cache-keys without re-fetching a signed manifest.
 _EPIC_MANIFEST_UPSERT = (
-    "INSERT INTO manifests (game_id, depot_id, version, fetched_at, chunk_count, total_bytes, raw) "
-    "VALUES (?, NULL, ?, CURRENT_TIMESTAMP, ?, ?, ?) "
+    "INSERT INTO manifests "
+    "(game_id, depot_id, version, fetched_at, chunk_count, total_bytes, raw, cdn_base) "
+    "VALUES (?, NULL, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?) "
     "ON CONFLICT(game_id, version) DO UPDATE SET "
     "  fetched_at = CURRENT_TIMESTAMP, "
     "  chunk_count = excluded.chunk_count, "
     "  total_bytes = excluded.total_bytes, "
-    "  raw = excluded.raw"
+    "  raw = excluded.raw, "
+    "  cdn_base = excluded.cdn_base"
 )
 
 
@@ -130,7 +134,14 @@ async def _epic_prefill_inner(
     total_bytes = sum(c.file_size for c in manifest.chunks)
     await deps.pool.execute_write(
         _EPIC_MANIFEST_UPSERT,
-        (game_id, str(manifest.version), len(manifest.chunks), total_bytes, manifest.raw),
+        (
+            game_id,
+            str(manifest.version),
+            len(manifest.chunks),
+            total_bytes,
+            manifest.raw,
+            manifest.cdn_base,
+        ),
     )
     await deps.pool.execute_write(
         "UPDATE games SET size_bytes=? WHERE id=?", (total_bytes, game_id)
