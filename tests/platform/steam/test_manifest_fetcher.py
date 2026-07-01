@@ -1,5 +1,6 @@
 import contextlib
 import json
+import shutil
 
 import pytest
 
@@ -11,6 +12,15 @@ from orchestrator.platform.steam.manifest_fetcher import (
 
 _SHA_A = "a" * 40
 _SHA_B = "b" * 40
+
+
+def _make_session(config_dir):
+    """Create the .NET IsolatedStorage account.config DepotDownloader persists
+    under HOME (=config_dir), so login_from_session's glob finds it."""
+    p = config_dir / ".local/share/IsolatedStorage/aa/bb/cc/AssemFiles/account.config"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"\x00token")
+    return p
 
 
 def _fetcher(tmp_path, **kw):
@@ -27,12 +37,11 @@ def _fetcher_with_fake_dd(tmp_path, manifests):
     """manifests: {app_id: [(depot_id, gid, [shas])]} the fake DD 'returns'."""
     cfg = tmp_path / "dd-config"
     cfg.mkdir()
-    (cfg / "account.config").write_bytes(b"\x00")
+    _make_session(cfg)
     steam_cfg = tmp_path / "Config"
     steam_cfg.mkdir()
-    (steam_cfg / "successfullyDownloadedDepots.json").write_text(
-        json.dumps({str(a): [g for _d, g, _s in v] for a, v in manifests.items()})
-    )
+    # Enumeration reads selectedAppsToPrefill.json (a list of clean store app_ids).
+    (steam_cfg / "selectedAppsToPrefill.json").write_text(json.dumps([int(a) for a in manifests]))
     f = DepotDownloaderManifestFetcher(
         binary=tmp_path / "DepotDownloader",
         config_dir=cfg,
@@ -54,10 +63,10 @@ def test_login_from_session_raises_when_no_session(tmp_path):
         f.login_from_session()
 
 
-def test_login_from_session_ok_when_session_present(tmp_path):
+def test_login_from_session_ok_when_isolated_storage_present(tmp_path):
     cfg = tmp_path / "dd-config"
     cfg.mkdir()
-    (cfg / "account.config").write_bytes(b"\x00token")  # S2: the persisted login key
+    _make_session(cfg)  # the .NET IsolatedStorage account.config DD persists
     _fetcher(tmp_path, config_dir=cfg).login_from_session()  # no raise
 
 
@@ -97,7 +106,7 @@ def test_fetch_all_isolates_per_app_failure(tmp_path):
 
 def test_fetch_all_raises_auth_when_no_session(tmp_path):
     f = _fetcher_with_fake_dd(tmp_path, {440: []})
-    (f._config_dir / "account.config").unlink()
+    shutil.rmtree(f._config_dir / ".local")  # remove the IsolatedStorage session
     with pytest.raises(SteamAuthError):
         f.fetch_all()
 
@@ -154,6 +163,35 @@ def test_run_manifest_only_includes_username_in_argv(tmp_path, monkeypatch):
     assert argv[argv.index("-username") + 1] == "steamjoe"
 
 
+def test_run_manifest_only_pins_home_to_config_dir(tmp_path, monkeypatch):
+    """DD's -remember-password session lives in .NET IsolatedStorage under HOME,
+    so the subprocess HOME is pinned to config_dir (the persistent mount)."""
+    captured: dict = {}
+
+    def _fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+
+        class _R:
+            returncode = 0
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    cfg = tmp_path / "dd-config"
+    f = DepotDownloaderManifestFetcher(
+        binary=tmp_path / "DepotDownloader",
+        config_dir=cfg,
+        steam_config_dir=tmp_path / "Config",
+        archive_dir=tmp_path / "archive",
+        delay_sec=0.0,
+        username="steamjoe",
+    )
+    with contextlib.suppress(RuntimeError):
+        f._run_manifest_only(440)
+    assert captured["env"]["HOME"] == str(cfg)
+
+
 def test_write_shas_empty_returns_false_no_file(tmp_path):
     """_write_shas returns False and writes NO file when the SHA set has no valid SHAs."""
     f = _fetcher(tmp_path)
@@ -192,11 +230,33 @@ def test_fetch_all_skipped_all_archived_no_raise(tmp_path):
 
 
 def test_enumerate_app_ids_skips_scalar_json(tmp_path):
-    """A successfullyDownloadedDepots.json that contains bare null/42 (scalar)
-    must not raise TypeError — the file is silently skipped (Minor fix)."""
+    """A selectedAppsToPrefill.json that contains bare null/42 (scalar) must not
+    raise TypeError — the file is silently treated as empty."""
     cfg = tmp_path / "Config"
     cfg.mkdir()
-    (cfg / "successfullyDownloadedDepots.json").write_text("null")
+    (cfg / "selectedAppsToPrefill.json").write_text("null")
     f = _fetcher(tmp_path, steam_config_dir=cfg)
-    # Must return an empty list, not raise TypeError
     assert f._enumerate_app_ids() == []
+
+
+def test_enumerate_reads_selected_not_downloaded_depots(tmp_path):
+    """Go-live fix: enumerate the clean store app_ids in selectedAppsToPrefill.json
+    and IGNORE successfullyDownloadedDepots.json (whose keys are content/depot ids
+    DepotDownloader can't token)."""
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "selectedAppsToPrefill.json").write_text(json.dumps([258090, 207650, 92300]))
+    # A successfullyDownloadedDepots.json with different (content/depot) keys must
+    # NOT be picked up.
+    (cfg / "successfullyDownloadedDepots.json").write_text(
+        json.dumps({"1968731": [1], "2900140": [2]})
+    )
+    f = _fetcher(tmp_path, steam_config_dir=cfg)
+    assert f._enumerate_app_ids() == [92300, 207650, 258090]
+
+
+def test_enumerate_missing_selection_returns_empty(tmp_path):
+    """No selectedAppsToPrefill.json -> empty (no raise)."""
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    assert _fetcher(tmp_path, steam_config_dir=cfg)._enumerate_app_ids() == []
