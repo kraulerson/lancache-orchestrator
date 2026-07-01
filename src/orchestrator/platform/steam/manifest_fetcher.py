@@ -9,6 +9,7 @@ tests/agent/test_import_isolation.py). NEVER logs/writes the Steam password,
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -37,9 +38,12 @@ class FetchResult:
     apps: int
 
 
-# S2: the persisted login-key filename DepotDownloader writes under config_dir
-# (own-session path) — or SteamPrefill's account.config (reuse path). Confirm in S2.
-_SESSION_MARKER = "account.config"
+# DepotDownloader persists its -remember-password session in .NET IsolatedStorage
+# under $HOME (we run DD with HOME=config_dir), at a hash-named path like
+# config_dir/.local/share/IsolatedStorage/<a>/<b>/<c>/AssemFiles/account.config
+# (go-live finding 2026-07-01 — the earlier "config_dir/account.config" marker was
+# wrong; DD never writes the account store to the working dir).
+_SESSION_GLOB = ".local/share/IsolatedStorage/**/account.config"
 
 
 class DepotDownloaderManifestFetcher:
@@ -61,33 +65,35 @@ class DepotDownloaderManifestFetcher:
         self._username = username
 
     def login_from_session(self) -> None:
-        """Verify a usable persisted session exists (no password, no 2FA).
-        Raises SteamAuthError when absent so the caller surfaces 're-auth needed'
-        instead of prompting in an unattended run."""
-        if not (self._config_dir / _SESSION_MARKER).exists():
+        """Verify a usable persisted DepotDownloader session exists (no password,
+        no 2FA) — the .NET IsolatedStorage account.config under config_dir (see
+        _SESSION_GLOB). Raises SteamAuthError when absent so the caller surfaces
+        're-auth needed' instead of prompting in an unattended run."""
+        if not any(self._config_dir.glob(_SESSION_GLOB)):
             raise SteamAuthError("no DepotDownloader session — run the one-time login")
 
     def _enumerate_app_ids(self) -> list[int]:
-        """The cached app set, read LIVE each run (auto-grows; nothing hardcoded).
-        Union of successfullyDownloadedDepots.json keys (what's cached) and
-        selectedAppsToPrefill.json (selected) — S3 confirms completeness."""
+        """Store app_ids to fetch, read LIVE from SteamPrefill's SELECTION each run
+        (auto-grows; nothing hardcoded). Uses selectedAppsToPrefill.json — the
+        operator's clean store app_ids. NOT successfullyDownloadedDepots.json: its
+        keys include content/depot ids DepotDownloader can't get an access token
+        for ("Insufficient privileges", go-live finding 2026-07-01) and which the
+        locator module already flags as an unreliable index."""
+        p = self._steam_config_dir / "selectedAppsToPrefill.json"
+        if not p.exists():
+            return []
+        try:
+            data = json.loads(p.read_text())
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(data, list):
+            return []
         apps: set[int] = set()
-        for name in ("successfullyDownloadedDepots.json", "selectedAppsToPrefill.json"):
-            p = self._steam_config_dir / name
-            if not p.exists():
-                continue
+        for k in data:
             try:
-                data = json.loads(p.read_text())
-            except (OSError, json.JSONDecodeError):
+                apps.add(int(k))
+            except (TypeError, ValueError):
                 continue
-            if not isinstance(data, (dict, list)):
-                continue  # scalar JSON (bare null/42) — skip, not a TypeError
-            keys = data.keys() if isinstance(data, dict) else data
-            for k in keys:
-                try:
-                    apps.add(int(k))
-                except (TypeError, ValueError):
-                    continue
         return sorted(apps)
 
     def _write_shas(self, app_id: int, depot_id: int, gid: str, shas: set[str]) -> bool:
@@ -108,9 +114,11 @@ class DepotDownloaderManifestFetcher:
     def _run_manifest_only(self, app_id: int) -> list[tuple[int, str, set[str]]]:
         """Shell out to DepotDownloader with -manifest-only for one app.
         Returns [(depot_id, gid, chunk_shas)] for every depot manifest written.
-        Username is taken from _SESSION_MARKER's sibling config; DD reads the
-        remembered login key from config_dir — the password is NEVER on argv."""
+        DD reads its remembered login key from the .NET IsolatedStorage under
+        HOME, so the subprocess HOME is pinned to config_dir (the persistent
+        mount) — the password is NEVER on argv and never persisted by us."""
         results: list[tuple[int, str, set[str]]] = []
+        env = {**os.environ, "HOME": str(self._config_dir)}
         with tempfile.TemporaryDirectory() as scratch:
             scratch_path = Path(scratch)
             argv = [
@@ -131,6 +139,7 @@ class DepotDownloaderManifestFetcher:
             proc = subprocess.run(  # noqa: S603
                 argv,
                 cwd=str(self._config_dir),
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=300,

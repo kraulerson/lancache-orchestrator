@@ -19,6 +19,12 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Steam manifest fetcher: enumeration source + DepotDownloader session path (go-live, 2026-07-01) — 2026-07-01
+
+Two bugs found during live go-live (both in `platform/steam/manifest_fetcher.py`), fixed with the operator's 2FA session preserved (no re-login):
+- **Enumeration** now reads `selectedAppsToPrefill.json` (the operator's clean store app_ids) instead of unioning in `successfullyDownloadedDepots.json`, whose keys are content/depot ids DepotDownloader can't get an access token for (`Insufficient privileges`) — the `manifest_locator` module already flagged that file as an unreliable index.
+- **DepotDownloader persists its `-remember-password` session in .NET IsolatedStorage under `$HOME`** (not the working dir), so the fetcher now runs DD with `HOME=<config_dir>` (the persistent mount) and `login_from_session` checks the IsolatedStorage `account.config` there. Live-verified: the preserved session authenticates as the operator and the selected apps fetch manifests cleanly.
+
 ### Added — Steam manifest-only fetcher closes the validation-coverage gap (2026-06-30) — 2026-06-30
 
 Adds a new `fetch_manifests` job that runs DepotDownloader with `-manifest-only` to produce `.shas` sidecars (one chunk SHA per line) for every prefilled Steam app — without re-downloading any game content. This closes the validation gap where SteamPrefill only wrote a manifest `.bin` for apps with new content and pruned the rest via `clear-temp`, leaving ~747 of ~1077 prefilled apps returning `no_manifest_in_cache` and unvalidatable despite having ~13 TB of chunks on disk. The validator already reads `.shas` alongside `.bin`, so once a fetch run completes, the full prefilled set can be validated.
