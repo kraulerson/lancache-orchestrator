@@ -34,9 +34,13 @@
 - [ ] **Slice edge case.** Confirm no chunk has `window_size > cache_slice_size_bytes` (10 MiB) — if any do, they span multiple slices and need multi-slice keys (expected: none, Epic chunks are ~1 MB). Record.
 - [ ] Record findings below; they confirm (not change) Task 1's default identifier list and Task 5's single-slice assumption.
 
-### Spike findings
+### Spike findings (recorded 2026-07-01 — live, read-only, no auth)
 
-> _(Appended during Phase 0.)_
+- **Identifier set = exactly two:** `epicgames` (62388 log lines) + `egs-cloudfront-chunks.epicgamescdn.com` (25625). Confirms Task 1's default; no third identifier appears on `ChunksV*`/`.chunk` lines.
+- **Formula proven at manifest scale:** 600 deduped real Epic chunk URLs from the access log → `cache_path(root, cache_key(identifier, uri, slice_range_zero(10MiB)), levels)` → **587/600 (97.8%) present on disk**. The 13 misses are one partially-evicted game (`o-3kpjwtwqwfl2p9wdwvpad7yqz4kt6c`), not formula errors. `md5(identifier + uri + "bytes=0-10485759")` is confirmed.
+- **Derivation matches:** the log's request paths **are** `chunk_path(chunk, version)` outputs (same legendary algorithm the EpicGamesLauncher uses; the F6 tests already cover `parse_manifest`→`chunk_path`), so the validator's manifest-derived paths equal what was actually cached. `uri = cdn_base + "/" + chunk_path`.
+- **Slice edge:** observed chunk response sizes 218 KB–1 MB, all < the 10 MiB slice → single-slice; no `window_size > slice` chunks → no multi-slice keys. Task 5's single-slice assumption holds.
+- **No plan changes required** — proceed to Phase 1 as written.
 
 ---
 
