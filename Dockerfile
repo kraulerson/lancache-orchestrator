@@ -4,6 +4,9 @@ FROM python:3.12-slim@sha256:520153e2deb359602c9cffd84e491e3431d76e7bf95a3255c9c
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         git \
+        curl \
+        unzip \
+        ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -16,6 +19,19 @@ RUN python -m venv /build/.venv \
 COPY pyproject.toml .
 COPY src/ src/
 RUN /build/.venv/bin/pip install --no-cache-dir --no-deps .
+
+# DepotDownloader — pinned binary for the Steam manifest-only fetcher
+# (validation-coverage gap). Downloaded and verified in the builder so the
+# runtime stage stays lean (no curl/unzip in the runtime base image).
+ARG DEPOTDOWNLOADER_VERSION=3.4.0
+ARG DEPOTDOWNLOADER_SHA256=a999dec66b4850fc961bd50366696d23c2d0fad7b18790e6a5647b2f19097a53
+RUN set -eux; \
+    curl -fsSL -o /tmp/dd.zip "https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_${DEPOTDOWNLOADER_VERSION}/DepotDownloader-linux-x64.zip"; \
+    echo "${DEPOTDOWNLOADER_SHA256}  /tmp/dd.zip" | sha256sum -c -; \
+    mkdir -p /depotdownloader; \
+    unzip /tmp/dd.zip -d /depotdownloader; \
+    chmod +x /depotdownloader/DepotDownloader; \
+    rm /tmp/dd.zip
 
 # ── Stage 2: runtime ────────────────────────────────────────────
 FROM python:3.12-slim@sha256:520153e2deb359602c9cffd84e491e3431d76e7bf95a3255c9ce9433b76ab99a AS runtime
@@ -48,6 +64,10 @@ COPY --from=builder /build/src /app/src
 # path. Lets us safely add `--read-only` to the compose bundle later.
 # Addresses UAT-1 adversarial F7.
 VOLUME ["/var/lib/orchestrator"]
+
+# linux-x64 build is self-contained (bundles .NET); the image is shared
+# control+agent but only the agent invokes it.
+COPY --from=builder /depotdownloader /depotdownloader
 
 WORKDIR /app
 

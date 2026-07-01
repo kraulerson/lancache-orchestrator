@@ -38,3 +38,34 @@ def test_cache_validate_all_warns_when_not_full(monkeypatch):
     assert "7" in result.output
     assert "NOT a full backfill" in result.output
     assert "already in flight" in result.output
+
+
+def test_cache_fetch_manifests_posts(monkeypatch):
+    """cache fetch-manifests POSTs to /api/v1/fetch-manifests and reports job_id."""
+    posted = {}
+
+    class FakeClient:
+        def post(self, path, json=None):
+            posted["path"] = path
+            posted["json"] = json
+            return {"job_id": 7, "queued": True}
+
+    monkeypatch.setattr("orchestrator.cli.commands.cache.make_client", lambda ctx: FakeClient())
+    result = CliRunner().invoke(cli, ["cache", "fetch-manifests"])
+    assert result.exit_code == 0
+    assert posted["path"] == "/api/v1/fetch-manifests"
+    assert "7" in result.output
+
+
+def test_cache_fetch_manifests_warns_when_already_inflight(monkeypatch):
+    """Deduped against an in-flight fetch: warn with job_id."""
+
+    class FakeClient:
+        def post(self, path, json=None):
+            return {"job_id": 9, "queued": False}
+
+    monkeypatch.setattr("orchestrator.cli.commands.cache.make_client", lambda ctx: FakeClient())
+    result = CliRunner().invoke(cli, ["cache", "fetch-manifests"])
+    assert result.exit_code == 0
+    assert "9" in result.output
+    assert "already in flight" in result.output

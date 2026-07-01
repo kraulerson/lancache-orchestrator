@@ -23,6 +23,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from orchestrator.scheduler.jobs import (
+    enqueue_fetch_manifests,
     enqueue_library_sync,
     enqueue_scheduled_prefill,
     enqueue_validation_sweep,
@@ -42,6 +43,7 @@ _log = structlog.get_logger(__name__)
 LIBRARY_SYNC_JOB_ID = "library_sync_steam"
 VALIDATION_SWEEP_JOB_ID = "validation_sweep"
 SCHEDULED_PREFILL_JOB_ID = "scheduled_prefill"
+FETCH_MANIFESTS_JOB_ID = "fetch_manifests"
 
 
 class SchedulerManager:
@@ -62,6 +64,8 @@ class SchedulerManager:
         validation_sweep_enabled: bool = True,
         validation_sweep_cron: str = "0 3,9,15,21 * * *",
         scheduled_prefill_enabled: bool = True,
+        fetch_manifests_enabled: bool = True,
+        fetch_manifests_cron: str = "0 5 * * 1",
     ) -> None:
         self._pool = pool
         self._enabled = enabled
@@ -69,6 +73,8 @@ class SchedulerManager:
         self._validation_sweep_enabled = validation_sweep_enabled
         self._validation_sweep_cron = validation_sweep_cron
         self._scheduled_prefill_enabled = scheduled_prefill_enabled
+        self._fetch_manifests_enabled = fetch_manifests_enabled
+        self._fetch_manifests_cron = fetch_manifests_cron
         self._scheduler: AsyncIOScheduler | None = None
         # Serializes start()/shutdown() so the lifecycle stays atomic even if
         # they are ever called concurrently (e.g. a future restart endpoint).
@@ -145,6 +151,16 @@ class SchedulerManager:
                     args=(self._pool,),
                     id=SCHEDULED_PREFILL_JOB_ID,
                     name="Enqueue scheduled prefill (version-diff)",
+                    replace_existing=True,
+                )
+
+            if self._fetch_manifests_enabled:
+                scheduler.add_job(
+                    enqueue_fetch_manifests,
+                    trigger=CronTrigger.from_crontab(self._fetch_manifests_cron, timezone="UTC"),
+                    args=(self._pool,),
+                    id=FETCH_MANIFESTS_JOB_ID,
+                    name="Enqueue fetch_manifests",
                     replace_existing=True,
                 )
 

@@ -13,6 +13,24 @@ def cache() -> None:
     """Cache-maintenance operations."""
 
 
+@cache.command("fetch-manifests")
+@click.pass_context
+@handles_api_errors
+def cache_fetch_manifests(ctx: click.Context) -> None:
+    """Fetch manifests (no chunk bytes) for the cached library.
+
+    Triggers the agent's DepotDownloader manifest-only run so the validator
+    can cover apps that SteamPrefill skipped. Reuses the fetch_manifests
+    in-flight dedup — at most one run at a time."""
+    client = make_client(ctx)
+    resp = client.post("/api/v1/fetch-manifests")
+    job_id = resp["job_id"]
+    if resp.get("queued"):
+        output.success(f"queued manifest fetch (job_id={job_id}).")
+    else:
+        output.warn(f"a manifest fetch is already in flight (job_id={job_id}).")
+
+
 @cache.command("validate-all")
 @click.pass_context
 @handles_api_errors

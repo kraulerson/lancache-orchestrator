@@ -32,11 +32,13 @@ def clear() -> None:
 
 def _register_builtin_handlers() -> None:
     """Wire built-in handlers at import time."""
+    from orchestrator.jobs.handlers.fetch_manifests import fetch_manifests_handler
     from orchestrator.jobs.handlers.library_sync import library_sync_handler
     from orchestrator.jobs.handlers.prefill import prefill_handler
     from orchestrator.jobs.handlers.sweep import sweep_handler
     from orchestrator.jobs.handlers.validate import validate_handler
 
+    register("fetch_manifests", fetch_manifests_handler)
     register("library_sync", library_sync_handler)
     register("prefill", prefill_handler)
     register("sweep", sweep_handler)

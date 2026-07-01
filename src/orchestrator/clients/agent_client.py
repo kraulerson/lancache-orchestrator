@@ -107,14 +107,21 @@ class AgentClient:
             raise AgentError(f"agent returned {resp.status_code} for {path}")
         return resp
 
-    async def _post_then_poll(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _post_then_poll(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        poll_timeout: float | None = None,
+    ) -> dict[str, Any]:
         resp = await self._request("POST", path, json=payload)
         # COR-7: tolerate a malformed 202 body (no job_id) with a clean error.
         job_id = resp.json().get("job_id")
         if not job_id:
             raise AgentError(f"agent POST {path} returned no job_id")
         poll_path = f"{path}/{job_id}"
-        deadline = time.monotonic() + self._poll_timeout
+        effective_timeout = poll_timeout if poll_timeout is not None else self._poll_timeout
+        deadline = time.monotonic() + effective_timeout
         while True:
             snap = (await self._request("GET", poll_path)).json()
             state = snap.get("state")
@@ -126,7 +133,7 @@ class AgentClient:
             # forever. Checked AFTER terminal states so a job that finishes right
             # at the deadline still returns its result.
             if time.monotonic() >= deadline:
-                raise AgentError(f"agent job {job_id} did not finish within {self._poll_timeout}s")
+                raise AgentError(f"agent job {job_id} did not finish within {effective_timeout}s")
             await asyncio.sleep(self._poll)
 
     async def pull(
@@ -139,6 +146,14 @@ class AgentClient:
 
     async def steam_prefill(self, app_ids: list[int], *, force: bool = False) -> dict[str, Any]:
         return await self._post_then_poll("/v1/steam/prefill", {"app_ids": app_ids, "force": force})
+
+    async def fetch_manifests(self) -> dict[str, Any]:
+        """Trigger a manifest-only fetch run on the agent (it self-enumerates the
+        cached app set; no app-id list crosses the wire). POST + poll to done.
+        Uses a 6-hour poll ceiling (fetch_manifests visits every cached app via
+        DepotDownloader; a full library can take hours — the default 2h ceiling
+        would time out mid-run on a large library)."""
+        return await self._post_then_poll("/v1/steam/fetch-manifests", {}, poll_timeout=21600.0)
 
     async def stat(self, hashes: list[str]) -> dict[str, int]:
         resp = await self._request("POST", "/v1/stat", json={"hashes": hashes})

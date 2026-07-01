@@ -106,6 +106,48 @@ async def get_prefill(job_id: str, request: Request) -> dict[str, Any]:
     return snap
 
 
+@router.post("/v1/steam/fetch-manifests", status_code=status.HTTP_202_ACCEPTED)
+async def start_fetch_manifests(request: Request) -> dict[str, str]:
+    fetcher = request.app.state.manifest_fetcher
+    store = request.app.state.agent_jobs
+    inflight = getattr(request.app.state, "fetch_manifests_job", None)
+    if inflight is not None:
+        snap = store.get(inflight)
+        if snap is not None and snap["state"] == "running":
+            return {"job_id": inflight}
+    job_id = store.create()
+    request.app.state.fetch_manifests_job = job_id
+
+    async def _run() -> None:
+        try:
+            result = await asyncio.to_thread(fetcher.fetch_all)
+            store.set_done(
+                job_id,
+                {
+                    "fetched": result.fetched,
+                    "skipped": result.skipped,
+                    "failed": result.failed,
+                    "apps": result.apps,
+                },
+            )
+        except Exception as e:  # record, never crash the loop
+            store.set_failed(job_id, f"{type(e).__name__}: {e}"[:200])
+
+    bg_tasks = request.app.state.agent_bg_tasks
+    task = asyncio.create_task(_run())
+    bg_tasks.add(task)
+    task.add_done_callback(bg_tasks.discard)
+    return {"job_id": job_id}
+
+
+@router.get("/v1/steam/fetch-manifests/{job_id}")
+async def get_fetch_manifests(job_id: str, request: Request) -> dict[str, Any]:
+    snap: dict[str, Any] | None = request.app.state.agent_jobs.get(job_id)
+    if snap is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return snap
+
+
 @router.get("/v1/steam/downloaded-state")
 async def downloaded_state(request: Request) -> dict[str, list[int]]:
     state = request.app.state.prefill_driver.downloaded_state()
