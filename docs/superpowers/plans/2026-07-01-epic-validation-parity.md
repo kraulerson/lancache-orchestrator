@@ -479,7 +479,7 @@ async def _validate_epic_game(
     import base64
 
     row = await pool.read_one(
-        "SELECT app_id, version, cdn_base, raw FROM manifests "
+        "SELECT version, cdn_base, raw FROM manifests "
         "WHERE game_id=? ORDER BY fetched_at DESC LIMIT 1",
         (game_id,),
     )
