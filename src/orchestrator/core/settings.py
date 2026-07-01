@@ -154,6 +154,13 @@ class Settings(BaseSettings):
     # F7: nginx $cacheidentifier for Steam traffic (the lancache map sets
     # this to the literal "steam"). Part of the cache-key md5 input.
     steam_cache_identifier: str = "steam"
+    # lancache cache identifiers Epic content is stored under (per CDN host —
+    # e.g. epicgames-download1.akamaized.net -> "epicgames"; egs-cloudfront maps
+    # to its own hostname). A chunk counts present if cached under ANY of these.
+    # go-live proven (2026-07-01). Comma-separated env, or a real list.
+    epic_cache_identifiers: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["epicgames", "egs-cloudfront-chunks.epicgamescdn.com"]
+    )
     # Prefill (F5) chunk-download concurrency. Pre-staged generic name; F5
     # uses it as the per-game parallel-chunk cap.
     chunk_concurrency: int = Field(default=32, ge=1, le=256)
@@ -281,6 +288,16 @@ class Settings(BaseSettings):
         segments are dropped."""
         if v is None:
             return []
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
+
+    @field_validator("epic_cache_identifiers", mode="before")
+    @classmethod
+    def _split_epic_cache_identifiers(cls, v: Any) -> Any:
+        """Accept a comma-separated env string or a real list; trim + drop empties."""
+        if v is None or v == "":
+            return ["epicgames", "egs-cloudfront-chunks.epicgamescdn.com"]
         if isinstance(v, str):
             return [s.strip() for s in v.split(",") if s.strip()]
         return v

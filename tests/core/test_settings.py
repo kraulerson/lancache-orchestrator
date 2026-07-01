@@ -752,3 +752,14 @@ def test_steam_username_env_override(monkeypatch):
     monkeypatch.setenv("ORCH_STEAM_USERNAME", "mysteamuser")
     s = Settings(orchestrator_token="a" * 32)
     assert s.steam_username == "mysteamuser"
+
+
+def test_epic_cache_identifiers_default():
+    s = Settings(orchestrator_token="a" * 32)
+    assert s.epic_cache_identifiers == ["epicgames", "egs-cloudfront-chunks.epicgamescdn.com"]
+
+
+def test_epic_cache_identifiers_env_comma_split(monkeypatch):
+    monkeypatch.setenv("ORCH_EPIC_CACHE_IDENTIFIERS", "epicgames, foo.example.com ,")
+    s = Settings(orchestrator_token="a" * 32)
+    assert s.epic_cache_identifiers == ["epicgames", "foo.example.com"]
