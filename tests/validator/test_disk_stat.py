@@ -6,7 +6,7 @@ import pytest
 
 from orchestrator.core.settings import Settings
 from orchestrator.jobs.worker import Deps
-from orchestrator.validator.disk_stat import validate_chunks, validate_game
+from orchestrator.validator.disk_stat import validate_chunks, validate_chunks_any, validate_game
 
 pytestmark = pytest.mark.asyncio
 
@@ -124,6 +124,28 @@ async def test_shutdown_cache_stat_executor_is_idempotent_and_recreates(tmp_path
     assert disk_stat._cache_stat_executor is not None
 
     disk_stat.shutdown_cache_stat_executor()
+
+
+# --- validate_chunks_any -----------------------------------------------
+
+
+def _mk(p):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"x")
+
+
+async def test_validate_chunks_any_counts_present_under_any_candidate(tmp_path):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    c = tmp_path / "c"
+    _mk(b)  # chunk1: only its 2nd candidate exists -> cached
+    # chunk2: neither candidate exists -> missing
+    result = await validate_chunks_any([[a, b], [c, tmp_path / "d"]])
+    assert result == (1, 1)  # (cached, present): chunk1 hits via b, chunk2 misses
+
+
+async def test_validate_chunks_any_empty(tmp_path):
+    assert await validate_chunks_any([]) == (0, 0)
 
 
 # --- validate_game (delegates to the agent's steam_validate) -----------

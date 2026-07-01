@@ -151,6 +151,65 @@ async def validate_chunks_scoped(paths: list[Path], *, batch_size: int = 256) ->
     return cached, present
 
 
+def _stat_any_batch(candidate_lists: list[list[Path]]) -> tuple[int, int, int]:
+    """Per chunk, cached/present if ANY candidate qualifies. Runs in a thread.
+
+    cached  = at least one candidate is a regular, non-empty, owner-readable file.
+    present = at least one candidate exists on disk (stat succeeds, not a symlink).
+    errors  = unexpected OSErrors across all candidates of all chunks.
+
+    Stops checking a chunk's candidates as soon as `cached` is confirmed (break).
+    Symlinks are never genuine cache files and are skipped.
+    """
+    cached = 0
+    present = 0
+    errors = 0
+    for cands in candidate_lists:
+        c_hit = False
+        p_hit = False
+        for p in cands:
+            try:
+                if p.is_symlink():
+                    continue
+                st = p.stat()
+                p_hit = True
+                if st.st_size > 0 and (st.st_mode & 0o400):
+                    c_hit = True
+                    break  # cached wins; stop checking this chunk's candidates
+            except FileNotFoundError:
+                pass
+            except OSError:
+                errors += 1
+        if c_hit:
+            cached += 1
+        if p_hit:
+            present += 1
+    return cached, present, errors
+
+
+async def validate_chunks_any(
+    candidate_lists: list[list[Path]], *, batch_size: int = 256
+) -> tuple[int, int]:
+    """Return (cached, present) over chunks, each given as a list of candidate
+    paths; a chunk counts if ANY candidate qualifies. For Epic, whose content is
+    cached under one of several per-CDN-host identifiers. Same bounded executor +
+    cached/present rule as validate_chunks_scoped."""
+    loop = asyncio.get_running_loop()
+    executor = _get_cache_stat_executor()
+    cached = 0
+    present = 0
+    errors = 0
+    for i in range(0, len(candidate_lists), batch_size):
+        batch = candidate_lists[i : i + batch_size]
+        b_cached, b_present, b_err = await loop.run_in_executor(executor, _stat_any_batch, batch)
+        cached += b_cached
+        present += b_present
+        errors += b_err
+    if errors:
+        _log.warning("validate.stat_errors", error_count=errors, total=len(candidate_lists))
+    return cached, present
+
+
 async def validate_game(
     pool: Any, deps: Deps, game_id: int, settings: Settings
 ) -> ValidationResult:
