@@ -13,7 +13,7 @@ from fastapi import FastAPI
 
 from orchestrator.agent.jobs import AgentJobStore
 from orchestrator.agent.manifest_archive import manifest_archive_sync_loop
-from orchestrator.agent.routers import health, pull, stat, steam
+from orchestrator.agent.routers import epic, health, pull, stat, steam
 from orchestrator.api.middleware import BearerAuthMiddleware, SourceAllowlistMiddleware
 from orchestrator.core.net import detect_non_loopback_bind
 from orchestrator.core.settings import Settings, get_settings
@@ -125,6 +125,7 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
     app.include_router(pull.router)
     app.include_router(stat.router)
     app.include_router(steam.router)
+    app.include_router(epic.router)
 
     # Security wiring (mirrors the API). Middleware added LAST is OUTERMOST, so
     # SourceAllowlist (added second) wraps BearerAuth: a request is first checked
