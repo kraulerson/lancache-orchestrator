@@ -17,6 +17,7 @@ from orchestrator.agent.routers import health, pull, stat, steam
 from orchestrator.api.middleware import BearerAuthMiddleware, SourceAllowlistMiddleware
 from orchestrator.core.net import detect_non_loopback_bind
 from orchestrator.core.settings import Settings, get_settings
+from orchestrator.platform.steam.manifest_fetcher import DepotDownloaderManifestFetcher
 from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
 from orchestrator.validator.disk_stat import shutdown_cache_stat_executor
 
@@ -67,6 +68,15 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
                 # by construction — not by relying on the deploy env (UAT-13 F2).
                 home=Path(settings.steam_prefill_live_cache_dir).parent.parent,
             )
+        if not hasattr(app.state, "manifest_fetcher"):
+            app.state.manifest_fetcher = DepotDownloaderManifestFetcher(
+                binary=settings.depotdownloader_binary,
+                config_dir=settings.depotdownloader_config_dir,
+                steam_config_dir=settings.steam_prefill_config_dir,
+                archive_dir=settings.steam_manifest_archive_dir,
+                delay_sec=settings.manifest_fetch_delay_sec,
+                username=settings.steam_username,
+            )
         interval = settings.manifest_archive_sync_interval_sec
         if interval > 0:
             sync_task = asyncio.create_task(
@@ -102,6 +112,14 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
         binary=settings.steam_prefill_binary,
         config_dir=settings.steam_prefill_config_dir,
         home=Path(settings.steam_prefill_live_cache_dir).parent.parent,
+    )
+    app.state.manifest_fetcher = DepotDownloaderManifestFetcher(
+        binary=settings.depotdownloader_binary,
+        config_dir=settings.depotdownloader_config_dir,
+        steam_config_dir=settings.steam_prefill_config_dir,
+        archive_dir=settings.steam_manifest_archive_dir,
+        delay_sec=settings.manifest_fetch_delay_sec,
+        username=settings.steam_username,
     )
     app.include_router(health.router)
     app.include_router(pull.router)

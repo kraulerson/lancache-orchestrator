@@ -145,6 +145,21 @@ async def test_post_then_poll_deadline_raises_agent_error():
         await client.pull([{"url": "/x", "host": "h"}], user_agent="UA/1.0")
 
 
+async def test_poll_timeout_override_reported_in_error():
+    """Regression: the deadline-exceeded error reports the EFFECTIVE per-call
+    poll_timeout override, not the instance default (fetch_manifests uses a 6h
+    override; a message citing the 2h default would misdirect an operator)."""
+
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(202, json={"job_id": "j"})
+        return httpx.Response(200, json={"state": "running"})
+
+    client = _client(handler)  # instance default poll_timeout_sec=7200.0
+    with pytest.raises(AgentError, match=r"within 0\.0s"):
+        await client._post_then_poll("/v1/steam/fetch-manifests", {}, poll_timeout=0.0)
+
+
 async def test_steam_validate_single_call():
     def handler(request):
         assert request.url.path == "/v1/steam/validate"
@@ -334,6 +349,22 @@ async def test_aclose_is_idempotent():
     client = AgentClient(base_url="http://agent:8780", token=TOKEN)
     await client.aclose()  # never used → no client built, no error
     await client.aclose()  # twice → safe
+
+
+async def test_fetch_manifests_posts_and_polls():
+    def handler(request):
+        if request.method == "POST":
+            assert request.url.path == "/v1/steam/fetch-manifests"
+            return httpx.Response(202, json={"job_id": "m1"})
+        assert request.url.path == "/v1/steam/fetch-manifests/m1"
+        return httpx.Response(
+            200,
+            json={"state": "done", "result": {"fetched": 5, "skipped": 0, "failed": 0, "apps": 5}},
+        )
+
+    client = _client(handler)
+    result = await client.fetch_manifests()
+    assert result == {"fetched": 5, "skipped": 0, "failed": 0, "apps": 5}
 
 
 async def test_aclose_closes_underlying_and_rebuilds_on_next_call():

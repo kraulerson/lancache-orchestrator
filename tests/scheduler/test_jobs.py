@@ -6,7 +6,11 @@ import asyncio
 
 import pytest
 
-from orchestrator.scheduler.jobs import enqueue_library_sync, enqueue_validation_sweep
+from orchestrator.scheduler.jobs import (
+    enqueue_fetch_manifests,
+    enqueue_library_sync,
+    enqueue_validation_sweep,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -226,3 +230,18 @@ class TestEnqueueScheduledPrefill:
             (gid,),
         )
         assert await enqueue_scheduled_prefill(pool) == 0
+
+
+class TestEnqueueFetchManifests:
+    async def test_enqueue_fetch_manifests_inserts(self, pool):
+        n = await enqueue_fetch_manifests(pool, source="api")
+        assert n == 1
+        row = await pool.read_one(
+            "SELECT kind, state FROM jobs WHERE kind='fetch_manifests' ORDER BY id DESC LIMIT 1"
+        )
+        assert row["kind"] == "fetch_manifests" and row["state"] == "queued"
+
+    async def test_enqueue_fetch_manifests_dedups(self, pool):
+        await enqueue_fetch_manifests(pool)
+        n2 = await enqueue_fetch_manifests(pool)
+        assert n2 == 0  # in-flight dedup

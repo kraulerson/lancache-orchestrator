@@ -19,6 +19,21 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — Steam manifest-only fetcher closes the validation-coverage gap (2026-06-30) — 2026-06-30
+
+Adds a new `fetch_manifests` job that runs DepotDownloader with `-manifest-only` to produce `.shas` sidecars (one chunk SHA per line) for every prefilled Steam app — without re-downloading any game content. This closes the validation gap where SteamPrefill only wrote a manifest `.bin` for apps with new content and pruned the rest via `clear-temp`, leaving ~747 of ~1077 prefilled apps returning `no_manifest_in_cache` and unvalidatable despite having ~13 TB of chunks on disk. The validator already reads `.shas` alongside `.bin`, so once a fetch run completes, the full prefilled set can be validated.
+
+- **`platform/steam/manifest_fetcher.py`:** `DepotDownloaderManifestFetcher` self-enumerates the cached Steam app set from `successfullyDownloadedDepots.json` / `selectedAppsToPrefill.json` (auto-grows; nothing hardcoded), calls DepotDownloader `-manifest-only` per-app with per-app `except Exception` isolation (a crash on one app never aborts the batch) and a hard `except BaseException` boundary at the batch level, then writes `{app}_{app}_{depot}_{gid}.shas` sidecars into the manifest archive. A one-time interactive `docker exec` `--remember-password` login is the only credential step; every subsequent run is unattended (persisted login key). Loud total-failure raise when all apps fail (session likely expired).
+- **`platform/steam/steamkit_manifest_parser.py`:** parses SteamKit2 `.manifest` (protobuf) files written by DepotDownloader `-manifest-only`, extracting chunk SHA1 hashes for the `.shas` sidecar.
+- **`agent/routers/steam.py`:** `POST /v1/steam/fetch-manifests` starts the fetch job on the agent; single-flight guard returns the existing `job_id` when one is already running. `GET /v1/steam/fetch-manifests/{job_id}` polls status.
+- **`clients/agent_client.py`:** `fetch_manifests()` POSTs to `/v1/steam/fetch-manifests` and polls to done with a 6-hour ceiling (vs. the default 2-hour — a full library fetch can take hours).
+- **`jobs/handlers/fetch_manifests.py`:** control-plane worker handler dequeues `fetch_manifests` jobs, delegates to the agent via `agent_client.fetch_manifests()`, and records `fetched/skipped/failed/apps` in the job result.
+- **`api/routers/fetch_manifests_trigger.py`:** `POST /api/v1/fetch-manifests` (bearer-gated) triggers an on-demand `fetch_manifests` job. No `/status` endpoint — use `GET /api/v1/jobs` to poll.
+- **`scheduler/jobs.py`:** `enqueue_fetch_manifests` inserts a `fetch_manifests` job row (DB-deduped via `idx_jobs_fetch_manifests_inflight`, migration 0009). **`scheduler/manager.py`:** registers a weekly cron (`fetch_manifests_cron`, default `"0 5 * * 1"`, Monday 05:00 UTC — offset from the sweep at 03/09/15/21 and the host prefill crons).
+- **`cli/commands/cache.py`:** `orchestrator-cli cache fetch-manifests` triggers an on-demand run.
+- **`db/migrations/0009_jobs_fetch_manifests_unique.sql`:** partial-unique index `idx_jobs_fetch_manifests_inflight` (at most one queued/running `fetch_manifests` job at a time, DB-enforced).
+- **Dockerfile:** DepotDownloader 3.4.0 linux-x64 binary pinned by sha256 (`a999dec6…`), downloaded and sha256-verified in the **builder** stage and `COPY`'d into the runtime stage — no `curl`/`unzip` in the runtime image. Self-contained .NET 8 build; no `.NET` runtime required. No new Python dependency.
+
 ### Fixed — UAT-13 hardening: status-page never-raises + deterministic manifest-capture path (2026-06-30) — 2026-06-30
 
 UAT-13 adversarial review of #208/#209 surfaced two verified SEV-2 silent-failure modes (both confirmed *not* breaking the live deployment — hardening, fixed test-first). See #210, #211.

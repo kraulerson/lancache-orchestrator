@@ -125,6 +125,22 @@ class Settings(BaseSettings):
     # Agent sync cadence (seconds) for copying live manifests into the archive.
     # 0 disables the periodic sync.
     manifest_archive_sync_interval_sec: int = Field(default=1800, ge=0)
+    # --- DepotDownloader manifest-only fetcher (validation-coverage gap) -----
+    # Fetches manifests (NO chunks) for the cached library so validate covers
+    # apps SteamPrefill skipped (already-up-to-date apps never (re)write a .bin).
+    # Self-contained .NET 8 binary; writes .shas sidecars into the archive.
+    depotdownloader_binary: Path = Path("/depotdownloader/DepotDownloader")
+    depotdownloader_config_dir: Path = Path("/depotdownloader-config")
+    # Steam account username for DepotDownloader's remembered-session path.
+    # A username is NOT a secret — it is passed on the argv as -username <user>
+    # so DepotDownloader can match the stored login key. Empty = no -username arg
+    # (single-account deploys where DD infers the account automatically).
+    steam_username: str = ""
+    # Inter-request delay (seconds) between per-app DepotDownloader invocations.
+    # DepotDownloader is a per-app process (each run is its own Steam logon), so
+    # the run is throttled to stay under Steam's logon rate limit. Value tuned by
+    # spike S1. 0 disables the delay.
+    manifest_fetch_delay_sec: float = Field(default=3.0, ge=0.0)
     # How many UNCACHED apps library_sync looks up from the Steam store per run
     # (the store API is rate-limited ~200/5min; the rest fill on later syncs).
     steam_store_fetch_budget: int = Field(default=150, ge=0)
@@ -184,6 +200,10 @@ class Settings(BaseSettings):
     # F8: the scheduled prefill driver runs on the library-sync interval.
     scheduled_prefill_enabled: bool = True
     sweep_batch_size: int = Field(default=10, ge=1)
+    # Manifest-only fetcher (DepotDownloader) weekly cron — Monday 05:00 UTC,
+    # offset from the sweep (03/09/15/21) and host prefill crons. 5-field, UTC.
+    fetch_manifests_enabled: bool = True
+    fetch_manifests_cron: str = "0 5 * * 1"
 
     # --- Misc --------------------------------------------------------
     manifest_size_cap_bytes: int = Field(default=134_217_728, gt=0)
@@ -309,6 +329,16 @@ class Settings(BaseSettings):
             CronTrigger.from_crontab(v)
         except Exception as e:  # apscheduler raises ValueError on bad expressions
             raise ValueError(f"invalid validation_sweep_cron {v!r}: {e}") from e
+        return v
+
+    @field_validator("fetch_manifests_cron", mode="after")
+    @classmethod
+    def _validate_fetch_manifests_cron(cls, v: str) -> str:
+        """Fail-fast on a malformed fetch_manifests cron by constructing the trigger now."""
+        try:
+            CronTrigger.from_crontab(v)
+        except Exception as e:
+            raise ValueError(f"invalid fetch_manifests_cron {v!r}: {e}") from e
         return v
 
     @field_validator("orchestrator_token", mode="before")

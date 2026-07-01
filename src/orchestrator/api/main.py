@@ -28,6 +28,9 @@ from orchestrator.api.middleware import (
 from orchestrator.api.routers.block_list import router as block_list_router
 from orchestrator.api.routers.epic_auth import router as epic_auth_router
 from orchestrator.api.routers.epic_sync import router as epic_sync_router
+from orchestrator.api.routers.fetch_manifests_trigger import (
+    router as fetch_manifests_trigger_router,
+)
 from orchestrator.api.routers.games import router as games_router
 from orchestrator.api.routers.health import router as health_router
 from orchestrator.api.routers.jobs import router as jobs_router
@@ -220,6 +223,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         validation_sweep_enabled=settings.validation_sweep_enabled,
         validation_sweep_cron=settings.validation_sweep_cron,
         scheduled_prefill_enabled=settings.scheduled_prefill_enabled,
+        fetch_manifests_enabled=settings.fetch_manifests_enabled,
+        fetch_manifests_cron=settings.fetch_manifests_cron,
     )
     try:
         await scheduler_manager.start()
@@ -427,6 +432,7 @@ def create_app() -> FastAPI:
     app.include_router(manifests_router)
     app.include_router(validate_trigger_router)
     app.include_router(sweep_trigger_router)
+    app.include_router(fetch_manifests_trigger_router)
     app.include_router(prefill_trigger_router)
     app.include_router(sync_router)
     app.include_router(epic_sync_router)

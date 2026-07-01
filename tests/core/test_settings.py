@@ -724,3 +724,31 @@ class TestManifestArchiveSettings:
         s = Settings(orchestrator_token=VALID_TOKEN)
         assert str(s.steam_manifest_archive_dir) == "/opt/arch"
         assert s.manifest_archive_sync_interval_sec == 0
+
+
+def test_manifest_fetcher_settings_defaults():
+    s = Settings(orchestrator_token="a" * 32)
+    assert s.depotdownloader_binary == Path("/depotdownloader/DepotDownloader")
+    assert s.depotdownloader_config_dir == Path("/depotdownloader-config")
+    assert s.manifest_fetch_delay_sec == 3.0
+
+
+def test_manifest_fetcher_settings_env_override(monkeypatch):
+    monkeypatch.setenv("ORCH_MANIFEST_FETCH_DELAY_SEC", "5.5")
+    monkeypatch.setenv("ORCH_DEPOTDOWNLOADER_CONFIG_DIR", "/custom/dd")
+    s = Settings(orchestrator_token="a" * 32)
+    assert s.manifest_fetch_delay_sec == 5.5
+    assert s.depotdownloader_config_dir == Path("/custom/dd")
+
+
+def test_steam_username_default():
+    """steam_username defaults to empty string (not required)."""
+    s = Settings(orchestrator_token="a" * 32)
+    assert s.steam_username == ""
+
+
+def test_steam_username_env_override(monkeypatch):
+    """ORCH_STEAM_USERNAME is picked up from the environment."""
+    monkeypatch.setenv("ORCH_STEAM_USERNAME", "mysteamuser")
+    s = Settings(orchestrator_token="a" * 32)
+    assert s.steam_username == "mysteamuser"

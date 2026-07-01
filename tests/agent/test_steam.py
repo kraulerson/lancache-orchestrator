@@ -192,6 +192,74 @@ def test_steam_prefill_rejects_negative_app_id():
     assert resp.status_code == 422
 
 
+class _FakeFetcher:
+    def __init__(self, result=None, boom=False):
+        from orchestrator.platform.steam.manifest_fetcher import FetchResult
+
+        self._result = result or FetchResult(fetched=2, skipped=1, failed=0, apps=3)
+        self._boom = boom
+
+    def fetch_all(self):
+        if self._boom:
+            raise RuntimeError("fetch blew up")
+        return self._result
+
+
+def test_fetch_manifests_requires_bearer():
+    app = create_agent_app(settings=Settings(orchestrator_token="a" * 32))
+    app.state.manifest_fetcher = _FakeFetcher()
+    client = TestClient(app)  # no Authorization header
+    assert client.post("/v1/steam/fetch-manifests").status_code == 401
+
+
+def test_fetch_manifests_runs_to_done():
+    app = create_agent_app(settings=Settings(orchestrator_token="a" * 32))
+    app.state.manifest_fetcher = _FakeFetcher()
+    client = TestClient(app, headers={"Authorization": "Bearer " + "a" * 32})
+    job_id = client.post("/v1/steam/fetch-manifests").json()["job_id"]
+    snap: dict = {}
+    for _ in range(50):
+        snap = client.get(f"/v1/steam/fetch-manifests/{job_id}").json()
+        if snap["state"] == "done":
+            break
+        time.sleep(0.02)
+    assert snap["state"] == "done"
+    assert snap["result"] == {"fetched": 2, "skipped": 1, "failed": 0, "apps": 3}
+
+
+def test_fetch_manifests_records_failure():
+    app = create_agent_app(settings=Settings(orchestrator_token="a" * 32))
+    app.state.manifest_fetcher = _FakeFetcher(boom=True)
+    client = TestClient(app, headers={"Authorization": "Bearer " + "a" * 32})
+    job_id = client.post("/v1/steam/fetch-manifests").json()["job_id"]
+    snap: dict = {}
+    for _ in range(50):
+        snap = client.get(f"/v1/steam/fetch-manifests/{job_id}").json()
+        if snap["state"] == "failed":
+            break
+        time.sleep(0.02)
+    assert snap["state"] == "failed"
+
+
+def test_fetch_manifests_single_flight_reuses_running_job():
+    """A second POST /v1/steam/fetch-manifests returns the existing job_id while one is running."""
+    app = create_agent_app(settings=Settings(orchestrator_token="a" * 32))
+    app.state.manifest_fetcher = _FakeFetcher()
+    client = TestClient(app, headers={"Authorization": "Bearer " + "a" * 32})
+
+    # Pre-seed an in-flight running job directly in the store.
+    # AgentJobStore.create() initialises state="running" by default.
+    store = app.state.agent_jobs
+    existing_job_id = store.create()
+    app.state.fetch_manifests_job = existing_job_id
+
+    resp = client.post("/v1/steam/fetch-manifests")
+    assert resp.status_code == 202
+    assert resp.json()["job_id"] == existing_job_id
+    # The store should NOT have grown (no new job was created)
+    assert store.size() == 1
+
+
 def test_prefilled_apps_lists_distinct_app_ids(tmp_path):
     v1 = tmp_path / "v1"
     v1.mkdir()

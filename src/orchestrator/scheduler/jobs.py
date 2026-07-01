@@ -94,6 +94,38 @@ async def enqueue_validation_sweep(
         return 0
 
 
+async def enqueue_fetch_manifests(pool: Pool, *, source: str = "scheduler") -> int:
+    """Insert a ``fetch_manifests`` job if none is queued/running.
+
+    Mirrors ``enqueue_validation_sweep``: at most one in-flight fetch_manifests,
+    DB-enforced via the ``idx_jobs_fetch_manifests_inflight`` partial-unique index
+    (migration 0009) + ``ON CONFLICT DO NOTHING``. Returns the rowcount (1 queued
+    / 0 deduped). Never raises — a failing scheduler tick must not degrade
+    APScheduler.
+    """
+    try:
+        inserted = await pool.execute_write(
+            "INSERT INTO jobs (kind, state, source) "
+            "VALUES ('fetch_manifests', 'queued', ?) ON CONFLICT DO NOTHING",
+            (source,),
+        )
+        if inserted:
+            _log.info("scheduler.fetch_manifests.queued", source=source)
+        else:
+            _log.info("scheduler.fetch_manifests.dedup_skip")
+        return inserted
+    except PoolError as e:
+        _log.error("scheduler.fetch_manifests.db_error", reason=str(e)[:200])
+        return 0
+    except Exception as e:
+        _log.error(
+            "scheduler.fetch_manifests.unexpected_error",
+            error=type(e).__name__,
+            reason=str(e)[:200],
+        )
+        return 0
+
+
 async def enqueue_scheduled_prefill(pool: Pool) -> int:
     """Enqueue 'prefill' jobs for owned games that are new, version-diverged, or
     validation_failed — and not block-listed (F8 scheduled prefill driver).

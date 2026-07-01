@@ -81,7 +81,15 @@ class JobResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: int
-    kind: Literal["prefill", "validate", "library_sync", "auth_refresh", "sweep", "manifest_fetch"]
+    kind: Literal[
+        "prefill",
+        "validate",
+        "library_sync",
+        "auth_refresh",
+        "sweep",
+        "manifest_fetch",
+        "fetch_manifests",
+    ]
     game_id: int | None
     platform: Literal["steam", "epic"] | None
     state: Literal["queued", "running", "succeeded", "failed", "cancelled"]

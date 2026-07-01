@@ -279,6 +279,39 @@ class TestSchedulerManager:
             await mgr.shutdown()
 
 
+class TestFetchManifestsRegistration:
+    async def test_fetch_manifests_job_registered_when_enabled(self, pool):
+        from orchestrator.scheduler.manager import FETCH_MANIFESTS_JOB_ID
+
+        mgr = SchedulerManager(
+            pool=pool,
+            enabled=True,
+            library_sync_interval_sec=21600,
+            fetch_manifests_enabled=True,
+            fetch_manifests_cron="0 5 * * 1",
+        )
+        try:
+            await mgr.start()
+            assert FETCH_MANIFESTS_JOB_ID in mgr.get_registered_job_ids()
+        finally:
+            await mgr.shutdown()
+
+    async def test_fetch_manifests_job_absent_when_disabled(self, pool):
+        from orchestrator.scheduler.manager import FETCH_MANIFESTS_JOB_ID
+
+        mgr = SchedulerManager(
+            pool=pool,
+            enabled=True,
+            library_sync_interval_sec=21600,
+            fetch_manifests_enabled=False,
+        )
+        try:
+            await mgr.start()
+            assert FETCH_MANIFESTS_JOB_ID not in mgr.get_registered_job_ids()
+        finally:
+            await mgr.shutdown()
+
+
 class TestScheduledPrefillRegistration:
     async def test_registers_scheduled_prefill_job(self, pool):
         from orchestrator.scheduler.manager import SCHEDULED_PREFILL_JOB_ID
