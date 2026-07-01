@@ -229,3 +229,115 @@ async def test_validate_nonnumeric_app_id_is_error(pool):
     result = await validate_game(pool, deps, game_id, _settings())
     assert result.outcome == "error"
     assert agent.calls == []  # bad app_id rejected before the agent call
+
+
+# --- validate_game — Epic platform dispatch --------------------------------
+
+
+class _FakeAgentEV:
+    """Records epic_validate keyword-arg calls and returns a fixed validate dict."""
+
+    def __init__(self, response):
+        self._response = response
+        self.calls: list[dict] = []
+
+    async def epic_validate(
+        self,
+        *,
+        app_id: int,
+        version: str,
+        cdn_base: str,
+        raw_manifest_b64: str,
+    ) -> dict:
+        self.calls.append(
+            {
+                "app_id": app_id,
+                "version": version,
+                "cdn_base": cdn_base,
+                "raw_manifest_b64": raw_manifest_b64,
+            }
+        )
+        return self._response
+
+
+async def _seed_manifest(
+    pool,
+    game_id: int,
+    *,
+    version: str = "1.0",
+    cdn_base: str | None = "https://cdn.example.com",
+    raw: bytes = b"manifest-raw",
+) -> None:
+    await pool.execute_write(
+        "INSERT INTO manifests (game_id, version, raw, chunk_count, total_bytes, cdn_base) "
+        "VALUES (?, ?, ?, 0, 0, ?)",
+        (game_id, version, raw, cdn_base),
+    )
+
+
+async def test_validate_epic_calls_agent_and_maps_result(pool):
+    """validate_game for an epic game reads the stored manifest, b64-encodes raw,
+    and forwards app_id + version + cdn_base + raw_manifest_b64 to epic_validate.
+    The returned dict is shaped into a ValidationResult identical to the steam path."""
+    import base64
+
+    raw = b"epic-raw-manifest"
+    game_id = await _seed_game(pool, platform="epic", app_id="12345")
+    await _seed_manifest(
+        pool, game_id, version="v1.2", cdn_base="https://cdn.epicgames.com", raw=raw
+    )
+    agent = _FakeAgentEV(
+        {
+            "chunks_total": 10,
+            "chunks_cached": 8,
+            "chunks_missing": 2,
+            "outcome": "partial",
+            "versions": "v1.2",
+            "error": None,
+        }
+    )
+    deps = Deps(pool=pool, agent_client=agent)
+
+    result = await validate_game(pool, deps, game_id, _settings())
+
+    expected_b64 = base64.b64encode(raw).decode("ascii")
+    assert len(agent.calls) == 1
+    call = agent.calls[0]
+    assert call["app_id"] == 12345
+    assert call["version"] == "v1.2"
+    assert call["cdn_base"] == "https://cdn.epicgames.com"
+    assert call["raw_manifest_b64"] == expected_b64
+    assert result.chunks_total == 10
+    assert result.chunks_cached == 8
+    assert result.chunks_missing == 2
+    assert result.outcome == "partial"
+    assert result.manifest_version == "v1.2"
+
+
+async def test_validate_epic_no_cdn_base_is_error(pool):
+    """Epic manifest with NULL cdn_base → error='no_cdn_base'; agent NOT called.
+    Affects pre-migration rows (re-prefill heals by writing cdn_base)."""
+    game_id = await _seed_game(pool, platform="epic", app_id="99001")
+    await _seed_manifest(pool, game_id, cdn_base=None)
+    agent = _FakeAgentEV({})
+    deps = Deps(pool=pool, agent_client=agent)
+
+    result = await validate_game(pool, deps, game_id, _settings())
+
+    assert result.outcome == "error"
+    assert result.error == "no_cdn_base"
+    assert agent.calls == []
+
+
+async def test_validate_epic_no_manifest_is_error(pool):
+    """Epic game with no manifests row → error='no_manifest'; agent NOT called."""
+    game_id = await _seed_game(pool, platform="epic", app_id="99002")
+    # No manifest seeded intentionally.
+    agent = _FakeAgentEV({})
+    deps = Deps(pool=pool, agent_client=agent)
+
+    result = await validate_game(pool, deps, game_id, _settings())
+
+    assert result.outcome == "error"
+    assert result.error == "no_manifest"
+    assert agent.calls == []

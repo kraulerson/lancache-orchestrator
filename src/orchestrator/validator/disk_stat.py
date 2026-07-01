@@ -11,6 +11,7 @@ module is the shared stat engine the agent calls.
 from __future__ import annotations
 
 import asyncio
+import base64
 import concurrent.futures
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -210,26 +211,8 @@ async def validate_chunks_any(
     return cached, present
 
 
-async def validate_game(
-    pool: Any, deps: Deps, game_id: int, settings: Settings
-) -> ValidationResult:
-    """Validate a Steam game's current manifests against the on-disk lancache.
-
-    Delegates to the data-plane agent's `/v1/steam/validate`
-    (SteamPrefill-backed): the agent locates the game's manifest .bin files,
-    parses the chunk SHAs, derives the cache keys, and stats them. The control
-    plane only resolves the game's `app_id` and shapes the result.
-    """
-    if deps.agent_client is None:
-        return ValidationResult(0, 0, 0, "error", "", "agent_client unavailable")
-    row = await pool.read_one("SELECT app_id FROM games WHERE id=?", (game_id,))
-    if row is None:
-        return ValidationResult(0, 0, 0, "error", "", f"game {game_id} not found")
-    try:
-        app_id_int = int(row["app_id"])
-    except (TypeError, ValueError):
-        return ValidationResult(0, 0, 0, "error", "", "app_id not numeric")
-    res = await deps.agent_client.steam_validate(app_id_int)
+def _shape(res: dict[str, Any]) -> ValidationResult:
+    """Map an agent validate response dict onto a ValidationResult."""
     return ValidationResult(
         chunks_total=res["chunks_total"],
         chunks_cached=res["chunks_cached"],
@@ -238,3 +221,65 @@ async def validate_game(
         manifest_version=res.get("versions", ""),
         error=res.get("error"),
     )
+
+
+async def _validate_epic_game(
+    pool: Any, deps: Deps, game_id: int, app_id_str: str
+) -> ValidationResult:
+    """Validate an Epic game by reading its stored manifest and delegating to the
+    agent's /v1/epic/validate endpoint. The manifest's raw bytes are b64-encoded
+    for the RPC; cdn_base is required (NULL means a pre-migration row — re-prefill
+    heals it by writing cdn_base at prefill time)."""
+    manifest = await pool.read_one(
+        "SELECT version, cdn_base, raw FROM manifests "
+        "WHERE game_id=? ORDER BY fetched_at DESC LIMIT 1",
+        (game_id,),
+    )
+    if manifest is None:
+        return ValidationResult(0, 0, 0, "error", "", "no_manifest")
+    if not manifest["cdn_base"]:
+        return ValidationResult(0, 0, 0, "error", manifest["version"], "no_cdn_base")
+    agent = deps.agent_client
+    if agent is None:
+        return ValidationResult(0, 0, 0, "error", "", "agent_client unavailable")
+    try:
+        app_id_int = int(app_id_str)
+    except (TypeError, ValueError):
+        app_id_int = 0
+    res = await agent.epic_validate(
+        app_id=app_id_int,
+        version=str(manifest["version"]),
+        cdn_base=str(manifest["cdn_base"]),
+        raw_manifest_b64=base64.b64encode(manifest["raw"]).decode("ascii"),
+    )
+    return _shape(res)
+
+
+async def validate_game(
+    pool: Any, deps: Deps, game_id: int, settings: Settings
+) -> ValidationResult:
+    """Validate a game's current manifests against the on-disk lancache.
+
+    Steam delegates to the agent's `/v1/steam/validate` (SteamPrefill-backed):
+    the agent locates the game's manifest .bin files, parses the chunk SHAs,
+    derives cache keys, and stats them.
+
+    Epic reads the stored manifest (version + cdn_base + raw bytes) from the DB
+    and delegates to the agent's `/v1/epic/validate`.
+
+    The control plane shapes the result; recording is done by validate_one_game.
+    """
+    if deps.agent_client is None:
+        return ValidationResult(0, 0, 0, "error", "", "agent_client unavailable")
+    row = await pool.read_one("SELECT app_id, platform FROM games WHERE id=?", (game_id,))
+    if row is None:
+        return ValidationResult(0, 0, 0, "error", "", f"game {game_id} not found")
+    platform = row["platform"]
+    if platform == "epic":
+        return await _validate_epic_game(pool, deps, game_id, row["app_id"])
+    try:
+        app_id_int = int(row["app_id"])
+    except (TypeError, ValueError):
+        return ValidationResult(0, 0, 0, "error", "", "app_id not numeric")
+    res = await deps.agent_client.steam_validate(app_id_int)
+    return _shape(res)
