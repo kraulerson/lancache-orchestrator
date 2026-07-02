@@ -314,11 +314,11 @@ def test_validate_all_depots_unprefilled_is_missing(tmp_path):
     assert body["outcome"] == "missing"
 
 
-def test_validate_mode000_depot_kept_as_gap_not_excluded(tmp_path):
-    """A depot whose chunk files EXIST on disk but are mode-000 (unreadable —
-    the #76/#128 corruption) must NOT be excluded as 'never prefilled'. Its files
-    are present, so it stays a visible gap (present>0, 0 readable -> 'missing')
-    instead of being silently dropped, which would HIDE the corruption."""
+def test_validate_mode000_depot_counted_cached(tmp_path):
+    """A depot whose chunk files EXIST on disk but are mode-000 validates as
+    CACHED: mode-000 is a transient nginx-over-NFS write-race that self-heals to
+    0600 in ms (audit 2026-07-02), so present, correct-size files count. The depot
+    is still KEPT (present>0, not excluded as 'never prefilled')."""
     client = _build_multidepot(tmp_path, depot_cached={800441: (10, 10)})
     # Strip the owner-read bit from every (otherwise fully-cached) chunk file.
     for f in (tmp_path / "lancache").rglob("*"):
@@ -326,5 +326,5 @@ def test_validate_mode000_depot_kept_as_gap_not_excluded(tmp_path):
             f.chmod(0o000)
     body = client.post("/v1/steam/validate", json={"app_id": MD_APP}).json()
     assert body["chunks_total"] == 10  # depot KEPT (files present), not excluded
-    assert body["chunks_cached"] == 0  # all unreadable -> none count as cached
-    assert body["outcome"] == "missing"
+    assert body["chunks_cached"] == 10  # transient mode-000 -> counted cached
+    assert body["outcome"] == "cached"

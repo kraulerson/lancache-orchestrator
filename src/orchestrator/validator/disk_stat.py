@@ -1,11 +1,18 @@
 """F7 disk-stat validator engine.
 
 Counts, for a batch of nginx cache file paths, how many are cached.
-"Cached" = file exists AND size > 0 AND owner-read bit set (the cache file
-is larger than the chunk body because nginx prepends a cache-entry header —
-never size-match; see spike A4). The cache-key derivation and Steam manifest
-parsing now live in the data-plane agent (`agent/routers/steam.py`); this
-module is the shared stat engine the agent calls.
+"Cached" = file exists AND size > 0 (the cache file is larger than the chunk
+body because nginx prepends a cache-entry header — never size-match; see spike
+A4). We deliberately do NOT require the owner-read bit: a mode-000 cache file
+is a TRANSIENT nginx-over-NFS write-race artifact — nginx creates the temp file
+at mode 000, then fchmod's it to 0600 milliseconds later (audit 2026-07-02) —
+so the content IS on disk at the right size. Penalizing that momentary state
+produced false "Partial" badges; the audit confirmed there is no persistent
+mode-000 backlog for this relaxation to hide (a genuinely-unreadable file
+surfaces separately as an nginx `Permission denied` 500 in the error log).
+The cache-key derivation and Steam manifest parsing now live in the data-plane
+agent (`agent/routers/steam.py`); this module is the shared stat engine the
+agent calls.
 """
 
 from __future__ import annotations
@@ -73,10 +80,11 @@ def shutdown_cache_stat_executor() -> None:
 def _stat_batch(paths: list[Path]) -> tuple[int, int, int]:
     """Count (cached, present, errors) for a batch. Runs in a thread.
 
-    cached  = a regular file with non-empty size AND the owner-read bit set.
+    cached  = a regular file with non-empty size (mode is NOT checked — see
+              below).
     present = the file exists on disk (stat succeeds, not a symlink) regardless
               of size/mode — lets callers tell a never-prefilled chunk (absent)
-              from a prefilled-but-unreadable one (mode-000) or an empty one.
+              from an empty one.
     errors  = unexpected OSErrors (e.g. EACCES on a directory, EIO). A plain
               missing file is not an error.
     """
@@ -90,14 +98,14 @@ def _stat_batch(paths: list[Path]) -> tuple[int, int, int]:
                 continue
             st = p.stat()
             present += 1  # file exists on disk (stat() needs only dir traversal)
-            # F5/#128: lancache (www-data, the file owner) must be able to
-            # READ the file to serve it. ~1.7% of cache files are mode-000 —
-            # they exist with size>0 but are unreadable, so lancache returns
-            # 500 + re-downloads. Require the owner-read bit so those don't
-            # count as cached. stat() returns st_mode without needing read
-            # access to the content, so this works even though the
-            # orchestrator (uid 1000) can't open www-data:600 files itself.
-            if st.st_size > 0 and (st.st_mode & 0o400):
+            # A present, non-empty file is cached. We do NOT require the
+            # owner-read bit: a mode-000 file is a TRANSIENT nginx-over-NFS
+            # write-race (nginx creates the temp at mode 000, then fchmod's to
+            # 0600 ms later; audit 2026-07-02), so the content is on disk. The
+            # old read-bit gate produced false "Partial" badges; the audit found
+            # no persistent mode-000 backlog for this to hide. (stat() returns
+            # st_size without needing read access to the content.)
+            if st.st_size > 0:
                 cached += 1
         except FileNotFoundError:
             pass  # plain cache miss — expected, not an error
@@ -155,7 +163,8 @@ async def validate_chunks_scoped(paths: list[Path], *, batch_size: int = 256) ->
 def _stat_any_batch(candidate_lists: list[list[Path]]) -> tuple[int, int, int]:
     """Per chunk, cached/present if ANY candidate qualifies. Runs in a thread.
 
-    cached  = at least one candidate is a regular, non-empty, owner-readable file.
+    cached  = at least one candidate is a regular, non-empty file (mode is NOT
+              checked — a transient mode-000 file still counts; see _stat_batch).
     present = at least one candidate exists on disk (stat succeeds, not a symlink).
     errors  = unexpected OSErrors across all candidates of all chunks.
 
@@ -174,7 +183,7 @@ def _stat_any_batch(candidate_lists: list[list[Path]]) -> tuple[int, int, int]:
                     continue
                 st = p.stat()
                 p_hit = True
-                if st.st_size > 0 and (st.st_mode & 0o400):
+                if st.st_size > 0:
                     c_hit = True
                     break  # cached wins; stop checking this chunk's candidates
             except FileNotFoundError:

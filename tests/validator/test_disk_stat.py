@@ -42,19 +42,23 @@ async def test_empty_path_list(tmp_path):
     assert await validate_chunks([]) == (0, 0)
 
 
-async def test_unreadable_mode000_not_counted(tmp_path):
-    """F5: a mode-000 cache file is unreadable by lancache (owner www-data has
-    no read bit); it must NOT count as cached even though it exists size>0."""
+async def test_transient_mode000_counted_cached(tmp_path):
+    """A mode-000 cache file (size>0) is a TRANSIENT nginx-over-NFS write-race
+    artifact: nginx creates the temp file at mode 000, then fchmod's it to 0600
+    milliseconds later (audit 2026-07-02). The chunk IS on disk at the right size,
+    so the validator — which answers "is the game cached on disk?" — counts it
+    cached regardless of a momentary 000 read-bit. Fixes false "Partial" badges;
+    the audit proved there is no persistent mode-000 backlog for this to hide."""
     import os
 
-    f = tmp_path / "unreadable"
+    f = tmp_path / "transient000"
     f.write_bytes(b"data")
     os.chmod(f, 0o000)
     try:
         cached, missing = await validate_chunks([f])
     finally:
         os.chmod(f, 0o644)  # restore so tmp cleanup can remove it
-    assert (cached, missing) == (0, 1)
+    assert (cached, missing) == (1, 0)
 
 
 async def test_readable_mode644_counted(tmp_path):
@@ -159,11 +163,11 @@ async def test_validate_chunks_any_present_size_zero_not_cached(tmp_path):
     assert result == (0, 1)  # present=1, cached=0
 
 
-async def test_validate_chunks_any_present_mode000_not_cached(tmp_path):
-    """A non-empty candidate file with mode 000 is present but NOT cached (#76/#128).
-    The owner-read bit must be set for lancache to serve it; mode-000 files exist
-    on disk but lancache cannot read them, so they must not count as cached.
-    If the test runner is root, chmod 000 may still be readable — skip in that case."""
+async def test_validate_chunks_any_present_mode000_counted_cached(tmp_path):
+    """A non-empty candidate at mode 000 counts as CACHED: it's a transient nginx
+    write-race state that self-heals to 0600 in ms (audit 2026-07-02), and the
+    content is on disk. Mirrors the scoped-path behavior. No root-skip needed —
+    the check is now size>0 only, independent of the mode bits."""
     import os
 
     f = tmp_path / "mode000"
@@ -173,11 +177,7 @@ async def test_validate_chunks_any_present_mode000_not_cached(tmp_path):
         result = await validate_chunks_any([[f]])
     finally:
         os.chmod(f, 0o644)  # restore so tmp cleanup can remove it
-    # If running as root, stat() sees size>0 and mode 000 but root bypasses mode checks —
-    # the kernel sets all mode bits for root, so 0o400 would appear set. Skip that case.
-    if result == (1, 1):
-        pytest.skip("test runner is root; chmod 000 is readable, skipping mode-000 sub-case")
-    assert result == (0, 1)  # present=1, cached=0
+    assert result == (1, 1)  # cached=1, present=1
 
 
 async def test_validate_chunks_any_symlink_skipped(tmp_path):

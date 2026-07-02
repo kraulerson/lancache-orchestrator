@@ -278,11 +278,12 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
     # multi-language titles are perpetually 'partial'.
     #
     # We gate exclusion on `present`, NOT on `cached`: a depot whose files EXIST
-    # but are unreadable (mode-000, #76/#128) or empty has present > 0 and is
-    # KEPT, so that corruption stays visible as a gap instead of being silently
-    # dropped as "never prefilled". (A depot fully evicted to 0 files on disk is
-    # indistinguishable from never-prefilled and is excluded — accepted: whole-
-    # depot eviction-to-zero is rare under per-file LRU.)
+    # but are empty (size 0) has present > 0 and is KEPT, so a genuine gap stays
+    # visible instead of being silently dropped as "never prefilled". (Transient
+    # mode-000 files now count as cached — see disk_stat._stat_batch — since they
+    # self-heal in ms; a depot fully evicted to 0 files on disk is indistinguishable
+    # from never-prefilled and is excluded — accepted: whole-depot eviction-to-zero
+    # is rare under per-file LRU.)
     total = 0
     cached = 0
     included = 0
