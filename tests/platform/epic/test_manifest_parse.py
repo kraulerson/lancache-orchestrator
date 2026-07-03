@@ -110,3 +110,44 @@ def test_read_fstring_utf16():
     payload = (s + "\x00").encode("utf-16-le")
     buf = BytesIO(struct.pack("<i", -(len(s) + 1)) + payload)
     assert _read_fstring(buf) == s
+
+
+def test_parse_json_legacy_manifest():
+    """Epic serves some (older) games' manifests as JSON, not the binary format.
+    Numbers are blob-encoded (3 decimal digits per byte, little-endian) and GUID
+    keys are 32-hex. They parse into the same EpicChunk shape. Values + the
+    resulting CDN chunk path are proven live against Epic's CDN (Palila spike
+    2026-07-03: 5/5 HEAD 200)."""
+    import json
+
+    guid = "E3BEF01544B75CE12E44DA83C705CE57"
+    manifest = {
+        "ManifestFileVersion": "013000000000",  # blob -> 13 (ChunksV3)
+        "bIsFileData": False,
+        "AppNameString": "Palila",
+        "FileManifestList": [],  # not needed to enumerate/validate chunks
+        "ChunkHashList": {guid: "180065099141255040004083"},
+        "DataGroupList": {guid: "090"},
+        "ChunkFilesizeList": {guid: "155136003000000000000000"},
+        "ChunkShaList": {guid: "0517E2128E0E8825665E80E2" + "00" * 8},
+    }
+    m = parse_manifest(json.dumps(manifest).encode())
+    assert m.version == 13
+    assert len(m.chunks) == 1
+    c = m.chunks[0]
+    assert c.guid == (0xE3BEF015, 0x44B75CE1, 0x2E44DA83, 0xC705CE57)
+    assert c.group_num == 90
+    # End-to-end: this exact path returned HTTP 200 from Epic's CDN in the spike.
+    assert (
+        chunk_path(c, m.version)
+        == "ChunksV3/90/530428FF8D6341B4_E3BEF01544B75CE12E44DA83C705CE57.chunk"
+    )
+
+
+def test_parse_json_missing_chunklist_raises():
+    """A JSON manifest without ChunkHashList is malformed -> EpicManifestError
+    (never a bare KeyError that would crash the prefill/validate loop)."""
+    import json
+
+    with pytest.raises(EpicManifestError):
+        parse_manifest(json.dumps({"ManifestFileVersion": "013000000000"}).encode())
