@@ -39,8 +39,10 @@ async def test_enumerate_paginates(monkeypatch):
     }
 
     def handler(req: httpx.Request) -> httpx.Response:
-        cur = dict(req.url.params).get("cursor")
         assert req.headers.get("authorization", "").lower().startswith("bearer ")
+        if "bulk/items" in req.url.path:  # catalog title lookup — no title for A
+            return httpx.Response(200, json={})
+        cur = dict(req.url.params).get("cursor")
         return httpx.Response(200, json=pages[cur])
 
     monkeypatch.setattr(ep_lib, "_build_transport", lambda: httpx.MockTransport(handler))
@@ -48,8 +50,52 @@ async def test_enumerate_paginates(monkeypatch):
     assert [i.app_name for i in items] == ["A", "B"]
     assert items[0].namespace == "ns"
     assert items[0].catalog_item_id == "c1"
-    assert items[0].title == "A"  # falls back to appName
-    assert items[1].title == "Game B"  # from metadata
+    assert items[0].title == "A"  # codename fallback kept (catalog returned no title)
+    assert items[1].title == "Game B"  # from metadata (no catalog lookup needed)
+
+
+async def test_enumerate_resolves_codename_titles(monkeypatch):
+    """#140: when the library record has no metadata.title, the item falls back to
+    the appName codename; enumerate_library then backfills the real display title
+    from the catalog bulk-items API. Proven live (spike 2026-07-03: Fangtooth ->
+    'City of Gangsters' etc.)."""
+    library = {
+        "records": [
+            {"appName": "Fangtooth", "namespace": "ns1", "catalogItemId": "cat1"},
+            {"appName": "Goby", "namespace": "ns1", "catalogItemId": "cat2"},
+        ],
+        "responseMetadata": {},
+    }
+    catalog = {"cat1": {"title": "City of Gangsters"}, "cat2": {"title": "Mortal Shell"}}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "bulk/items" in req.url.path:
+            ids = req.url.params.get_list("id")
+            return httpx.Response(200, json={i: catalog[i] for i in ids if i in catalog})
+        return httpx.Response(200, json=library)
+
+    monkeypatch.setattr(ep_lib, "_build_transport", lambda: httpx.MockTransport(handler))
+    items = await ep_lib.enumerate_library("TOK", _settings())
+    titles = {i.app_name: i.title for i in items}
+    assert titles == {"Fangtooth": "City of Gangsters", "Goby": "Mortal Shell"}
+
+
+async def test_enumerate_title_resolution_failure_keeps_codename(monkeypatch):
+    """A catalog lookup that errors (or returns no title) must leave the appName
+    fallback intact — title resolution is best-effort, never fails the sync."""
+    library = {
+        "records": [{"appName": "Fangtooth", "namespace": "ns1", "catalogItemId": "cat1"}],
+        "responseMetadata": {},
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "bulk/items" in req.url.path:
+            return httpx.Response(500, json={})
+        return httpx.Response(200, json=library)
+
+    monkeypatch.setattr(ep_lib, "_build_transport", lambda: httpx.MockTransport(handler))
+    items = await ep_lib.enumerate_library("TOK", _settings())
+    assert items[0].title == "Fangtooth"  # fallback kept on catalog failure
 
 
 async def test_enumerate_error_raises(monkeypatch):

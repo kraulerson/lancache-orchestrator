@@ -233,6 +233,15 @@ class Settings(BaseSettings):
             "/app/{app_name}/label/{label}"
         )
     )
+    # Catalog bulk-items endpoint — resolves an item's real display title from its
+    # namespace + catalog_item_id (#140). The library/assets response often omits
+    # metadata.title, leaving only the codename (appName); this backfills it.
+    epic_catalog_url_template: str = Field(
+        default=(
+            "https://catalog-public-service-prod06.ol.epicgames.com"
+            "/catalog/api/shared/namespace/{namespace}/bulk/items"
+        )
+    )
     # Public legendary launcher client creds — the well-known EGS launcher app
     # credentials used by every Epic CLI client; NOT operator secrets.
     epic_client_id: str = Field(default="34a02cf8f4414e29b15921876da36f9a")
