@@ -8,6 +8,7 @@ EpicManifestError on malformed input (never sys.exit / never silently truncates)
 from __future__ import annotations
 
 import base64
+import json
 import re
 import struct
 import zlib
@@ -75,16 +76,89 @@ def _read_array(bio: BytesIO, count: int, fmt: str) -> list[int]:
 
 
 def parse_manifest(raw: bytes, *, max_decompressed: int = _MAX_DECOMPRESSED_BYTES) -> EpicManifest:
-    """Parse an Epic binary manifest into version + chunk list.
+    """Parse an Epic manifest into version + chunk list.
 
-    ``max_decompressed`` caps the inflated body to defuse a decompression bomb.
+    Epic serves two manifest formats: the binary format (magic 0x44BEC00C) and,
+    for some older games, a JSON/legacy format (starts with ``{``). Both produce
+    the same EpicManifest/EpicChunk so the shared chunk-path derivation works
+    unchanged. ``max_decompressed`` caps the inflated binary body (bomb guard).
     """
+    if raw[:1] == b"{":
+        return _parse_json(raw)
     try:
         return _parse(raw, max_decompressed)
     except EpicManifestError:
         raise
     except (struct.error, zlib.error, ValueError, IndexError) as e:
         raise EpicManifestError(f"malformed Epic manifest: {type(e).__name__}: {e}") from e
+
+
+def _blob_to_num(s: str) -> int:
+    """Decode Epic's 'blob' number encoding used in JSON manifests: the number is
+    stored as 3 decimal digits per byte, little-endian (first triplet = low byte).
+    E.g. "090" -> 90; "013000000000" -> 13."""
+    if len(s) % 3 != 0:
+        raise EpicManifestError(f"malformed blob number: {s!r}")
+    num = 0
+    for i in range(0, len(s), 3):
+        num |= int(s[i : i + 3]) << (8 * (i // 3))
+    return num
+
+
+def _guid_from_hex(h: str) -> tuple[int, int, int, int]:
+    """A JSON manifest keys chunks by their 32-hex GUID (four uint32s, the same
+    rendering `_guid_hex` produces from the binary form)."""
+    if len(h) != 32:
+        raise EpicManifestError(f"malformed chunk GUID: {h!r}")
+    return (int(h[0:8], 16), int(h[8:16], 16), int(h[16:24], 16), int(h[24:32], 16))
+
+
+def _parse_json(raw: bytes) -> EpicManifest:
+    """Parse an Epic JSON (legacy) manifest into the same EpicManifest the binary
+    parser returns. Chunk GUIDs are 32-hex keys; numbers are blob-encoded. The
+    resulting chunk paths are proven against Epic's CDN (Palila spike 2026-07-03,
+    5/5 HEAD 200). Raises EpicManifestError on anything malformed — never a bare
+    KeyError/ValueError that would crash the prefill/validate loop."""
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise EpicManifestError(f"malformed Epic JSON manifest: {e}") from e
+    if not isinstance(doc, dict) or "ChunkHashList" not in doc or "DataGroupList" not in doc:
+        raise EpicManifestError("Epic JSON manifest missing ChunkHashList/DataGroupList")
+    try:
+        version = _blob_to_num(str(doc["ManifestFileVersion"]))
+        chunk_hashes = doc["ChunkHashList"]
+        data_groups = doc["DataGroupList"]
+        filesizes = doc.get("ChunkFilesizeList", {})
+        shas = doc.get("ChunkShaList", {})
+        if not isinstance(chunk_hashes, dict) or not isinstance(data_groups, dict):
+            raise EpicManifestError("Epic JSON manifest ChunkHashList/DataGroupList not objects")
+        if len(chunk_hashes) > _MAX_CHUNKS:
+            raise EpicManifestError(f"implausible chunk_count {len(chunk_hashes)}")
+        chunks: list[EpicChunk] = []
+        for guid_hex, hash_blob in chunk_hashes.items():
+            if guid_hex not in data_groups:
+                raise EpicManifestError(f"chunk {guid_hex} missing from DataGroupList")
+            sha_hex = str(shas.get(guid_hex, ""))
+            try:
+                sha_hash = bytes.fromhex(sha_hex) if sha_hex else b""
+            except ValueError:
+                sha_hash = b""
+            chunks.append(
+                EpicChunk(
+                    guid=_guid_from_hex(guid_hex),
+                    hash=_blob_to_num(str(hash_blob)),
+                    sha_hash=sha_hash,
+                    group_num=_blob_to_num(str(data_groups[guid_hex])),
+                    file_size=_blob_to_num(str(filesizes.get(guid_hex, "000"))),
+                    window_size=0,  # absent in JSON; chunk_path (v<22) doesn't use it
+                )
+            )
+    except EpicManifestError:
+        raise
+    except (KeyError, ValueError, TypeError) as e:
+        raise EpicManifestError(f"malformed Epic JSON manifest: {type(e).__name__}: {e}") from e
+    return EpicManifest(version=version, chunks=chunks)
 
 
 def _decompress_capped(body_raw: bytes, max_bytes: int) -> bytes:
