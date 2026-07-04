@@ -24,12 +24,19 @@ def make_chunks(n: int) -> list[dict]:
     ]
 
 
-def build_manifest(version: int, chunks: list[dict], *, compress: bool = False) -> bytes:
+def build_manifest(
+    version: int,
+    chunks: list[dict],
+    *,
+    compress: bool = False,
+    prereqs: list[str] | None = None,
+) -> bytes:
     # Body -----------------------------------------------------------------
     body = bytearray()
 
     # ManifestMeta: meta_data_version(u8) + feature_level(u32) + is_file_data(u8)
-    #   + app_id(u32) + 4 FStrings + prereq_count(u32)=0
+    #   + app_id(u32) + 4 FStrings + prereq block. With prereqs, Epic writes
+    #   prereq_count(u32) then that many id FStrings, then name/path/args FStrings.
     meta = bytearray()
     meta += struct.pack("<B", 0)  # meta_data_version
     meta += struct.pack("<I", 17)  # feature_level
@@ -38,7 +45,12 @@ def build_manifest(version: int, chunks: list[dict], *, compress: bool = False) 
     for s in ("App", "1.0", "x.exe", "cmd"):  # FStrings: utf-8, len includes NUL
         b = s.encode() + b"\x00"
         meta += struct.pack("<i", len(b)) + b
-    meta += struct.pack("<I", 0)  # prereq_count
+    ids = list(prereqs or [])
+    meta += struct.pack("<I", len(ids))  # prereq_count
+    if ids:  # id strings, then prereq name/path/args (as real Epic manifests do)
+        for s in [*ids, "PrereqName", "prereq/setup.exe", "/silent"]:
+            b = s.encode() + b"\x00"
+            meta += struct.pack("<i", len(b)) + b
     meta_size = 4 + len(meta)
     body += struct.pack("<I", meta_size) + meta
 

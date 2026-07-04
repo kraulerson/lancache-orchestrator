@@ -37,6 +37,19 @@ def test_parse_zlib_compressed_body():
     assert m.chunks[1].hash == 101
 
 
+def test_parse_manifest_with_prerequisites():
+    """Games WITH prerequisites (prereq_count > 0) must parse. The old parser read
+    prereq_count*4 FStrings, over-running the meta block and crashing on a bogus
+    UTF-16 length / EOF — real games (Homeworld, Midnight Ghost Hunt) hit this. The
+    meta block is skipped via meta_size, so prerequisites parse cleanly."""
+    raw = build_manifest(17, make_chunks(3), prereqs=["pre-a", "pre-b", "pre-c", "pre-d"])
+    m = parse_manifest(raw)
+    assert m.version == 17
+    assert len(m.chunks) == 3
+    assert m.chunks[0].hash == 100
+    assert m.chunks[2].file_size == 502
+
+
 def test_decompression_bomb_is_capped():
     """A zlib body that inflates beyond the cap must raise EpicManifestError,
     NOT allocate the full decompressed buffer (DoS guard). The compressed
