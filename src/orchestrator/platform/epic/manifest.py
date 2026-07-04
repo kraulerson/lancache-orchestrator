@@ -30,7 +30,6 @@ _log = structlog.get_logger(__name__)
 
 _MANIFEST_MAGIC = 0x44BEC00C
 _MAX_CHUNKS = 5_000_000  # DoS guard on a corrupt/hostile chunk_count
-_MAX_PREREQ = 100_000  # DoS guard on a corrupt/hostile prereq_count loop
 # Hard cap on the DECOMPRESSED manifest body. zlib.decompress is otherwise
 # unbounded — a tiny compressed body can inflate to gigabytes (decompression
 # bomb / DoS), and the compressed-size cap in fetch_manifest does NOT bound the
@@ -197,17 +196,13 @@ def _parse(raw: bytes, max_decompressed: int) -> EpicManifest:
     (meta_size,) = struct.unpack("<I", bb.read(4))
     if meta_size > len(body):
         raise EpicManifestError(f"meta_size {meta_size} exceeds body {len(body)}")
-    bb.read(1)  # meta_data_version
-    bb.read(4)  # feature_level
-    bb.read(1)  # is_file_data
-    bb.read(4)  # app_id
-    for _ in range(4):  # app_name, build_version, launch_exe, launch_cmd
-        _read_fstring(bb)
-    (prereq_count,) = struct.unpack("<I", bb.read(4))
-    if prereq_count > _MAX_PREREQ:
-        raise EpicManifestError(f"implausible prereq_count {prereq_count}")
-    for _ in range(prereq_count * 4):
-        _read_fstring(bb)
+    # The ManifestMeta body (feature level; app/build/launch strings; the
+    # prerequisites block) is not needed for chunk-path derivation — the version
+    # comes from the header — and its variable-length fields mis-parsed for games
+    # WITH prerequisites: the old prereq loop read prereq_count*4 FStrings (Epic
+    # writes prereq_count ids + name/path/args), over-running the meta block and
+    # crashing on a bogus UTF-16 length or EOF (Homeworld, Midnight Ghost Hunt).
+    # meta_size already bounds the block, so skip straight to its end.
     bb.seek(meta_size)
 
     # ChunkDataList
