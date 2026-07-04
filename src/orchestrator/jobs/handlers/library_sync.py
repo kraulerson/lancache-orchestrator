@@ -36,11 +36,14 @@ _NAMED_UPSERT_SQL = (
     "ON CONFLICT(platform, app_id) DO UPDATE SET title = excluded.title, owned = 1"
 )
 
-# Idempotent upsert into the store-lookup cache.
+# Idempotent upsert into the store-lookup cache (incl. MP-only category flags, #366).
 _APP_INFO_UPSERT_SQL = (
-    "INSERT INTO steam_app_info (app_id, app_type, name) VALUES (?, ?, ?) "
+    "INSERT INTO steam_app_info (app_id, app_type, name, has_single_player, has_multiplayer) "
+    "VALUES (?, ?, ?, ?, ?) "
     "ON CONFLICT(app_id) DO UPDATE SET "
-    "app_type = excluded.app_type, name = excluded.name, fetched_at = datetime('now')"
+    "app_type = excluded.app_type, name = excluded.name, "
+    "has_single_player = excluded.has_single_player, "
+    "has_multiplayer = excluded.has_multiplayer, fetched_at = datetime('now')"
 )
 
 _UPSERT_SQL = (
@@ -86,9 +89,16 @@ async def _steam_library_sync(job: dict[str, Any], deps: Deps) -> None:
     app_ids = [str(a) for a in await deps.agent_client.prefilled_apps()]
     _log.info("library_sync.prefill.enumerate.returned", job_id=job_id, app_count=len(app_ids))
 
-    cache: dict[str, dict[str, str]] = {
-        r["app_id"]: {"type": r["app_type"], "name": r["name"]}
-        for r in await deps.pool.read_all("SELECT app_id, app_type, name FROM steam_app_info")
+    cache: dict[str, dict[str, Any]] = {
+        r["app_id"]: {
+            "type": r["app_type"],
+            "name": r["name"],
+            "has_single_player": r["has_single_player"],
+            "has_multiplayer": r["has_multiplayer"],
+        }
+        for r in await deps.pool.read_all(
+            "SELECT app_id, app_type, name, has_single_player, has_multiplayer FROM steam_app_info"
+        )
     }
     budget = settings.steam_store_fetch_budget
     delay = settings.steam_store_fetch_delay_sec
@@ -96,16 +106,26 @@ async def _steam_library_sync(job: dict[str, Any], deps: Deps) -> None:
     upserted = 0
     for app_id in app_ids:
         info = cache.get(app_id)
-        if info is None and fetched < budget:
+        # Fetch a NEW app, or backfill an old row whose category flags predate
+        # MP-only tracking (has_single_player IS NULL) — budget-bound (#366).
+        needs_fetch = info is None or info.get("has_single_player") is None
+        if needs_fetch and fetched < budget:
             detail = await fetch_app_info(int(app_id))
             fetched += 1
             if delay > 0:
                 await asyncio.sleep(delay)
             if detail is not None:
                 await deps.pool.execute_write(
-                    _APP_INFO_UPSERT_SQL, (app_id, detail["type"], detail["name"])
+                    _APP_INFO_UPSERT_SQL,
+                    (
+                        app_id,
+                        detail["type"],
+                        detail["name"],
+                        detail["has_single_player"],
+                        detail["has_multiplayer"],
+                    ),
                 )
-                info = detail
+                info = dict(detail)
         if info is not None and info["type"] == "game":
             await deps.pool.execute_write(_NAMED_UPSERT_SQL, (app_id, info["name"]))
             upserted += 1

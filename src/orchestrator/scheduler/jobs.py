@@ -209,7 +209,9 @@ async def enqueue_auto_classify_block(pool: Pool, agent_client: AgentClient | No
     try:
         rows = await pool.read_all(
             "SELECT g.platform AS platform, g.app_id AS app_id, "
-            "       sai.app_type AS app_type, sai.name AS name "
+            "       sai.app_type AS app_type, sai.name AS name, "
+            "       sai.has_single_player AS has_single_player, "
+            "       sai.has_multiplayer AS has_multiplayer "
             "FROM games g "
             "JOIN steam_app_info sai ON sai.app_id = g.app_id "
             "WHERE g.owned = 1 AND g.platform = 'steam' "
@@ -231,7 +233,12 @@ async def enqueue_auto_classify_block(pool: Pool, agent_client: AgentClient | No
 
     inserted = 0
     for row in rows:
-        reason = classify(row["app_type"], row["name"])
+        reason = classify(
+            row["app_type"],
+            row["name"],
+            has_single_player=row["has_single_player"],
+            has_multiplayer=row["has_multiplayer"],
+        )
         if reason is None:
             continue
         try:

@@ -65,7 +65,8 @@ async def selection_candidates(
 ) -> JSONResponse:
     try:
         rows = await pool.read_all(
-            "SELECT app_id, app_type, name FROM steam_app_info ORDER BY app_type, name"
+            "SELECT app_id, app_type, name, has_single_player, has_multiplayer "
+            "FROM steam_app_info ORDER BY app_type, name"
         )
     except PoolError as e:
         _log.error("api.selection.read_failed", reason=str(e))
@@ -73,7 +74,12 @@ async def selection_candidates(
 
     candidates: list[SelectionCandidate] = []
     for row in rows:
-        reason = classify(row["app_type"], row["name"])
+        reason = classify(
+            row["app_type"],
+            row["name"],
+            has_single_player=row["has_single_player"],
+            has_multiplayer=row["has_multiplayer"],
+        )
         if reason is not None:
             candidates.append(
                 SelectionCandidate(

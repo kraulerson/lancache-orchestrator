@@ -19,6 +19,15 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — MP-only prefill exclusion: multiplayer-only games flagged (#366) — 2026-07-04
+
+A Steam game with a multiplayer category and NO single-player mode (e.g. Dota 2) is typed `game` by the store, so the type/name classifier couldn't catch it. Operator decision (Karl 2026-07-04): exclude multiplayer-only games from prefill — not worth the cache/WAN for a rare one-off play.
+
+- **Data Model:** migration `0013_steam_app_info_categories.sql` adds nullable `has_single_player` / `has_multiplayer` INTEGER columns to `steam_app_info` (plain ADD COLUMN; NULL = categories not yet fetched; checksum pinned).
+- **Changed:** `store.fetch_app_info` widens the appdetails fetch to `filters=basic,categories` and returns the two flags (derived from the store `categories` list); `library_sync` stores them and backfills rows whose flags are NULL (budget-bound, self-healing).
+- **Changed:** `selection_classifier.classify()` flags `multiplayer-only` = has_multiplayer AND NOT has_single_player, but ONLY when both flags are known (an un-fetched game is never guessed). `auto_classify_block` + `GET /api/v1/selection/candidates` pass the flags through, so MP-only games are auto-excluded after their first download and pruned from `selectedAppsToPrefill.json` via Piece 1.
+- Full suite 1495; security audit `docs/security-audits/mp-only-exclusion-security-audit.md` (no findings).
+
 ### Added — Game_shelf cross-launcher exclusion reconcile endpoint (Piece 3, orchestrator side) — 2026-07-04
 
 Game_shelf holds the authoritative cross-launcher game identity (editions sharing a `game_id` across launchers). When an Epic game is already owned + cached on a higher-priority launcher (Steam self-prefills), its Epic copy is redundant. This lets Game_shelf push that set to the orchestrator so the Epic scheduled prefill (Piece 2) skips it — no name-matching re-implemented in the orchestrator.

@@ -288,17 +288,27 @@ class TestEnqueueFetchManifests:
 
 
 async def _seed_classified(
-    pool, app_id, app_type, name, *, last_prefilled="2026-01-01T00:00:00Z", owned=1
+    pool,
+    app_id,
+    app_type,
+    name,
+    *,
+    last_prefilled="2026-01-01T00:00:00Z",
+    owned=1,
+    has_single_player=None,
+    has_multiplayer=None,
 ):
-    """Seed a Steam game (prefilled once by default) + its steam_app_info type/name."""
+    """Seed a Steam game (prefilled once by default) + its steam_app_info
+    type/name and optional Single-/Multi-player category flags (MP-only #366)."""
     await pool.execute_write(
         "INSERT INTO games (platform, app_id, title, owned, status, last_prefilled_at) "
         "VALUES ('steam', ?, ?, ?, 'up_to_date', ?)",
         (app_id, name, owned, last_prefilled),
     )
     await pool.execute_write(
-        "INSERT INTO steam_app_info (app_id, app_type, name) VALUES (?, ?, ?)",
-        (app_id, app_type, name),
+        "INSERT INTO steam_app_info (app_id, app_type, name, has_single_player, has_multiplayer) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (app_id, app_type, name, has_single_player, has_multiplayer),
     )
 
 
@@ -322,6 +332,37 @@ class TestEnqueueAutoClassifyBlock:
         await _seed_classified(pool, "1", "game", "Portal")
         assert await enqueue_auto_classify_block(pool) == 0
         assert await pool.read_one("SELECT 1 AS x FROM prefill_exclusions") is None
+
+    async def test_excludes_multiplayer_only_game(self, pool):
+        # Dota 2: type 'game', multiplayer + no single-player -> MP-only (#366).
+        from orchestrator.scheduler.jobs import enqueue_auto_classify_block
+
+        await _seed_classified(
+            pool, "570", "game", "Dota 2", has_single_player=0, has_multiplayer=1
+        )
+        assert await enqueue_auto_classify_block(pool) == 1
+        row = await pool.read_one(
+            "SELECT mode, source, reason FROM prefill_exclusions WHERE app_id='570'"
+        )
+        assert row["mode"] == "exclude"
+        assert row["source"] == "classifier"
+        assert "multiplayer" in row["reason"]
+
+    async def test_keeps_single_and_multiplayer_game(self, pool):
+        # Portal 2 has both -> a real SP game, never MP-only-excluded.
+        from orchestrator.scheduler.jobs import enqueue_auto_classify_block
+
+        await _seed_classified(
+            pool, "620", "game", "Portal 2", has_single_player=1, has_multiplayer=1
+        )
+        assert await enqueue_auto_classify_block(pool) == 0
+
+    async def test_keeps_game_with_unfetched_flags(self, pool):
+        # Categories not yet backfilled (NULL) -> never guessed as MP-only.
+        from orchestrator.scheduler.jobs import enqueue_auto_classify_block
+
+        await _seed_classified(pool, "1", "game", "Some Game")
+        assert await enqueue_auto_classify_block(pool) == 0
 
     async def test_skips_never_prefilled(self, pool):
         # A non-game that was never downloaded is NOT excluded yet — download once first.

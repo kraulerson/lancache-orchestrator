@@ -69,3 +69,38 @@ def test_server_substring_does_not_overmatch_a_real_game():
     # "Observer" contains "server" — must NOT be flagged (we match the full
     # phrase "dedicated server", not a bare "server").
     assert classify("game", ">observer_") is None
+
+
+# --- MP-only detection (Karl 2026-07-04: exclude multiplayer-only games) -------
+
+
+def test_multiplayer_only_game_is_a_candidate():
+    # A `game` with a multiplayer category and NO single-player category (Dota 2).
+    reason = classify("game", "Dota 2", has_single_player=0, has_multiplayer=1)
+    assert reason == "multiplayer-only"
+
+
+def test_single_and_multiplayer_game_is_kept():
+    # Portal 2: has BOTH single- and multi-player -> a real SP game, keep it.
+    assert classify("game", "Portal 2", has_single_player=1, has_multiplayer=1) is None
+
+
+def test_single_player_only_game_is_kept():
+    assert classify("game", "Stardew Valley", has_single_player=1, has_multiplayer=0) is None
+
+
+def test_unknown_flags_never_flag_mp_only():
+    # Categories not yet fetched (NULL) -> never guess MP-only.
+    assert classify("game", "Some Game", has_single_player=None, has_multiplayer=None) is None
+    # Multiplayer known but single-player unknown -> don't flag (might have SP).
+    assert classify("game", "Some Game", has_single_player=None, has_multiplayer=1) is None
+
+
+def test_no_gameplay_categories_is_kept():
+    # Categories fetched but neither SP nor MP present (e.g. only Trading Cards).
+    assert classify("game", "Weird App", has_single_player=0, has_multiplayer=0) is None
+
+
+def test_non_game_type_wins_over_mp_flags():
+    # A soundtrack that somehow also carries an MP category is still `type=music`.
+    assert classify("music", "Some OST", has_single_player=0, has_multiplayer=1) == "type=music"
