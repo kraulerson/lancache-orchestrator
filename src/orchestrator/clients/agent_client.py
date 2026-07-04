@@ -160,6 +160,23 @@ class AgentClient:
         result: dict[str, int] = resp.json()
         return result
 
+    async def prune_steam_selection(
+        self, exclude_app_ids: list[int], restore_app_ids: list[int] | None = None
+    ) -> dict[str, Any]:
+        """Reconcile SteamPrefill's selectedAppsToPrefill.json on the agent (Piece
+        1): remove exclude_app_ids (classifier non-games), keep/re-add
+        restore_app_ids (operator 'allow'). Returns {removed, restored, remaining}."""
+        resp = await self._request(
+            "POST",
+            "/v1/steam/prune-selection",
+            json={
+                "exclude_app_ids": exclude_app_ids,
+                "restore_app_ids": restore_app_ids or [],
+            },
+        )
+        result: dict[str, Any] = resp.json()
+        return result
+
     async def steam_validate(self, app_id: int) -> dict[str, Any]:
         # A big game (tens of thousands of chunks) stat's many cache files over
         # NFS and can take well over the default 30s timeout — use a generous

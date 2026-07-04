@@ -12,8 +12,10 @@ from typing import TYPE_CHECKING
 import structlog
 
 from orchestrator.db.pool import PoolError
+from orchestrator.platform.steam.selection_file import as_int
 
 if TYPE_CHECKING:
+    from orchestrator.clients.agent_client import AgentClient
     from orchestrator.db.pool import Pool
 
 _log = structlog.get_logger(__name__)
@@ -172,7 +174,7 @@ async def enqueue_scheduled_prefill(pool: Pool) -> int:
         return 0
 
 
-async def enqueue_auto_classify_block(pool: Pool) -> int:
+async def enqueue_auto_classify_block(pool: Pool, agent_client: AgentClient | None = None) -> int:
     """Auto-exclude non-games from FUTURE scheduled prefill, AFTER they've been
     downloaded once (#225/#366).
 
@@ -234,4 +236,31 @@ async def enqueue_auto_classify_block(pool: Pool) -> int:
             )
     if inserted:
         _log.info("scheduler.auto_classify_block.excluded", count=inserted)
+
+    # Piece 1 (Steam): actuate — prune SteamPrefill's selectedAppsToPrefill.json on
+    # the agent so the HOST prefill cron stops caching the excluded non-games (the
+    # orchestrator's own scheduled prefill is not the active Steam driver). The DB
+    # exclusions are the source of truth; a failed prune just retries next tick.
+    # Sends the FULL steam exclude + allow sets each run so the file converges and
+    # an operator 'allow' re-adds a game. Best-effort; never raises.
+    if agent_client is not None:
+        try:
+            excl = await pool.read_all(
+                "SELECT app_id FROM prefill_exclusions "
+                "WHERE platform = 'steam' AND mode = 'exclude'"
+            )
+            allow = await pool.read_all(
+                "SELECT app_id FROM prefill_exclusions WHERE platform = 'steam' AND mode = 'allow'"
+            )
+            exclude_ids = [i for i in (as_int(r["app_id"]) for r in excl) if i is not None]
+            restore_ids = [i for i in (as_int(r["app_id"]) for r in allow) if i is not None]
+            if exclude_ids or restore_ids:
+                res = await agent_client.prune_steam_selection(exclude_ids, restore_ids)
+                _log.info("scheduler.auto_classify_block.pruned", **res)
+        except Exception as e:
+            _log.error(
+                "scheduler.auto_classify_block.prune_failed",
+                error=type(e).__name__,
+                reason=str(e)[:200],
+            )
     return inserted

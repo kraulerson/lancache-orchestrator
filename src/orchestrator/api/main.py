@@ -228,6 +228,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         auto_classify_block_enabled=settings.auto_classify_block_enabled,
         fetch_manifests_enabled=settings.fetch_manifests_enabled,
         fetch_manifests_cron=settings.fetch_manifests_cron,
+        # Piece 1: lets auto_classify_block actuate the Steam selection prune on
+        # the agent (only used when agent_enabled). None-safe when the agent is off.
+        agent_client=agent_client if settings.agent_enabled else None,
     )
     try:
         await scheduler_manager.start()
