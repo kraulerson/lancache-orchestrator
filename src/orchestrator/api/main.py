@@ -36,6 +36,7 @@ from orchestrator.api.routers.health import router as health_router
 from orchestrator.api.routers.jobs import router as jobs_router
 from orchestrator.api.routers.manifests import router as manifests_router
 from orchestrator.api.routers.platforms import router as platforms_router
+from orchestrator.api.routers.prefill_exclusions import router as prefill_exclusions_router
 from orchestrator.api.routers.prefill_trigger import router as prefill_trigger_router
 from orchestrator.api.routers.selection import router as selection_router
 from orchestrator.api.routers.status import router as status_router
@@ -224,6 +225,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         validation_sweep_enabled=settings.validation_sweep_enabled,
         validation_sweep_cron=settings.validation_sweep_cron,
         scheduled_prefill_enabled=settings.scheduled_prefill_enabled,
+        auto_classify_block_enabled=settings.auto_classify_block_enabled,
         fetch_manifests_enabled=settings.fetch_manifests_enabled,
         fetch_manifests_cron=settings.fetch_manifests_cron,
     )
@@ -439,6 +441,7 @@ def create_app() -> FastAPI:
     app.include_router(epic_sync_router)
     app.include_router(epic_auth_router)
     app.include_router(selection_router)
+    app.include_router(prefill_exclusions_router)
     app.include_router(status_router)
 
     return app

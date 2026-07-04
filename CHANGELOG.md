@@ -19,6 +19,16 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — Auto-classify-block: stop re-prefilling non-games after they download once (#225) — 2026-07-04
+
+The scheduled prefill downloads every owned game, so soundtracks / tools / SDKs / dedicated servers / demos got cached and re-cached on every cycle. New behavior (operator decision 2026-07-04 — "download everything, then classify and block after"): a new scheduler step, on the same interval as the prefill, runs the #229 classifier over owned Steam games that have been prefilled at least once and inserts an `exclude` row into the new `prefill_exclusions` table for flagged non-games. The scheduled prefill gains a `NOT EXISTS(... mode='exclude')` clause, so the next cycle skips them — the non-game is downloaded **once**, then never re-pulled.
+
+- **`prefill_exclusions` table** (migration 0011): `(platform, app_id, mode ∈ {exclude,allow}, reason, source ∈ {classifier,operator})`, `UNIQUE(platform, app_id)`. `mode='allow'` is the operator's **sticky** override — the auto step's `ON CONFLICT DO NOTHING` + `NOT EXISTS` candidate filter never overwrite it, so an un-excluded game keeps caching and is never re-flagged.
+- **`enqueue_auto_classify_block`** (`scheduler/jobs.py`, gated by `auto_classify_block_enabled`, default on): never-raises scheduler callback; idempotent. Steam-only (`steam_app_info` is Steam-only) — a game Steam types `game`, including a **multiplayer-only** title, is never auto-excluded (that stays a manual block; catching MP-only would need storing Steam's Multi-player categories, a follow-up).
+- **Operator override API** (`api/routers/prefill_exclusions.py`, bearer): `GET` list, `POST /{platform}/{app_id}` set allow|exclude (source=operator), `DELETE` clear.
+- **CLI** (`selection allow|exclude|unset|exclusions`).
+- **Non-destructive:** only affects prefill scheduling; never deletes cache. Full suite 1451; security audit `docs/security-audits/issue-225-auto-classify-block-security-audit.md` (no findings).
+
 ### Changed — Selection classifier: drop `advertising` from the exclude types (#229 follow-up) — 2026-07-04
 
 The first live `selection classify` run flagged real games — **Darksiders II** (50650) and **Eufloria** (41210) — because Steam types some real games' app_ids as `advertising`. Removed `advertising` from `_NON_GAME_TYPES` so the classifier stops producing those false positives. A genuine MP-only/promo entry typed `advertising` (e.g. COD BO2 Zombies) is now an operator judgement call, like a utility Steam types as `game`. Strictly reduces flagging — the parent-feature security audit still applies. (`platform/steam/selection_classifier.py`)

@@ -212,6 +212,10 @@ class Settings(BaseSettings):
     validation_sweep_cron: str = "0 3,9,15,21 * * *"
     # F8: the scheduled prefill driver runs on the library-sync interval.
     scheduled_prefill_enabled: bool = True
+    # #225: after a game is prefilled, auto-exclude classifier-flagged non-games
+    # (soundtracks/tools/servers/demos) from FUTURE prefill. Runs on the same
+    # interval as the scheduled prefill; download-once-then-block.
+    auto_classify_block_enabled: bool = True
     sweep_batch_size: int = Field(default=10, ge=1)
     # Manifest-only fetcher (DepotDownloader) weekly cron — Monday 05:00 UTC,
     # offset from the sweep (03/09/15/21) and host prefill crons. 5-field, UTC.
