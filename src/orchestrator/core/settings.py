@@ -138,9 +138,15 @@ class Settings(BaseSettings):
     steam_username: str = ""
     # Inter-request delay (seconds) between per-app DepotDownloader invocations.
     # DepotDownloader is a per-app process (each run is its own Steam logon), so
-    # the run is throttled to stay under Steam's logon rate limit. Value tuned by
-    # spike S1. 0 disables the delay.
-    manifest_fetch_delay_sec: float = Field(default=3.0, ge=0.0)
+    # the run is throttled to stay under Steam's logon rate limit. Raised 3→8s
+    # (#228): back-to-back logons at 3s still tripped Steam rate limiting.
+    # 0 disables the delay.
+    manifest_fetch_delay_sec: float = Field(default=8.0, ge=0.0)
+    # #228: retry transient DepotDownloader failures (Steam rate-limit / lost CM
+    # connection / logon timeout) with exponential backoff so a rate-limited app
+    # recovers instead of being lost. Permanent failures are NOT retried.
+    manifest_fetch_max_retries: int = Field(default=3, ge=0)
+    manifest_fetch_retry_backoff_sec: float = Field(default=15.0, ge=0.0)
     # How many UNCACHED apps library_sync looks up from the Steam store per run
     # (the store API is rate-limited ~200/5min; the rest fill on later syncs).
     steam_store_fetch_budget: int = Field(default=150, ge=0)
