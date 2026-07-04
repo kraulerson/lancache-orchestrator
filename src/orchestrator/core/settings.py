@@ -155,6 +155,11 @@ class Settings(BaseSettings):
 
     # --- Lancache cache topology ------------------------------------
     lancache_nginx_cache_path: Path = Path("/data/cache/cache/")
+    # #222: root under which manually-downloaded games are stored in per-launcher
+    # folders (e.g. `<root>/GOG/<game>`). This is the PARENT of the nginx hash
+    # cache — the agent mounts /lancache/lancache/cache here, so GOG lives at
+    # /data/cache/GOG alongside the nginx `cache/` dir.
+    manual_downloads_cache_path: Path = Path("/data/cache")
     cache_slice_size_bytes: int = Field(default=10_485_760, gt=0)
     cache_levels: str = Field(default="2:2", pattern=r"^\d+(:\d+)*$")
     # F7: nginx $cacheidentifier for Steam traffic (the lancache map sets

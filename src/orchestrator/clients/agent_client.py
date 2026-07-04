@@ -212,6 +212,14 @@ class AgentClient:
         result: list[int] = resp.json()["app_ids"]
         return result
 
+    async def manual_downloads(self, launcher: str) -> dict[str, Any]:
+        """List the manually-downloaded game folders under `<cache>/<launcher>/`
+        on the agent host (#222). Returns {launcher, present, entries}. The caller
+        validates `launcher` (alnum/_/-) before it reaches the path."""
+        resp = await self._request("GET", f"/v1/manual-downloads/{launcher}")
+        result: dict[str, Any] = resp.json()
+        return result
+
     async def downloaded_state(self) -> dict[str, list[int]]:
         resp = await self._request("GET", "/v1/steam/downloaded-state")
         result: dict[str, list[int]] = resp.json()

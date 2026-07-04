@@ -35,6 +35,7 @@ from orchestrator.api.routers.games import router as games_router
 from orchestrator.api.routers.health import router as health_router
 from orchestrator.api.routers.jobs import router as jobs_router
 from orchestrator.api.routers.manifests import router as manifests_router
+from orchestrator.api.routers.manual_downloads import router as manual_downloads_router
 from orchestrator.api.routers.platforms import router as platforms_router
 from orchestrator.api.routers.prefill_exclusions import router as prefill_exclusions_router
 from orchestrator.api.routers.prefill_trigger import router as prefill_trigger_router
@@ -436,6 +437,7 @@ def create_app() -> FastAPI:
     app.include_router(block_list_router)
     app.include_router(jobs_router)
     app.include_router(manifests_router)
+    app.include_router(manual_downloads_router)
     app.include_router(validate_trigger_router)
     app.include_router(sweep_trigger_router)
     app.include_router(fetch_manifests_trigger_router)
