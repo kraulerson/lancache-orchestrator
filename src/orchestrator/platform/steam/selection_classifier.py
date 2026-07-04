@@ -51,15 +51,35 @@ _NAME_FLAG_RE = re.compile(
 )
 
 
-def classify(app_type: str | None, name: str | None) -> str | None:
+def classify(
+    app_type: str | None,
+    name: str | None,
+    *,
+    has_single_player: int | None = None,
+    has_multiplayer: int | None = None,
+) -> str | None:
     """Return an exclusion REASON when this app should not be prefilled to the
     LAN cache, else None. The reason is a short tag for the operator's review
-    (``type=music`` or ``name~'dedicated server'``). A candidate is never removed
-    from the selection automatically — the operator decides."""
+    (``type=music``, ``name~'dedicated server'``, or ``multiplayer-only``). A
+    candidate is never removed from the selection automatically — the operator
+    decides.
+
+    ``has_single_player`` / ``has_multiplayer`` are the Steam store category
+    signals (1/0, or None when categories haven't been fetched). A game with a
+    multiplayer category and NO single-player category is flagged ``multiplayer-only``
+    (#366) — but only when BOTH flags are known, so an un-fetched app is never
+    guessed as MP-only."""
     t = (app_type or "").strip().lower()
     if t in _NON_GAME_TYPES:
         return f"type={t}"
     m = _NAME_FLAG_RE.search(name or "")
     if m:
         return f"name~{m.group(0).lower()!r}"
+    if (
+        has_single_player is not None
+        and has_multiplayer is not None
+        and has_multiplayer
+        and not has_single_player
+    ):
+        return "multiplayer-only"
     return None

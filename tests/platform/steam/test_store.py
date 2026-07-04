@@ -26,7 +26,13 @@ async def test_success_returns_type_and_name(monkeypatch):
         )
 
     _patch_transport(monkeypatch, handler)
-    assert await store.fetch_app_info(440) == {"type": "game", "name": "Team Fortress 2"}
+    # No categories in the response -> flags are unknown (None).
+    assert await store.fetch_app_info(440) == {
+        "type": "game",
+        "name": "Team Fortress 2",
+        "has_single_player": None,
+        "has_multiplayer": None,
+    }
 
 
 async def test_success_false_returns_none(monkeypatch):
@@ -61,4 +67,105 @@ async def test_dlc_type_returned(monkeypatch):
         )
 
     _patch_transport(monkeypatch, handler)
-    assert await store.fetch_app_info(570) == {"type": "dlc", "name": "Dota Plus"}
+    assert await store.fetch_app_info(570) == {
+        "type": "dlc",
+        "name": "Dota Plus",
+        "has_single_player": None,
+        "has_multiplayer": None,
+    }
+
+
+def _cats(*ids: int) -> list[dict]:
+    return [{"id": i, "description": f"cat {i}"} for i in ids]
+
+
+async def test_multiplayer_only_categories_set_flags(monkeypatch):
+    # Dota 2: Multi-player(1) + Co-op(9), NO Single-player(2).
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "570": {
+                    "success": True,
+                    "data": {"type": "game", "name": "Dota 2", "categories": _cats(1, 9, 29)},
+                }
+            },
+        )
+
+    _patch_transport(monkeypatch, handler)
+    info = await store.fetch_app_info(570)
+    assert info == {
+        "type": "game",
+        "name": "Dota 2",
+        "has_single_player": 0,
+        "has_multiplayer": 1,
+    }
+
+
+async def test_single_and_multiplayer_categories_set_both_flags(monkeypatch):
+    # Portal 2: Single-player(2) + Multi-player(1) + Co-op(9).
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "620": {
+                    "success": True,
+                    "data": {"type": "game", "name": "Portal 2", "categories": _cats(2, 1, 9)},
+                }
+            },
+        )
+
+    _patch_transport(monkeypatch, handler)
+    info = await store.fetch_app_info(620)
+    assert info["has_single_player"] == 1
+    assert info["has_multiplayer"] == 1
+
+
+async def test_single_player_only_categories(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "413150": {
+                    "success": True,
+                    "data": {"type": "game", "name": "Stardew Valley", "categories": _cats(2, 22)},
+                }
+            },
+        )
+
+    _patch_transport(monkeypatch, handler)
+    info = await store.fetch_app_info(413150)
+    assert info["has_single_player"] == 1
+    assert info["has_multiplayer"] == 0
+
+
+async def test_categories_with_only_non_gameplay_ids(monkeypatch):
+    # Categories present but only Trading Cards(29)/Workshop(30) -> both flags 0.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "1": {
+                    "success": True,
+                    "data": {"type": "game", "name": "Cardy", "categories": _cats(29, 30)},
+                }
+            },
+        )
+
+    _patch_transport(monkeypatch, handler)
+    info = await store.fetch_app_info(1)
+    assert info["has_single_player"] == 0
+    assert info["has_multiplayer"] == 0
+
+
+async def test_empty_categories_list_leaves_flags_unknown(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"2": {"success": True, "data": {"type": "game", "name": "X", "categories": []}}},
+        )
+
+    _patch_transport(monkeypatch, handler)
+    info = await store.fetch_app_info(2)
+    assert info["has_single_player"] is None
+    assert info["has_multiplayer"] is None
