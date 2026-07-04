@@ -76,6 +76,8 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
                 archive_dir=settings.steam_manifest_archive_dir,
                 delay_sec=settings.manifest_fetch_delay_sec,
                 username=settings.steam_username,
+                max_retries=settings.manifest_fetch_max_retries,
+                retry_backoff_sec=settings.manifest_fetch_retry_backoff_sec,
             )
         interval = settings.manifest_archive_sync_interval_sec
         if interval > 0:
@@ -120,6 +122,8 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
         archive_dir=settings.steam_manifest_archive_dir,
         delay_sec=settings.manifest_fetch_delay_sec,
         username=settings.steam_username,
+        max_retries=settings.manifest_fetch_max_retries,
+        retry_backoff_sec=settings.manifest_fetch_retry_backoff_sec,
     )
     app.include_router(health.router)
     app.include_router(pull.router)

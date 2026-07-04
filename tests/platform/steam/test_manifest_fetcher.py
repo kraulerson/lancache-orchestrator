@@ -8,6 +8,7 @@ from orchestrator.platform.steam.manifest_fetcher import (
     DepotDownloaderManifestFetcher,
     FetchResult,
     SteamAuthError,
+    TransientFetchError,
 )
 
 _SHA_A = "a" * 40
@@ -260,3 +261,88 @@ def test_enumerate_missing_selection_returns_empty(tmp_path):
     cfg = tmp_path / "Config"
     cfg.mkdir()
     assert _fetcher(tmp_path, steam_config_dir=cfg)._enumerate_app_ids() == []
+
+
+# --- #228: transient DD failure classification + bounded retry-with-backoff -----
+
+
+def _run_returns(returncode, stderr):
+    def _fake_run(argv, **kw):
+        class _R:
+            pass
+
+        _R.returncode = returncode
+        _R.stderr = stderr
+        _R.stdout = ""
+        return _R()
+
+    return _fake_run
+
+
+def test_run_manifest_only_classifies_transient_dd_failure(tmp_path, monkeypatch):
+    """DD rc!=0 whose stderr signals a rate-limit / lost-CM-connection raises
+    TransientFetchError (a RuntimeError subclass) so the caller can retry it."""
+    monkeypatch.setattr(
+        "subprocess.run",
+        _run_returns(1, "Error: A task was canceled. Lost connection to Steam."),
+    )
+    with pytest.raises(TransientFetchError):
+        _fetcher(tmp_path)._run_manifest_only(440)
+
+
+def test_run_manifest_only_permanent_failure_not_transient(tmp_path, monkeypatch):
+    """DD rc!=0 with a non-transient stderr raises a plain RuntimeError (NOT
+    TransientFetchError) — a permanent failure (not owned / no build) is not retried."""
+    monkeypatch.setattr(
+        "subprocess.run",
+        _run_returns(1, "Error: App 440 is not available from this account."),
+    )
+    with pytest.raises(RuntimeError) as ei:
+        _fetcher(tmp_path)._run_manifest_only(440)
+    assert not isinstance(ei.value, TransientFetchError)
+
+
+def test_fetch_all_retries_transient_then_succeeds(tmp_path, monkeypatch):
+    """A transient failure is retried with a backoff sleep; a subsequent success is
+    counted as fetched, not failed."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "orchestrator.platform.steam.manifest_fetcher.time.sleep",
+        lambda s: sleeps.append(s),
+    )
+    f = _fetcher_with_fake_dd(tmp_path, {440: [(441, "777", [_SHA_A])]})
+    calls = {"n": 0}
+
+    def flaky(app_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TransientFetchError("Lost connection to Steam")
+        return [(441, "777", {_SHA_A})]
+
+    f._run_manifest_only = flaky  # type: ignore[method-assign]
+    r = f.fetch_all()
+    assert r.fetched == 1 and r.failed == 0
+    assert calls["n"] == 2  # one retry
+    assert len(sleeps) == 1  # exactly one backoff sleep (delay_sec=0 → no inter-app sleep)
+
+
+def test_fetch_all_bounds_transient_retries_then_counts_failed(tmp_path, monkeypatch):
+    """A persistently transient app is bounded by max_retries then counted failed —
+    it never loops forever and never stalls the rest of the sweep."""
+    monkeypatch.setattr("orchestrator.platform.steam.manifest_fetcher.time.sleep", lambda s: None)
+    f = _fetcher_with_fake_dd(
+        tmp_path, {440: [(441, "777", [_SHA_A])], 730: [(731, "888", [_SHA_B])]}
+    )
+    f._max_retries = 2
+    attempts: dict[int, int] = {}
+
+    def per_app(app_id):
+        attempts[app_id] = attempts.get(app_id, 0) + 1
+        if app_id == 730:
+            raise TransientFetchError("rate limited")
+        return [(441, "777", {_SHA_A})]
+
+    f._run_manifest_only = per_app  # type: ignore[method-assign]
+    r = f.fetch_all()
+    assert r.fetched == 1 and r.failed == 1
+    assert attempts[730] == 3  # 1 initial + 2 retries, then given up

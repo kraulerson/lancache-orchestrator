@@ -730,7 +730,11 @@ def test_manifest_fetcher_settings_defaults():
     s = Settings(orchestrator_token="a" * 32)
     assert s.depotdownloader_binary == Path("/depotdownloader/DepotDownloader")
     assert s.depotdownloader_config_dir == Path("/depotdownloader-config")
-    assert s.manifest_fetch_delay_sec == 3.0
+    # #228: raised 3→8s (3s still tripped Steam's logon rate limiter) + bounded
+    # transient-failure retry with exponential backoff.
+    assert s.manifest_fetch_delay_sec == 8.0
+    assert s.manifest_fetch_max_retries == 3
+    assert s.manifest_fetch_retry_backoff_sec == 15.0
 
 
 def test_manifest_fetcher_settings_env_override(monkeypatch):
