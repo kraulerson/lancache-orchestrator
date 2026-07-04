@@ -28,6 +28,10 @@ Game_shelf holds the authoritative cross-launcher game identity (editions sharin
 - No scheduler change: Piece 2's `enqueue_scheduled_prefill` already skips any `mode='exclude'`.
 - Full suite 1477; security audit `docs/security-audits/piece3-gameshelf-exclusions-security-audit.md` (no findings). Game_shelf-side compute + push lands in a separate Game_shelf PR.
 
+### Added — Epic auto-download via the orchestrator (Piece 2) — 2026-07-04
+
+SteamPrefill auto-grabs Steam purchases from the last 2 weeks, but **EpicPrefill never auto-downloads new games** — it only updates its list. So new Epic games silently never cached. The orchestrator now owns Epic: `library_sync` is registered on the cron for **epic** too (it was steam-only), and the scheduled prefill (`enqueue_scheduled_prefill`) is **scoped to `platform='epic'`** so it prefills uncached Epic games via the pure-Python F6 path — without double-prefilling every Steam game (SteamPrefill's job). Still gated by `owned`, block_list, and `prefill_exclusions`. `enqueue_library_sync(pool, platform)` is now parameterized; new `LIBRARY_SYNC_EPIC_JOB_ID` cron job. Full suite 1466; security audit `docs/security-audits/piece2-epic-auto-download-security-audit.md` (no findings). Deploy: set `ORCH_SCHEDULED_PREFILL_ENABLED=true` on the LXC + retire the host EpicPrefill cron.
+
 ### Added — Steam auto-prune of selectedAppsToPrefill.json (auto-classify actuator, Piece 1) — 2026-07-04
 
 The #225 auto-classify-block wrote `prefill_exclusions` rows but gated the orchestrator's *own* scheduled prefill — which is disabled on prod, where the host **SteamPrefill cron** does the prefilling from `selectedAppsToPrefill.json`. So the exclusions never actually stopped Steam re-downloads. This wires the actuator to the file the host cron reads: after `auto_classify_block` classifies, it calls a new agent endpoint that reconciles `selectedAppsToPrefill.json` — **removes** classifier-excluded non-games and **keeps/re-adds** operator-'allow' games — so the next SteamPrefill run skips them. Download-once-then-block, per the operator decision.
