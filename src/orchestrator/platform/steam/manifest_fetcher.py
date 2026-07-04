@@ -25,9 +25,34 @@ _log = structlog.get_logger(__name__)
 
 _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")  # COR-2: drop non-canonical chunk ids
 
+# #228: DepotDownloader stderr signatures that mean "Steam rate-limited / dropped
+# the CM connection" — retryable. Back-to-back logons trip Steam rate limiting; a
+# spaced-out retry succeeds. Kept narrow so a PERMANENT failure (app not owned, no
+# build) is never mistaken for transient and retried pointlessly.
+_TRANSIENT_RE = re.compile(
+    r"lost connection to steam"
+    r"|a task was cancell?ed"
+    r"|failed to connect to steam"
+    r"|connection reset"
+    r"|timed out|timeout"
+    r"|rate.?limit|too many requests"
+    r"|try ?another ?cm"
+    r"|service ?temporarily ?unavailable",
+    re.IGNORECASE,
+)
+
+# Cap exponential backoff so a long sweep can't wedge on one app for many minutes.
+_MAX_BACKOFF_SEC = 120.0
+
 
 class SteamAuthError(Exception):
     """No usable DepotDownloader/SteamPrefill session — operator must log in once."""
+
+
+class TransientFetchError(RuntimeError):
+    """DepotDownloader failed in a way a spaced-out retry can heal (Steam
+    rate-limit, lost CM connection, or logon timeout). Distinct from a plain
+    RuntimeError, which signals a PERMANENT failure that must not be retried."""
 
 
 @dataclass(frozen=True)
@@ -56,6 +81,8 @@ class DepotDownloaderManifestFetcher:
         archive_dir: Path,
         delay_sec: float = 0.0,
         username: str = "",
+        max_retries: int = 3,
+        retry_backoff_sec: float = 15.0,
     ) -> None:
         self._binary = Path(binary)
         self._config_dir = Path(config_dir)
@@ -63,6 +90,8 @@ class DepotDownloaderManifestFetcher:
         self._archive_dir = Path(archive_dir)
         self._delay_sec = delay_sec
         self._username = username
+        self._max_retries = max_retries
+        self._retry_backoff_sec = retry_backoff_sec
 
     def login_from_session(self) -> None:
         """Verify a usable persisted DepotDownloader session exists (no password,
@@ -136,14 +165,18 @@ class DepotDownloaderManifestFetcher:
             ]
             if self._username:
                 argv.extend(["-username", self._username])
-            proc = subprocess.run(  # noqa: S603
-                argv,
-                cwd=str(self._config_dir),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
+            try:
+                proc = subprocess.run(  # noqa: S603
+                    argv,
+                    cwd=str(self._config_dir),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+            except subprocess.TimeoutExpired as e:
+                # A hung logon is the classic rate-limit symptom — retry can heal it.
+                raise TransientFetchError(f"DepotDownloader timed out for app {app_id}") from e
             manifest_paths = list(scratch_path.rglob("*.manifest"))
             if proc.returncode != 0 or not manifest_paths:
                 _log.warning(
@@ -152,9 +185,12 @@ class DepotDownloaderManifestFetcher:
                     returncode=proc.returncode,
                     stderr=proc.stderr[:500],
                 )
-                raise RuntimeError(
+                msg = (
                     f"DepotDownloader produced no manifest for app {app_id} (rc={proc.returncode})"
                 )
+                if _TRANSIENT_RE.search(proc.stderr or ""):
+                    raise TransientFetchError(msg)
+                raise RuntimeError(msg)
             # Discover all .manifest files written by DD under scratch/depots/
             for manifest_path in manifest_paths:
                 stem = manifest_path.stem  # e.g. "441_777"
@@ -170,6 +206,30 @@ class DepotDownloaderManifestFetcher:
                 results.append((depot_id, gid, shas))
         return results
 
+    def _run_with_retry(self, app_id: int) -> list[tuple[int, str, set[str]]]:
+        """Run _run_manifest_only, retrying TRANSIENT DepotDownloader failures
+        (Steam rate-limit / lost CM connection / logon timeout) with exponential
+        backoff. Permanent failures (app not owned, no build) raise immediately —
+        a retry can't fix them. Bounded by max_retries so one persistently
+        rate-limited app can never stall the whole sweep (#228)."""
+        attempt = 0
+        while True:
+            try:
+                return self._run_manifest_only(app_id)
+            except TransientFetchError:
+                if attempt >= self._max_retries:
+                    raise
+                backoff = min(self._retry_backoff_sec * (2**attempt), _MAX_BACKOFF_SEC)
+                _log.warning(
+                    "manifest_fetch.transient_retry",
+                    app_id=app_id,
+                    attempt=attempt + 1,
+                    max_retries=self._max_retries,
+                    backoff_sec=backoff,
+                )
+                time.sleep(backoff)
+                attempt += 1
+
     def fetch_all(self) -> FetchResult:
         """One run: verify session, enumerate the cached app set, fetch each app's
         manifests (no chunks) and archive .shas sidecars. Per-app failures are
@@ -181,7 +241,7 @@ class DepotDownloaderManifestFetcher:
         try:
             for i, app_id in enumerate(app_ids):
                 try:
-                    for depot_id, gid, shas in self._run_manifest_only(app_id):
+                    for depot_id, gid, shas in self._run_with_retry(app_id):
                         if self._write_shas(app_id, depot_id, gid, shas):
                             fetched += 1
                         else:

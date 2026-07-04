@@ -26,6 +26,7 @@
     "force-prefill",
     "steam-auth-status-live",
     "validate-gid-match",
+    "issue-228-fetcher-transient-retry",
     "issue-141-games-detail-endpoint"
   ],
   "features_since_last_test": 1,
