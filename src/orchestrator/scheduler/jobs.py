@@ -150,6 +150,12 @@ async def enqueue_scheduled_prefill(pool: Pool) -> int:
             "  AND NOT EXISTS ("
             "      SELECT 1 FROM block_list b "
             "      WHERE b.platform = g.platform AND b.app_id = g.app_id) "
+            # #225: skip games auto-excluded as non-games (or operator-excluded).
+            # An 'allow' override row does NOT match, so it never suppresses prefill.
+            "  AND NOT EXISTS ("
+            "      SELECT 1 FROM prefill_exclusions e "
+            "      WHERE e.platform = g.platform AND e.app_id = g.app_id "
+            "        AND e.mode = 'exclude') "
             "ON CONFLICT DO NOTHING"
         )
         _log.info("scheduler.scheduled_prefill.enqueued", count=inserted)
@@ -164,3 +170,68 @@ async def enqueue_scheduled_prefill(pool: Pool) -> int:
             reason=str(e)[:200],
         )
         return 0
+
+
+async def enqueue_auto_classify_block(pool: Pool) -> int:
+    """Auto-exclude non-games from FUTURE scheduled prefill, AFTER they've been
+    downloaded once (#225/#366).
+
+    The scheduled prefill keeps caching everything. This step runs over owned
+    Steam games that have been prefilled at least once (`last_prefilled_at` set),
+    classifies each by its Steam store type/name (`steam_app_info`, populated by
+    library_sync) via the #229 selection classifier, and inserts an 'exclude' row
+    into `prefill_exclusions` for soundtracks / tools / SDKs / dedicated servers /
+    demos. The next prefill cycle then skips them. `ON CONFLICT DO NOTHING` +
+    the `NOT EXISTS` filter mean an operator 'allow' override is never overwritten
+    and an already-excluded game isn't re-processed (idempotent).
+
+    Only Steam is classified (`steam_app_info` is Steam-only). A game Steam types
+    as `game` — including a multiplayer-only title — is never auto-excluded.
+    Returns the number of rows newly excluded. Never raises (scheduler callback).
+    """
+    from orchestrator.platform.steam.selection_classifier import classify
+
+    try:
+        rows = await pool.read_all(
+            "SELECT g.platform AS platform, g.app_id AS app_id, "
+            "       sai.app_type AS app_type, sai.name AS name "
+            "FROM games g "
+            "JOIN steam_app_info sai ON sai.app_id = g.app_id "
+            "WHERE g.owned = 1 AND g.platform = 'steam' "
+            "  AND g.last_prefilled_at IS NOT NULL "
+            "  AND NOT EXISTS ("
+            "      SELECT 1 FROM prefill_exclusions e "
+            "      WHERE e.platform = g.platform AND e.app_id = g.app_id)"
+        )
+    except PoolError as e:
+        _log.error("scheduler.auto_classify_block.db_error", reason=str(e)[:200])
+        return 0
+    except Exception as e:
+        _log.error(
+            "scheduler.auto_classify_block.read_error",
+            error=type(e).__name__,
+            reason=str(e)[:200],
+        )
+        return 0
+
+    inserted = 0
+    for row in rows:
+        reason = classify(row["app_type"], row["name"])
+        if reason is None:
+            continue
+        try:
+            inserted += await pool.execute_write(
+                "INSERT INTO prefill_exclusions (platform, app_id, mode, reason, source) "
+                "VALUES (?, ?, 'exclude', ?, 'classifier') "
+                "ON CONFLICT(platform, app_id) DO NOTHING",
+                (row["platform"], row["app_id"], f"auto-classify: {reason}"),
+            )
+        except PoolError as e:
+            _log.error(
+                "scheduler.auto_classify_block.insert_error",
+                app_id=row["app_id"],
+                reason=str(e)[:200],
+            )
+    if inserted:
+        _log.info("scheduler.auto_classify_block.excluded", count=inserted)
+    return inserted

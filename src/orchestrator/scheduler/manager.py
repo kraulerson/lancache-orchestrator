@@ -23,6 +23,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from orchestrator.scheduler.jobs import (
+    enqueue_auto_classify_block,
     enqueue_fetch_manifests,
     enqueue_library_sync,
     enqueue_scheduled_prefill,
@@ -43,6 +44,7 @@ _log = structlog.get_logger(__name__)
 LIBRARY_SYNC_JOB_ID = "library_sync_steam"
 VALIDATION_SWEEP_JOB_ID = "validation_sweep"
 SCHEDULED_PREFILL_JOB_ID = "scheduled_prefill"
+AUTO_CLASSIFY_BLOCK_JOB_ID = "auto_classify_block"
 FETCH_MANIFESTS_JOB_ID = "fetch_manifests"
 
 
@@ -64,6 +66,7 @@ class SchedulerManager:
         validation_sweep_enabled: bool = True,
         validation_sweep_cron: str = "0 3,9,15,21 * * *",
         scheduled_prefill_enabled: bool = True,
+        auto_classify_block_enabled: bool = True,
         fetch_manifests_enabled: bool = True,
         fetch_manifests_cron: str = "0 5 * * 1",
     ) -> None:
@@ -73,6 +76,7 @@ class SchedulerManager:
         self._validation_sweep_enabled = validation_sweep_enabled
         self._validation_sweep_cron = validation_sweep_cron
         self._scheduled_prefill_enabled = scheduled_prefill_enabled
+        self._auto_classify_block_enabled = auto_classify_block_enabled
         self._fetch_manifests_enabled = fetch_manifests_enabled
         self._fetch_manifests_cron = fetch_manifests_cron
         self._scheduler: AsyncIOScheduler | None = None
@@ -151,6 +155,18 @@ class SchedulerManager:
                     args=(self._pool,),
                     id=SCHEDULED_PREFILL_JOB_ID,
                     name="Enqueue scheduled prefill (version-diff)",
+                    replace_existing=True,
+                )
+
+            if self._auto_classify_block_enabled:
+                # #225: same cadence — after games have been prefilled, auto-
+                # exclude classifier-flagged non-games from future prefill.
+                scheduler.add_job(
+                    enqueue_auto_classify_block,
+                    trigger=IntervalTrigger(seconds=self._library_sync_interval_sec),
+                    args=(self._pool,),
+                    id=AUTO_CLASSIFY_BLOCK_JOB_ID,
+                    name="Auto-exclude non-games from prefill (post-download)",
                     replace_existing=True,
                 )
 

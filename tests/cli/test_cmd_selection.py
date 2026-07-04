@@ -52,3 +52,76 @@ def test_selection_classify_none(monkeypatch):
     result = CliRunner().invoke(cli, ["selection", "classify"])
     assert result.exit_code == 0
     assert "No exclusion candidates" in result.output
+
+
+def test_selection_allow_posts(monkeypatch):
+    seen = {}
+
+    class FakeClient:
+        def post(self, path, json=None):
+            seen["path"] = path
+            seen["json"] = json
+            return {}
+
+    monkeypatch.setattr("orchestrator.cli.commands.selection.make_client", lambda ctx: FakeClient())
+    result = CliRunner().invoke(cli, ["selection", "allow", "steam/440"])
+    assert result.exit_code == 0
+    assert seen["path"] == "/api/v1/prefill-exclusions/steam/440"
+    assert seen["json"] == {"mode": "allow"}
+    assert "ALLOW" in result.output
+
+
+def test_selection_exclude_posts(monkeypatch):
+    seen = {}
+
+    class FakeClient:
+        def post(self, path, json=None):
+            seen["json"] = json
+            return {}
+
+    monkeypatch.setattr("orchestrator.cli.commands.selection.make_client", lambda ctx: FakeClient())
+    result = CliRunner().invoke(cli, ["selection", "exclude", "steam/1"])
+    assert result.exit_code == 0
+    assert seen["json"] == {"mode": "exclude"}
+
+
+def test_selection_unset_deletes(monkeypatch):
+    seen = {}
+
+    class FakeClient:
+        def delete(self, path, json=None):
+            seen["path"] = path
+            return {"deleted": 1}
+
+    monkeypatch.setattr("orchestrator.cli.commands.selection.make_client", lambda ctx: FakeClient())
+    result = CliRunner().invoke(cli, ["selection", "unset", "steam/1"])
+    assert result.exit_code == 0
+    assert seen["path"] == "/api/v1/prefill-exclusions/steam/1"
+
+
+def test_selection_bad_spec_errors(monkeypatch):
+    monkeypatch.setattr("orchestrator.cli.commands.selection.make_client", lambda ctx: object())
+    result = CliRunner().invoke(cli, ["selection", "allow", "no-slash"])
+    assert result.exit_code != 0
+
+
+def test_selection_exclusions_lists(monkeypatch):
+    class FakeClient:
+        def get(self, path, **params):
+            return {
+                "exclusions": [
+                    {
+                        "platform": "steam",
+                        "app_id": "1",
+                        "mode": "exclude",
+                        "source": "classifier",
+                        "reason": "auto-classify: type=music",
+                    }
+                ],
+                "total": 1,
+            }
+
+    monkeypatch.setattr("orchestrator.cli.commands.selection.make_client", lambda ctx: FakeClient())
+    result = CliRunner().invoke(cli, ["selection", "exclusions"])
+    assert result.exit_code == 0
+    assert "type=music" in result.output
