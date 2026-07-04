@@ -31,6 +31,11 @@ def test_non_game_types_are_candidates(app_type, name, expected_prefix):
         ("dlc", "Portal 2 - DLC Pack"),  # DLC is real content — kept
         ("mod", "Garry's Mod thing"),
         ("game", ""),  # no name, game type -> keep
+        # #229 follow-up: Steam types some REAL games' app_ids as `advertising`
+        # (seen live: Darksiders II 50650, Eufloria 41210). Dropped from the
+        # exclude set so the classifier stops flagging real games.
+        ("advertising", "Darksiders II"),
+        ("advertising", "Eufloria"),
     ],
 )
 def test_real_games_are_not_candidates(app_type, name):
