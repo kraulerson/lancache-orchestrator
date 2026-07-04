@@ -25,10 +25,11 @@
     "f8-block-list",
     "force-prefill",
     "steam-auth-status-live",
-    "validate-gid-match"
+    "validate-gid-match",
+    "issue-141-games-detail-endpoint"
   ],
-  "features_since_last_test": 0,
-  "features_since_last_health_check": 4,
+  "features_since_last_test": 1,
+  "features_since_last_health_check": 1,
   "test_interval": 2,
   "last_test_session": "2026-06-30",
   "testing_required": false,
