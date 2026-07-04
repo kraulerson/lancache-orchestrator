@@ -77,6 +77,25 @@ _MAX_METADATA_BYTES = 65536  # 64 KiB; realistic typical is <1 KiB
 
 _log = structlog.get_logger(__name__)
 
+# Shared row projection for BOTH the list and the detail endpoint (#141): schema
+# columns + `blocked` (correlated EXISTS) + the latest validation_history chunk
+# counts (correlated scalar subqueries, newest by started_at with an id DESC
+# tie-break so both subqueries pick the same row). Callers append their own
+# WHERE/ORDER/LIMIT. One constant so list and detail can never drift in what a
+# "game row" contains.
+_GAME_ROW_SELECT = (
+    f"SELECT {_GAMES_COLUMNS}, "  # noqa: S608  only the static _GAMES_COLUMNS is interpolated
+    "EXISTS(SELECT 1 FROM block_list b "
+    "WHERE b.platform=games.platform AND b.app_id=games.app_id) AS blocked, "
+    "(SELECT vh.chunks_cached FROM validation_history vh "
+    " WHERE vh.game_id=games.id ORDER BY vh.started_at DESC, vh.id DESC LIMIT 1) "
+    "AS chunks_cached, "
+    "(SELECT vh.chunks_total FROM validation_history vh "
+    " WHERE vh.game_id=games.id ORDER BY vh.started_at DESC, vh.id DESC LIMIT 1) "
+    "AS chunks_total "
+    "FROM games"
+)
+
 
 # ---------------------------------------------------------------------------
 # Response models
@@ -132,6 +151,95 @@ class GameListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     games: list[GameResponse]
     meta: GamesMeta
+
+
+class GameDetailResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    game: GameResponse
+
+
+# ---------------------------------------------------------------------------
+# Row → response model (shared by list + detail)
+# ---------------------------------------------------------------------------
+
+
+def _row_to_game_response(row: Any) -> GameResponse | None:
+    """Build a GameResponse from a games row projected via _GAME_ROW_SELECT.
+
+    Returns None — with a structured log — when the row's metadata is
+    malformed/oversized or a Literal column (platform, status) holds an
+    out-of-allow-list value, so one bad row never 500s the endpoint. The list
+    endpoint skips such rows; the detail endpoint treats a None as a
+    data-integrity error (the row exists but can't be rendered).
+    """
+    raw_meta = row["metadata"]
+    metadata: dict[str, Any] | None
+    if raw_meta is None:
+        metadata = None
+    elif not isinstance(raw_meta, (str, bytes, bytearray)):
+        # UAT-5 U5-3: defensive guard against future pool drivers that may
+        # auto-decode JSON columns to dict/list/int. Treat as malformed.
+        _log.warning(
+            "api.games.metadata_unexpected_type",
+            game_id=row["id"],
+            value_type=type(raw_meta).__name__,
+        )
+        metadata = None
+    elif len(raw_meta) > _MAX_METADATA_BYTES:
+        # UAT-4 S3-e: size-cap short-circuit before json.loads
+        _log.warning(
+            "api.games.metadata_oversized",
+            game_id=row["id"],
+            size_bytes=len(raw_meta),
+            cap=_MAX_METADATA_BYTES,
+        )
+        metadata = None
+    else:
+        try:
+            parsed = json.loads(raw_meta)
+            metadata = parsed if isinstance(parsed, dict) else None
+        except (json.JSONDecodeError, TypeError, RecursionError) as e:
+            # UAT-4 S3-d: catch RecursionError on deeply-nested JSON.
+            _log.warning(
+                "api.games.metadata_parse_failed",
+                game_id=row["id"],
+                reason=type(e).__name__,
+            )
+            metadata = None
+
+    raw_err = row["last_error"]
+    last_error = raw_err[:ERROR_TRUNCATE_BYTES] if raw_err else None
+
+    # UAT-5 U5-2: Pydantic Literal[] columns (platform, status) raise
+    # ValidationError if the DB row holds an out-of-allow-list value. Skip the
+    # row with a structured log instead of propagating a 500.
+    try:
+        return GameResponse(
+            id=row["id"],
+            platform=row["platform"],
+            app_id=row["app_id"],
+            title=row["title"],
+            owned=row["owned"],
+            size_bytes=row["size_bytes"],
+            current_version=row["current_version"],
+            cached_version=row["cached_version"],
+            status=row["status"],
+            last_validated_at=row["last_validated_at"],
+            last_prefilled_at=row["last_prefilled_at"],
+            last_error=last_error,
+            metadata=metadata,
+            blocked=bool(row["blocked"]),
+            chunks_cached=row["chunks_cached"],
+            chunks_total=row["chunks_total"],
+        )
+    except ValidationError as e:
+        _log.warning(
+            "api.games.row_dropped",
+            game_id=row["id"],
+            reason="response_model_validation_failed",
+            errors=[{"loc": err["loc"], "type": err["type"]} for err in e.errors()],
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -193,26 +301,10 @@ async def list_games(
     # _query_helpers security invariants and the Hypothesis property test
     # in tests/api/test_query_helpers.py::TestSqlInjectionResistance.
     count_sql = f"SELECT COUNT(*) AS total FROM games {where_sql}".strip()  # noqa: S608
-    # F8: `blocked` via a correlated EXISTS subquery (NOT a JOIN) so the
-    # allow-list `where_sql`/`order_sql` (bare `games` column names) stay
-    # unambiguous — block_list also has platform/app_id columns.
-    # F7/UI: the latest validation_history counts via correlated scalar
-    # subqueries (NOT a JOIN), same rationale as `blocked` above — keeps the
-    # allow-list where_sql/order_sql on bare `games` columns unambiguous.
-    # idx_vh_game(game_id, started_at DESC) serves the ORDER/LIMIT; the `id DESC`
-    # tie-break makes both subqueries pick the SAME row on same-second ties.
-    rows_sql = (
-        f"SELECT {_GAMES_COLUMNS}, "  # noqa: S608
-        "EXISTS(SELECT 1 FROM block_list b "
-        "WHERE b.platform=games.platform AND b.app_id=games.app_id) AS blocked, "
-        "(SELECT vh.chunks_cached FROM validation_history vh "
-        " WHERE vh.game_id=games.id ORDER BY vh.started_at DESC, vh.id DESC LIMIT 1) "
-        "AS chunks_cached, "
-        "(SELECT vh.chunks_total FROM validation_history vh "
-        " WHERE vh.game_id=games.id ORDER BY vh.started_at DESC, vh.id DESC LIMIT 1) "
-        "AS chunks_total "
-        f"FROM games {where_sql} {order_sql} LIMIT ? OFFSET ?"
-    ).strip()
+    # `blocked` (EXISTS) + latest validation counts (scalar subqueries) live in
+    # the shared _GAME_ROW_SELECT projection — NOT a JOIN — so the allow-list
+    # `where_sql`/`order_sql` stay on unambiguous bare `games` column names.
+    rows_sql = f"{_GAME_ROW_SELECT} {where_sql} {order_sql} LIMIT ? OFFSET ?".strip()
     rows_params = [*where_params, pagination.limit, pagination.offset]
 
     try:
@@ -226,81 +318,9 @@ async def list_games(
 
     games: list[GameResponse] = []
     for row in rows:
-        raw_meta = row["metadata"]
-        metadata: dict[str, Any] | None
-        if raw_meta is None:
-            metadata = None
-        elif not isinstance(raw_meta, (str, bytes, bytearray)):
-            # UAT-5 U5-3: defensive guard against future pool drivers that
-            # may auto-decode JSON columns to dict/list/int. The original
-            # `len(raw_meta) > cap` check raised TypeError for non-buffer
-            # types (uncaught → 500). Treat as malformed → metadata=None.
-            _log.warning(
-                "api.games.metadata_unexpected_type",
-                game_id=row["id"],
-                value_type=type(raw_meta).__name__,
-            )
-            metadata = None
-        elif len(raw_meta) > _MAX_METADATA_BYTES:
-            # UAT-4 S3-e: size-cap short-circuit before json.loads
-            _log.warning(
-                "api.games.metadata_oversized",
-                game_id=row["id"],
-                size_bytes=len(raw_meta),
-                cap=_MAX_METADATA_BYTES,
-            )
-            metadata = None
-        else:
-            try:
-                parsed = json.loads(raw_meta)
-                metadata = parsed if isinstance(parsed, dict) else None
-            except (json.JSONDecodeError, TypeError, RecursionError) as e:
-                # UAT-4 S3-d: catch RecursionError on deeply-nested JSON;
-                # was previously uncaught → 500 from the router.
-                _log.warning(
-                    "api.games.metadata_parse_failed",
-                    game_id=row["id"],
-                    reason=type(e).__name__,
-                )
-                metadata = None
-
-        raw_err = row["last_error"]
-        last_error = raw_err[:ERROR_TRUNCATE_BYTES] if raw_err else None
-
-        # UAT-5 U5-2: wrap per-row response-model construction in try/except.
-        # Pydantic Literal[] columns (platform, status) raise ValidationError
-        # if the DB row holds an out-of-allow-list value (CHECK constraint
-        # dropped in a future migration, fixture bug, raw SQL writes, …).
-        # Previously the exception propagated as 500. Skip the row with a
-        # structured log instead, matching the metadata-parse pattern.
-        try:
-            games.append(
-                GameResponse(
-                    id=row["id"],
-                    platform=row["platform"],
-                    app_id=row["app_id"],
-                    title=row["title"],
-                    owned=row["owned"],
-                    size_bytes=row["size_bytes"],
-                    current_version=row["current_version"],
-                    cached_version=row["cached_version"],
-                    status=row["status"],
-                    last_validated_at=row["last_validated_at"],
-                    last_prefilled_at=row["last_prefilled_at"],
-                    last_error=last_error,
-                    metadata=metadata,
-                    blocked=bool(row["blocked"]),
-                    chunks_cached=row["chunks_cached"],
-                    chunks_total=row["chunks_total"],
-                )
-            )
-        except ValidationError as e:
-            _log.warning(
-                "api.games.row_dropped",
-                game_id=row["id"],
-                reason="response_model_validation_failed",
-                errors=[{"loc": err["loc"], "type": err["type"]} for err in e.errors()],
-            )
+        game = _row_to_game_response(row)
+        if game is not None:
+            games.append(game)
 
     # UAT-4 S2-A: build applied_filters as a plain dict matching the parsed
     # `{field: {op: value}}` shape. Previously this went through a
@@ -325,4 +345,48 @@ async def list_games(
             applied_sort=applied_sort,
         ),
     )
+    return JSONResponse(content=body.model_dump(by_alias=True))
+
+
+@router.get(
+    "/games/{game_id}",
+    response_model=GameDetailResponse,
+    responses={
+        200: {"description": "Single game detail"},
+        401: {"description": "Missing or invalid bearer token"},
+        404: {"description": "No game with that id"},
+        503: {"description": "Database pool unhealthy"},
+    },
+    summary="Get one game",
+    description=(
+        'Returns a single game by its numeric id, wrapped as `{"game": {...}}`. '
+        "The game object carries the same fields as a list row — including the "
+        "`blocked` flag and the latest validation chunk counts for a Partial · N% "
+        "badge. 404 when no game has that id."
+    ),
+)
+async def get_game(
+    game_id: int,
+    pool: Pool = Depends(get_pool_dep),  # noqa: B008  FastAPI idiomatic
+) -> JSONResponse:
+    # game_id flows through a `?` placeholder; the only interpolated fragment is
+    # the constant _GAME_ROW_SELECT — no user string reaches the SQL text.
+    detail_sql = f"{_GAME_ROW_SELECT} WHERE games.id = ?"
+    try:
+        row = await pool.read_one(detail_sql, [game_id])
+    except PoolError as e:
+        _log.error("api.games.detail_read_failed", reason=str(e))
+        return JSONResponse(content={"detail": "database unavailable"}, status_code=503)
+
+    if row is None:
+        return JSONResponse(content={"detail": "game not found"}, status_code=404)
+
+    game = _row_to_game_response(row)
+    if game is None:
+        # Row exists but can't be rendered (malformed metadata / out-of-allow-list
+        # Literal) — a data-integrity error, not a missing resource.
+        _log.error("api.games.detail_row_invalid", game_id=game_id)
+        return JSONResponse(content={"detail": "game record invalid"}, status_code=500)
+
+    body = GameDetailResponse(game=game)
     return JSONResponse(content=body.model_dump(by_alias=True))

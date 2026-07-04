@@ -763,3 +763,113 @@ class TestGamesValidationChunks:
         game = next(g for g in body["games"] if g["id"] == 3)
         assert game["chunks_total"] == 100
         assert game["chunks_cached"] == 88  # the later-inserted (higher-id) row
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/games/{id} — single-game detail (#141)
+# ---------------------------------------------------------------------------
+
+
+class TestGameDetail:
+    async def test_returns_single_game_envelope(self, client, populated_pool):
+        r = await client.get(
+            "/api/v1/games/1",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert set(body.keys()) == {"game"}
+        assert body["game"]["id"] == 1
+        assert body["game"]["title"] == "Counter-Strike"
+        assert body["game"]["platform"] == "steam"
+
+    async def test_field_set_matches_list_row(self, client, populated_pool):
+        # The detail `game` object must carry the SAME field set as a list row.
+        list_body = (
+            await client.get(
+                "/api/v1/games?limit=1",
+                headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            )
+        ).json()
+        list_keys = set(list_body["games"][0].keys())
+        detail_body = (
+            await client.get(
+                "/api/v1/games/1",
+                headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+            )
+        ).json()
+        assert set(detail_body["game"].keys()) == list_keys
+
+    async def test_epic_game(self, client, populated_pool):
+        r = await client.get(
+            "/api/v1/games/4",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 200
+        assert r.json()["game"]["platform"] == "epic"
+        assert r.json()["game"]["title"] == "Fortnite"
+
+    async def test_unknown_id_returns_404(self, client, populated_pool):
+        r = await client.get(
+            "/api/v1/games/999999",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 404
+        assert "not found" in r.json()["detail"].lower()
+
+    async def test_non_integer_id_returns_400(self, client, populated_pool):
+        # The app's global RequestValidationError handler maps path/query/body
+        # validation failures to 400 (not FastAPI's default 422).
+        r = await client.get(
+            "/api/v1/games/not-a-number",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+
+    async def test_no_token_returns_401(self, client, populated_pool):
+        r = await client.get("/api/v1/games/1")
+        assert r.status_code == 401
+
+    async def test_blocked_reflected(self, client, populated_pool):
+        await populated_pool.execute_write(
+            "INSERT INTO block_list (platform, app_id, reason, source, blocked_at) "
+            "VALUES ('steam', '10', 'test', 'cli', '2026-01-01T00:00:00Z')",
+            (),
+        )
+        r = await client.get(
+            "/api/v1/games/1",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.json()["game"]["blocked"] is True
+
+    async def test_chunks_from_latest_validation(self, client, populated_pool):
+        await populated_pool.execute_write(
+            "INSERT INTO validation_history "
+            "(game_id, manifest_version, started_at, finished_at, method, "
+            " chunks_total, chunks_cached, chunks_missing, outcome) "
+            "VALUES (1, '1.0', '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z', "
+            " 'disk_stat', 100, 73, 27, 'partial')",
+            (),
+        )
+        r = await client.get(
+            "/api/v1/games/1",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.json()["game"]["chunks_total"] == 100
+        assert r.json()["game"]["chunks_cached"] == 73
+
+    async def test_pool_error_returns_503(self, unit_app, client):
+        from orchestrator.api.dependencies import get_pool_dep
+        from orchestrator.db.pool import PoolError
+
+        class _FakeBrokenPool:
+            async def read_one(self, *_a, **_kw):
+                raise PoolError("simulated db unavailable")
+
+        unit_app.dependency_overrides[get_pool_dep] = lambda: _FakeBrokenPool()
+        r = await client.get(
+            "/api/v1/games/1",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 503
+        assert r.json() == {"detail": "database unavailable"}
