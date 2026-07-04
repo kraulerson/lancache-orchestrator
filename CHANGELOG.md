@@ -19,6 +19,15 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — Manual-download folder listing endpoint (#222, agent + orch) — 2026-07-04
+
+Games downloaded by hand (GOG / Humble / Itch / Amazon — launchers with no prefill automation) live in per-launcher folders on the lancache host (`/lancache/lancache/cache/GOG/<game>`, …). This exposes that listing so a coverage checker can diff the owned library against what was actually downloaded.
+
+- **Added:** agent `GET /v1/manual-downloads/{launcher}` → `{launcher, present, entries}` (lists game folders under `manual_downloads_cache_path/<launcher>/`; filters non-dirs, `!*` control entries, dotfiles). New setting `manual_downloads_cache_path` (default `/data/cache` — the parent of the nginx hash cache; the agent already mounts it, so no new mount).
+- **Added:** orchestrator `GET /api/v1/manual-downloads/{launcher}` proxying the agent + `AgentClient.manual_downloads()`.
+- **Security:** the `{launcher}` path component is allowlisted (`^[A-Za-z0-9_-]+$`) at both hops and the agent re-asserts the resolved target is a direct child of the cache root — path traversal is impossible. Read-only; proxy never 500s (agent errors → 503). Audit `docs/security-audits/manual-download-checker-agent-security-audit.md` (no findings).
+- The Game_shelf slug-diff coverage report (owned library vs these folders) lands in a follow-up. Only GOG has data today; Humble/Itch/Amazon folders are added when Karl downloads them.
+
 ### Added — MP-only prefill exclusion: multiplayer-only games flagged (#366) — 2026-07-04
 
 A Steam game with a multiplayer category and NO single-player mode (e.g. Dota 2) is typed `game` by the store, so the type/name classifier couldn't catch it. Operator decision (Karl 2026-07-04): exclude multiplayer-only games from prefill — not worth the cache/WAN for a rare one-off play.
