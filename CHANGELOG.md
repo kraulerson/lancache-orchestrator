@@ -19,6 +19,16 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — Prefill-selection exclusion classifier + `selection classify` CLI (#229) — 2026-07-03
+
+Scheduled prefill pulls every app in the operator's `selectedAppsToPrefill.json`; soundtracks, dedicated servers, SDKs, tools, demos, and videos waste WAN pulls and cache space. New read-only review flags them as **candidates** to remove — it never edits the curated selection (the issue's own gate).
+
+- **Classifier** (`platform/steam/selection_classifier.py`, pure/stdlib): `classify(app_type, name)` returns an exclusion reason for non-game store types (`music`/`application`/`tool`/`demo`/`video`/…) or a name match (`dedicated server`, `SDK`, `soundtrack`, `OST`, `benchmark`, `authoring tool`), else `None`. Name phrases are full (not a bare "server", which would over-match "Observer"). A genuine utility Steam types as `game` (e.g. Lossless Scaling) is deliberately NOT flagged — it stays an operator judgement call.
+- **`GET /api/v1/selection/candidates`** (`api/routers/selection.py`, bearer-gated): classifies every app in `steam_app_info` (type + name cached by library_sync) and returns `{candidates: [{app_id, name, app_type, reason}], total_candidates, total_scanned}`. Read-only; 503 on pool failure.
+- **`orchestrator-cli selection classify`** (`cli/commands/selection.py`): prints the candidates as a table with a "remove from selectedAppsToPrefill.json — nothing was changed" reminder.
+
+26 new tests (classifier sweep, router happy/empty/401/503, CLI list/none); full suite 1415. Security audit: `docs/security-audits/issue-229-selection-classifier-security-audit.md` (no findings — read-only, no ReDoS, the selection is never mutated).
+
 ### Added — GET /api/v1/games/{id} single-game detail endpoint (#141) — 2026-07-03
 
 The games API was list-only. Added `GET /api/v1/games/{game_id}` returning `{"game": {...}}` — a single game by numeric id with the **same** field set a list row carries (including the `blocked` flag and the latest validation chunk counts for a `Partial · N%` badge), so a consumer can fetch one game without paginating the whole library. 404 when no game has that id; 400 for a non-integer id (via the app's global validation handler); 503 on pool failure; 401 without a bearer token. The row projection (`_GAME_ROW_SELECT`) and the row→model builder (`_row_to_game_response`, incl. the metadata size-cap / malformed-row guards) were factored out of the list endpoint and are now shared by both, so list and detail can never drift in what a "game row" contains. All 472 API tests pass (9 new). Security audit: `docs/security-audits/issue-141-games-detail-endpoint-security-audit.md` (no findings — parameterized `?` lookup, fixed error bodies, cheaper than the list). (`api/routers/games.py`)

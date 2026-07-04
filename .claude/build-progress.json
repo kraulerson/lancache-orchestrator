@@ -27,7 +27,8 @@
     "steam-auth-status-live",
     "validate-gid-match",
     "issue-228-fetcher-transient-retry",
-    "issue-141-games-detail-endpoint"
+    "issue-141-games-detail-endpoint",
+    "issue-229-selection-classifier"
   ],
   "features_since_last_test": 1,
   "features_since_last_health_check": 1,
