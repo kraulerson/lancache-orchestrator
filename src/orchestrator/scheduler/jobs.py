@@ -21,8 +21,8 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
-async def enqueue_library_sync(pool: Pool) -> int:
-    """Insert a `library_sync` job row if none is queued/running for steam.
+async def enqueue_library_sync(pool: Pool, platform: str = "steam") -> int:
+    """Insert a `library_sync` job row if none is queued/running for ``platform``.
 
     Returns the rowcount affected (1 if a new row was queued, 0 if a dedup
     conflict skipped it or on DB failure). Never raises — DB errors are logged
@@ -33,17 +33,20 @@ async def enqueue_library_sync(pool: Pool) -> int:
     platform, and `ON CONFLICT DO NOTHING` collapses a concurrent cron + API
     race into a single row (previously an app-level SELECT-then-INSERT that
     straddled an await and could double-insert — code review 2026-06-02). F12 D7.
+    Registered on the cron for both steam and epic (Piece 2 — the orchestrator
+    owns Epic enumeration since EpicPrefill never auto-downloads new games).
     """
     try:
         inserted = await pool.execute_write(
             "INSERT INTO jobs (kind, platform, state, source) "
-            "VALUES ('library_sync', 'steam', 'queued', 'scheduler') "
-            "ON CONFLICT DO NOTHING"
+            "VALUES ('library_sync', ?, 'queued', 'scheduler') "
+            "ON CONFLICT DO NOTHING",
+            (platform,),
         )
         if inserted:
-            _log.info("scheduler.library_sync.queued")
+            _log.info("scheduler.library_sync.queued", platform=platform)
         else:
-            _log.info("scheduler.library_sync.dedup_skip")
+            _log.info("scheduler.library_sync.dedup_skip", platform=platform)
         return inserted
     except PoolError as e:
         _log.error("scheduler.library_sync.db_error", reason=str(e)[:200])
@@ -130,8 +133,13 @@ async def enqueue_fetch_manifests(pool: Pool, *, source: str = "scheduler") -> i
 
 
 async def enqueue_scheduled_prefill(pool: Pool) -> int:
-    """Enqueue 'prefill' jobs for owned games that are new, version-diverged, or
-    validation_failed — and not block-listed (F8 scheduled prefill driver).
+    """Enqueue 'prefill' jobs for owned EPIC games that are new, version-diverged,
+    or validation_failed — and not block-listed / prefill-excluded (F8 driver,
+    Epic-scoped per Piece 2).
+
+    Steam is prefilled by the host SteamPrefill cron (it auto-grabs recent
+    purchases); EpicPrefill never auto-downloads new games, so the orchestrator
+    owns Epic. The `platform = 'epic'` filter avoids double-prefilling Steam.
 
     One bulk INSERT...SELECT. `ON CONFLICT DO NOTHING` + the migration-0006
     in-flight UNIQUE index dedups against a prefill already queued/running for a
@@ -145,7 +153,12 @@ async def enqueue_scheduled_prefill(pool: Pool) -> int:
             "INSERT INTO jobs (kind, game_id, platform, state, source) "
             "SELECT 'prefill', g.id, g.platform, 'queued', 'scheduler' "
             "FROM games g "
-            "WHERE g.owned = 1 "
+            # Piece 2: the orchestrator's scheduled prefill covers EPIC ONLY.
+            # Steam is prefilled by the host SteamPrefill cron (which auto-grabs
+            # recent purchases); EpicPrefill never auto-downloads new games, so
+            # the orchestrator owns Epic. Scoping to epic avoids double-prefilling
+            # every Steam game.
+            "WHERE g.owned = 1 AND g.platform = 'epic' "
             "  AND (g.cached_version IS NULL "
             "       OR g.cached_version <> g.current_version "
             "       OR g.status = 'validation_failed') "
