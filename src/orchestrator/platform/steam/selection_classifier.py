@@ -30,7 +30,11 @@ _NON_GAME_TYPES = frozenset(
         "media",
         "series",
         "episode",
-        "advertising",
+        # NOTE: `advertising` intentionally EXCLUDED from this set (#229 follow-up).
+        # Steam types some real games' app_ids as `advertising` (seen live:
+        # Darksiders II 50650, Eufloria 41210), so flagging it produced false
+        # positives. A genuine MP-only/promo entry typed `advertising` (e.g. COD
+        # BO2 Zombies) is now an operator judgement call, like game-typed tools.
         "hardware",
         "config",
         "comic",

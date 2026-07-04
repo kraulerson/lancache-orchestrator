@@ -19,6 +19,10 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Changed — Selection classifier: drop `advertising` from the exclude types (#229 follow-up) — 2026-07-04
+
+The first live `selection classify` run flagged real games — **Darksiders II** (50650) and **Eufloria** (41210) — because Steam types some real games' app_ids as `advertising`. Removed `advertising` from `_NON_GAME_TYPES` so the classifier stops producing those false positives. A genuine MP-only/promo entry typed `advertising` (e.g. COD BO2 Zombies) is now an operator judgement call, like a utility Steam types as `game`. Strictly reduces flagging — the parent-feature security audit still applies. (`platform/steam/selection_classifier.py`)
+
 ### Added — Prefill-selection exclusion classifier + `selection classify` CLI (#229) — 2026-07-03
 
 Scheduled prefill pulls every app in the operator's `selectedAppsToPrefill.json`; soundtracks, dedicated servers, SDKs, tools, demos, and videos waste WAN pulls and cache space. New read-only review flags them as **candidates** to remove — it never edits the curated selection (the issue's own gate).
