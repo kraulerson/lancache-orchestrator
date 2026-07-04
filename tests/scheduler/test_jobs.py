@@ -27,6 +27,13 @@ class TestEnqueueLibrarySync:
             "source": "scheduler",
         }
 
+    async def test_epic_platform_enqueues_epic_row(self, pool):
+        # Piece 2: the orchestrator enumerates Epic on the cron too.
+        n = await enqueue_library_sync(pool, "epic")
+        assert n == 1
+        row = await pool.read_one("SELECT platform FROM jobs WHERE kind='library_sync' LIMIT 1")
+        assert row["platform"] == "epic"
+
     async def test_dedup_skip_when_queued_already(self, pool):
         # Seed a queued row from a previous schedule fire / manual trigger.
         await pool.execute_write(
@@ -165,8 +172,10 @@ class TestEnqueueValidationSweep:
         assert row["source"] == "scheduler"
 
 
+# Piece 2: the orchestrator's scheduled prefill is EPIC-scoped (Steam is handled
+# by the host SteamPrefill cron), so these tests seed epic games by default.
 async def _seed_game(
-    pool, app_id, *, owned=1, current="42", cached=None, status="up_to_date", platform="steam"
+    pool, app_id, *, owned=1, current="42", cached=None, status="up_to_date", platform="epic"
 ):
     await pool.execute_write(
         "INSERT INTO games "
@@ -210,12 +219,19 @@ class TestEnqueueScheduledPrefill:
         await _seed_game(pool, "1", owned=0, current="42", cached=None)
         assert await enqueue_scheduled_prefill(pool) == 0
 
+    async def test_skips_steam_platform(self, pool):
+        # Piece 2: the orchestrator leaves Steam to the host SteamPrefill cron.
+        from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
+
+        await _seed_game(pool, "1", current="42", cached=None, platform="steam")
+        assert await enqueue_scheduled_prefill(pool) == 0
+
     async def test_skips_blocked(self, pool):
         from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
 
         await _seed_game(pool, "1", current="42", cached=None)
         await pool.execute_write(
-            "INSERT INTO block_list (platform, app_id, source) VALUES ('steam','1','api')"
+            "INSERT INTO block_list (platform, app_id, source) VALUES ('epic','1','api')"
         )
         assert await enqueue_scheduled_prefill(pool) == 0
 
@@ -227,7 +243,7 @@ class TestEnqueueScheduledPrefill:
         await _seed_game(pool, "1", current="42", cached=None)
         await pool.execute_write(
             "INSERT INTO prefill_exclusions (platform, app_id, mode, source) "
-            "VALUES ('steam','1','exclude','classifier')"
+            "VALUES ('epic','1','exclude','classifier')"
         )
         assert await enqueue_scheduled_prefill(pool) == 0
 
@@ -239,7 +255,7 @@ class TestEnqueueScheduledPrefill:
         await _seed_game(pool, "1", current="42", cached=None)
         await pool.execute_write(
             "INSERT INTO prefill_exclusions (platform, app_id, mode, source) "
-            "VALUES ('steam','1','allow','operator')"
+            "VALUES ('epic','1','allow','operator')"
         )
         assert await enqueue_scheduled_prefill(pool) == 1
 

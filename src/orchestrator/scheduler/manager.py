@@ -43,6 +43,7 @@ _log = structlog.get_logger(__name__)
 # consistent ids means `replace_existing=True` lets us re-deploy without
 # orphan jobs if the in-memory store ever gets persisted in a future BL.
 LIBRARY_SYNC_JOB_ID = "library_sync_steam"
+LIBRARY_SYNC_EPIC_JOB_ID = "library_sync_epic"
 VALIDATION_SWEEP_JOB_ID = "validation_sweep"
 SCHEDULED_PREFILL_JOB_ID = "scheduled_prefill"
 AUTO_CLASSIFY_BLOCK_JOB_ID = "auto_classify_block"
@@ -131,9 +132,20 @@ class SchedulerManager:
             scheduler.add_job(
                 enqueue_library_sync,
                 trigger=IntervalTrigger(seconds=self._library_sync_interval_sec),
-                args=(self._pool,),
+                args=(self._pool, "steam"),
                 id=LIBRARY_SYNC_JOB_ID,
                 name="Enqueue library_sync for steam",
+                replace_existing=True,
+            )
+
+            # Piece 2: the orchestrator owns Epic enumeration (EpicPrefill never
+            # auto-downloads new games), so sync the Epic library on the cron too.
+            scheduler.add_job(
+                enqueue_library_sync,
+                trigger=IntervalTrigger(seconds=self._library_sync_interval_sec),
+                args=(self._pool, "epic"),
+                id=LIBRARY_SYNC_EPIC_JOB_ID,
+                name="Enqueue library_sync for epic",
                 replace_existing=True,
             )
 
