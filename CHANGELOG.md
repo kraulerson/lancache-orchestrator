@@ -19,6 +19,16 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — Prefill-selection exclusion classifier + `selection classify` CLI (#229) — 2026-07-03
+
+Scheduled prefill pulls every app in the operator's `selectedAppsToPrefill.json`; soundtracks, dedicated servers, SDKs, tools, demos, and videos waste WAN pulls and cache space. New read-only review flags them as **candidates** to remove — it never edits the curated selection (the issue's own gate).
+
+- **Classifier** (`platform/steam/selection_classifier.py`, pure/stdlib): `classify(app_type, name)` returns an exclusion reason for non-game store types (`music`/`application`/`tool`/`demo`/`video`/…) or a name match (`dedicated server`, `SDK`, `soundtrack`, `OST`, `benchmark`, `authoring tool`), else `None`. Name phrases are full (not a bare "server", which would over-match "Observer"). A genuine utility Steam types as `game` (e.g. Lossless Scaling) is deliberately NOT flagged — it stays an operator judgement call.
+- **`GET /api/v1/selection/candidates`** (`api/routers/selection.py`, bearer-gated): classifies every app in `steam_app_info` (type + name cached by library_sync) and returns `{candidates: [{app_id, name, app_type, reason}], total_candidates, total_scanned}`. Read-only; 503 on pool failure.
+- **`orchestrator-cli selection classify`** (`cli/commands/selection.py`): prints the candidates as a table with a "remove from selectedAppsToPrefill.json — nothing was changed" reminder.
+
+26 new tests (classifier sweep, router happy/empty/401/503, CLI list/none); full suite 1415. Security audit: `docs/security-audits/issue-229-selection-classifier-security-audit.md` (no findings — read-only, no ReDoS, the selection is never mutated).
+
 ### Fixed — Epic manifest parse crash on games with prerequisites (2026-07-04) — 2026-07-04
 
 Epic games whose manifest declares installer prerequisites (`prereq_count > 0`) failed to prefill with `malformed Epic manifest: … unpack requires a buffer of 4 bytes` or `UnicodeDecodeError: 'utf-16-le' … illegal surrogate` — e.g. Homeworld Remastered Collection, Homeworld: Deserts of Kharak, Midnight Ghost Hunt. The binary-manifest parser read `prereq_count * 4` FStrings from the ManifestMeta, but Epic writes `prereq_count` id strings plus name/path/args, so the loop over-ran the meta block into the ChunkDataList and interpreted chunk bytes as a bogus FString length (a huge UTF-16 read → illegal surrogate, or a read past EOF → struct error). Games with no prerequisites (`prereq_count = 0`) skipped the loop and parsed fine, which is why only a subset failed. Fix: the ManifestMeta body is not needed for chunk-path derivation (the version comes from the header) and `meta_size` already bounds it, so `_parse` now seeks straight to `meta_size` instead of walking the meta fields — provably non-regressive for working manifests (they land at the identical offset) and eliminating the over-read for all games. Verified live: Homeworld Remastered's real manifest now parses to 7887 chunks / 7.58 GB. (`platform/epic/manifest.py`)
