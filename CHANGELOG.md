@@ -19,10 +19,18 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — Game_shelf cross-launcher exclusion reconcile endpoint (Piece 3, orchestrator side) — 2026-07-04
+
+Game_shelf holds the authoritative cross-launcher game identity (editions sharing a `game_id` across launchers). When an Epic game is already owned + cached on a higher-priority launcher (Steam self-prefills), its Epic copy is redundant. This lets Game_shelf push that set to the orchestrator so the Epic scheduled prefill (Piece 2) skips it — no name-matching re-implemented in the orchestrator.
+
+- **Data Model:** migration `0012_prefill_exclusions_gameshelf_source.sql` widens `prefill_exclusions.source` CHECK to include `'gameshelf'` (standard rename-out → create-canonical → copy → drop table rebuild; loss-less; new checksum pinned in `CHECKSUMS`).
+- **Added:** `PUT /api/v1/prefill-exclusions/gameshelf/{platform}` `{app_ids: [...]}` — self-healing reconcile that makes the `source='gameshelf'` exclude rows match the pushed set exactly. Insert `ON CONFLICT DO NOTHING` (never clobbers an operator `allow` or existing operator/classifier row); delete scoped to `source='gameshelf'` + platform (never touches operator/classifier rows); insert + delete in one transaction; idempotent. `app_ids` bounded (≤50 000, each 1–64 chars); unknown platform / bad id → 400.
+- No scheduler change: Piece 2's `enqueue_scheduled_prefill` already skips any `mode='exclude'`.
+- Full suite 1477; security audit `docs/security-audits/piece3-gameshelf-exclusions-security-audit.md` (no findings). Game_shelf-side compute + push lands in a separate Game_shelf PR.
+
 ### Added — Epic auto-download via the orchestrator (Piece 2) — 2026-07-04
 
 SteamPrefill auto-grabs Steam purchases from the last 2 weeks, but **EpicPrefill never auto-downloads new games** — it only updates its list. So new Epic games silently never cached. The orchestrator now owns Epic: `library_sync` is registered on the cron for **epic** too (it was steam-only), and the scheduled prefill (`enqueue_scheduled_prefill`) is **scoped to `platform='epic'`** so it prefills uncached Epic games via the pure-Python F6 path — without double-prefilling every Steam game (SteamPrefill's job). Still gated by `owned`, block_list, and `prefill_exclusions`. `enqueue_library_sync(pool, platform)` is now parameterized; new `LIBRARY_SYNC_EPIC_JOB_ID` cron job. Full suite 1466; security audit `docs/security-audits/piece2-epic-auto-download-security-audit.md` (no findings). Deploy: set `ORCH_SCHEDULED_PREFILL_ENABLED=true` on the LXC + retire the host EpicPrefill cron.
-
 
 ### Added — Steam auto-prune of selectedAppsToPrefill.json (auto-classify actuator, Piece 1) — 2026-07-04
 
