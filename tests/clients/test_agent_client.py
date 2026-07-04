@@ -420,3 +420,18 @@ async def test_epic_validate_single_call():
     )
     assert res["chunks_cached"] == 85
     assert res["outcome"] == "partial"
+
+
+async def test_prune_steam_selection_posts_and_returns():
+    import json as _json
+
+    def handler(request):
+        assert request.method == "POST"
+        assert request.url.path == "/v1/steam/prune-selection"
+        body = _json.loads(request.content)
+        assert body == {"exclude_app_ids": [2, 3], "restore_app_ids": [5]}
+        return httpx.Response(200, json={"removed": 2, "restored": 1, "remaining": 10})
+
+    client = _client(handler)
+    res = await client.prune_steam_selection([2, 3], [5])
+    assert res == {"removed": 2, "restored": 1, "remaining": 10}

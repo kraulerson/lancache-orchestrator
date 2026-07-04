@@ -347,3 +347,29 @@ class TestEnqueueAutoClassifyBlock:
 
         pool.read_all = AsyncMock(side_effect=PoolError("simulated"))
         assert await enqueue_auto_classify_block(pool) == 0
+
+
+class TestAutoClassifyBlockActuation:
+    async def test_prunes_selection_via_agent_client(self, pool):
+        from unittest.mock import AsyncMock
+
+        from orchestrator.scheduler.jobs import enqueue_auto_classify_block
+
+        await _seed_classified(pool, "1", "music", "OST")  # classified → exclude
+        await pool.execute_write(
+            "INSERT INTO prefill_exclusions (platform, app_id, mode, source) "
+            "VALUES ('steam','9','allow','operator')"
+        )
+        agent = AsyncMock()
+        agent.prune_steam_selection.return_value = {"removed": 1, "restored": 0, "remaining": 5}
+        await enqueue_auto_classify_block(pool, agent)
+        agent.prune_steam_selection.assert_awaited_once()
+        exclude_ids, restore_ids = agent.prune_steam_selection.await_args.args
+        assert 1 in exclude_ids  # the music app auto-excluded
+        assert 9 in restore_ids  # the operator allow
+
+    async def test_no_agent_client_skips_prune(self, pool):
+        from orchestrator.scheduler.jobs import enqueue_auto_classify_block
+
+        await _seed_classified(pool, "1", "music", "OST")
+        assert await enqueue_auto_classify_block(pool) == 1  # exclusion written, no prune, no raise

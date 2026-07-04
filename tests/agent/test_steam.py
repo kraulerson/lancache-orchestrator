@@ -273,3 +273,59 @@ def test_prefilled_apps_lists_distinct_app_ids(tmp_path):
     resp = client.get("/v1/steam/prefilled-apps")
     assert resp.status_code == 200
     assert resp.json() == {"app_ids": [440, 730]}
+
+
+def test_prune_selection_removes_and_backs_up(tmp_path):
+    import json
+
+    (tmp_path / "selectedAppsToPrefill.json").write_text(json.dumps([1, 2, 3]))
+    app = create_agent_app(
+        settings=Settings(orchestrator_token="a" * 32, steam_prefill_config_dir=tmp_path)
+    )
+    client = TestClient(app, headers={"Authorization": "Bearer " + "a" * 32})
+    resp = client.post(
+        "/v1/steam/prune-selection", json={"exclude_app_ids": [2], "restore_app_ids": []}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"removed": 1, "restored": 0, "remaining": 2}
+    assert json.loads((tmp_path / "selectedAppsToPrefill.json").read_text()) == [1, 3]
+    # the ORIGINAL curated list is preserved in the .bak sidecar
+    assert json.loads((tmp_path / "selectedAppsToPrefill.json.bak").read_text()) == [1, 2, 3]
+
+
+def test_prune_selection_restore_readds(tmp_path):
+    import json
+
+    (tmp_path / "selectedAppsToPrefill.json").write_text(json.dumps([1]))
+    app = create_agent_app(
+        settings=Settings(orchestrator_token="a" * 32, steam_prefill_config_dir=tmp_path)
+    )
+    client = TestClient(app, headers={"Authorization": "Bearer " + "a" * 32})
+    resp = client.post(
+        "/v1/steam/prune-selection", json={"exclude_app_ids": [], "restore_app_ids": [5]}
+    )
+    assert resp.json()["restored"] == 1
+    assert json.loads((tmp_path / "selectedAppsToPrefill.json").read_text()) == [1, 5]
+
+
+def test_prune_selection_noop_no_backup(tmp_path):
+    import json
+
+    (tmp_path / "selectedAppsToPrefill.json").write_text(json.dumps([1, 2]))
+    app = create_agent_app(
+        settings=Settings(orchestrator_token="a" * 32, steam_prefill_config_dir=tmp_path)
+    )
+    client = TestClient(app, headers={"Authorization": "Bearer " + "a" * 32})
+    resp = client.post("/v1/steam/prune-selection", json={"exclude_app_ids": [9]})
+    assert resp.json()["removed"] == 0
+    assert not (tmp_path / "selectedAppsToPrefill.json.bak").exists()
+
+
+def test_prune_selection_missing_file(tmp_path):
+    app = create_agent_app(
+        settings=Settings(orchestrator_token="a" * 32, steam_prefill_config_dir=tmp_path)
+    )
+    client = TestClient(app, headers={"Authorization": "Bearer " + "a" * 32})
+    resp = client.post("/v1/steam/prune-selection", json={"exclude_app_ids": [1]})
+    assert resp.status_code == 200
+    assert resp.json()["removed"] == 0

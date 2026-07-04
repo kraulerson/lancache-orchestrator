@@ -33,6 +33,7 @@ from orchestrator.scheduler.jobs import (
 if TYPE_CHECKING:
     from apscheduler.job import Job
 
+    from orchestrator.clients.agent_client import AgentClient
     from orchestrator.db.pool import Pool
 
 _log = structlog.get_logger(__name__)
@@ -69,8 +70,10 @@ class SchedulerManager:
         auto_classify_block_enabled: bool = True,
         fetch_manifests_enabled: bool = True,
         fetch_manifests_cron: str = "0 5 * * 1",
+        agent_client: AgentClient | None = None,
     ) -> None:
         self._pool = pool
+        self._agent_client = agent_client
         self._enabled = enabled
         self._library_sync_interval_sec = library_sync_interval_sec
         self._validation_sweep_enabled = validation_sweep_enabled
@@ -164,7 +167,7 @@ class SchedulerManager:
                 scheduler.add_job(
                     enqueue_auto_classify_block,
                     trigger=IntervalTrigger(seconds=self._library_sync_interval_sec),
-                    args=(self._pool,),
+                    args=(self._pool, self._agent_client),
                     id=AUTO_CLASSIFY_BLOCK_JOB_ID,
                     name="Auto-exclude non-games from prefill (post-download)",
                     replace_existing=True,

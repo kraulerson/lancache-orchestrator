@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from orchestrator.agent.manifest_archive import sync_manifests_to_archive
 from orchestrator.agent.manifest_locator import list_prefilled_app_ids, locate_manifest_bins
 from orchestrator.agent.manifest_parser import parse_chunk_shas, parse_shas
+from orchestrator.platform.steam.selection_file import reconcile_selection
 from orchestrator.validator.cache_key import (
     cache_key,
     cache_path,
@@ -158,6 +160,44 @@ async def downloaded_state(request: Request) -> dict[str, list[int]]:
 async def auth_status(request: Request) -> dict[str, Any]:
     st = request.app.state.prefill_driver.auth_status()
     return {"ok": st.ok, "reason": st.reason}
+
+
+class PruneSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    exclude_app_ids: list[int] = Field(default_factory=list)
+    restore_app_ids: list[int] = Field(default_factory=list)
+
+
+@router.post("/v1/steam/prune-selection")
+async def prune_selection(body: PruneSelectionRequest, request: Request) -> dict[str, Any]:
+    """Reconcile SteamPrefill's selectedAppsToPrefill.json (Piece 1): remove
+    ``exclude_app_ids`` (classifier non-games) and ensure ``restore_app_ids``
+    (operator 'allow') are present, so the host SteamPrefill cron stops caching
+    the non-games. The original curated list is preserved once in a `.bak`
+    sidecar; a no-op change writes nothing. Idempotent."""
+    s = request.app.state.settings
+    path = Path(s.steam_prefill_config_dir) / "selectedAppsToPrefill.json"
+    if not path.exists():
+        return {"removed": 0, "restored": 0, "remaining": 0, "note": "no selection file"}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"removed": 0, "restored": 0, "remaining": 0, "note": "unreadable"}
+    current = data if isinstance(data, list) else []
+    new, removed, restored = reconcile_selection(
+        current, exclude_ids=body.exclude_app_ids, restore_ids=body.restore_app_ids
+    )
+    if removed or restored:
+        try:
+            bak = path.parent / "selectedAppsToPrefill.json.bak"
+            if not bak.exists():  # preserve the ORIGINAL curated list, once
+                bak.write_text(path.read_text())
+            path.write_text(json.dumps(new))
+        except OSError as e:
+            _log.error("agent.prune_selection.write_failed", reason=str(e)[:200])
+            raise HTTPException(status_code=500, detail="selection write failed") from e
+    _log.info("agent.prune_selection.done", removed=removed, restored=restored, remaining=len(new))
+    return {"removed": removed, "restored": restored, "remaining": len(new)}
 
 
 @router.get("/v1/steam/prefilled-apps")

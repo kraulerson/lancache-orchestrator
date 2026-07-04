@@ -19,6 +19,16 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — Steam auto-prune of selectedAppsToPrefill.json (auto-classify actuator, Piece 1) — 2026-07-04
+
+The #225 auto-classify-block wrote `prefill_exclusions` rows but gated the orchestrator's *own* scheduled prefill — which is disabled on prod, where the host **SteamPrefill cron** does the prefilling from `selectedAppsToPrefill.json`. So the exclusions never actually stopped Steam re-downloads. This wires the actuator to the file the host cron reads: after `auto_classify_block` classifies, it calls a new agent endpoint that reconciles `selectedAppsToPrefill.json` — **removes** classifier-excluded non-games and **keeps/re-adds** operator-'allow' games — so the next SteamPrefill run skips them. Download-once-then-block, per the operator decision.
+
+- **`reconcile_selection`** (`platform/steam/selection_file.py`, pure/stdlib): removes exclude ids, ensures restore ids present, restore wins over exclude, drops non-integers.
+- **`POST /v1/steam/prune-selection`** (`agent/routers/steam.py`, bearer): reconciles the file, preserving the ORIGINAL curated list once in a `.bak` sidecar; no-op writes nothing.
+- **`AgentClient.prune_steam_selection`** + `enqueue_auto_classify_block` actuation (best-effort, never-raises) threaded through `SchedulerManager` / `api/main.py` (agent-enabled only).
+- Reversible: `selection allow steam/<id>` → the game is restored to the selection on the next tick. Non-destructive (never deletes cache). Import-isolation preserved; full suite 1464; security audit `docs/security-audits/piece1-steam-prune-selection-security-audit.md` (no findings).
+
+
 ### Added — Auto-classify-block: stop re-prefilling non-games after they download once (#225) — 2026-07-04
 
 The scheduled prefill downloads every owned game, so soundtracks / tools / SDKs / dedicated servers / demos got cached and re-cached on every cycle. New behavior (operator decision 2026-07-04 — "download everything, then classify and block after"): a new scheduler step, on the same interval as the prefill, runs the #229 classifier over owned Steam games that have been prefilled at least once and inserts an `exclude` row into the new `prefill_exclusions` table for flagged non-games. The scheduled prefill gains a `NOT EXISTS(... mode='exclude')` clause, so the next cycle skips them — the non-game is downloaded **once**, then never re-pulled.
