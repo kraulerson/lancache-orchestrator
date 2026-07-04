@@ -19,6 +19,13 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Epic scheduled_prefill loops (go-live fix): key off validation status, not version-diff — 2026-07-04
+
+Go-live discovery: Epic games have **no version data** (the Epic library API returns no `buildVersion`, so `current_version` is always NULL), and the Epic prefill handler sets `cached_version = current_version` (NULL). Piece 2's `enqueue_scheduled_prefill` used a version-diff (`cached_version IS NULL OR cached_version <> current_version`), which is always true for Epic and can never be cleared — enabling the Epic scheduled prefill would have re-enqueued the **entire ~532-game non-excluded Epic library every 6h forever** (an infinite loop over the steal-bound agent), not a one-time wave.
+
+- **Changed:** the Epic-scoped `enqueue_scheduled_prefill` now enqueues owned Epic games where `status <> 'up_to_date'` (not validated as cached) — bounding it to the ~19 genuinely-uncached games today. A prefill's enqueued validate flips status to `up_to_date`, removing the game from the set; the nightly disk-stat sweep re-validates so eviction/drift re-triggers. New Epic purchases (status `unknown`) are still picked up.
+- Unblocks the Epic cutover (enable `ORCH_SCHEDULED_PREFILL_ENABLED=true` + retire the host EpicPrefill cron). Security audit `docs/security-audits/epic-prefill-status-based-security-audit.md` (no findings). Caught before the cutover was enabled — no production impact.
+
 ### Added — Manual-download folder listing endpoint (#222, agent + orch) — 2026-07-04
 
 Games downloaded by hand (GOG / Humble / Itch / Amazon — launchers with no prefill automation) live in per-launcher folders on the lancache host (`/lancache/lancache/cache/GOG/<game>`, …). This exposes that listing so a coverage checker can diff the owned library against what was actually downloaded.
