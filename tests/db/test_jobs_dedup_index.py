@@ -211,3 +211,45 @@ class TestManifestFetchInflightUniqueIndex:
         await pool.execute_write(_MANIFEST, (g1, "queued"))
         n = await pool.execute_write(_MANIFEST + " ON CONFLICT DO NOTHING", (g2, "queued"))
         assert n == 1
+
+
+_PURGE = (
+    "INSERT INTO jobs (kind, game_id, platform, state, source) "
+    "VALUES ('purge', ?, 'steam', ?, 'api')"
+)
+
+
+class TestPurgeInflightUniqueIndex:
+    """F18: migration 0014 — at most one queued/running `purge` per game, so the
+    API's ON CONFLICT DO NOTHING dedups concurrent purge triggers."""
+
+    async def test_raw_duplicate_insert_raises_integrity_error(self, pool):
+        gid = await _make_game(pool)
+        await pool.execute_write(_PURGE, (gid, "queued"))
+        with pytest.raises(IntegrityViolationError):
+            await pool.execute_write(_PURGE, (gid, "queued"))
+
+    async def test_on_conflict_second_inflight_insert_is_noop(self, pool):
+        gid = await _make_game(pool)
+        n1 = await pool.execute_write(_PURGE + " ON CONFLICT DO NOTHING", (gid, "queued"))
+        n2 = await pool.execute_write(_PURGE + " ON CONFLICT DO NOTHING", (gid, "running"))
+        assert n1 == 1
+        assert n2 == 0
+
+    async def test_different_games_not_blocked(self, pool):
+        g1 = await _make_game(pool, app_id="1")
+        g2 = await _make_game(pool, app_id="2")
+        await pool.execute_write(_PURGE, (g1, "queued"))
+        n = await pool.execute_write(_PURGE + " ON CONFLICT DO NOTHING", (g2, "queued"))
+        assert n == 1
+
+    async def test_terminal_states_not_blocked(self, pool):
+        gid = await _make_game(pool)
+        await pool.execute_write(
+            "INSERT INTO jobs (kind, game_id, platform, state, source, started_at, finished_at) "
+            "VALUES ('purge', ?, 'steam', 'succeeded', 'api', "
+            "'2026-07-05 09:00:00', '2026-07-05 09:05:00')",
+            (gid,),
+        )
+        n = await pool.execute_write(_PURGE + " ON CONFLICT DO NOTHING", (gid, "queued"))
+        assert n == 1

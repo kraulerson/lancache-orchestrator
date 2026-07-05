@@ -207,6 +207,36 @@ class AgentClient:
         result: dict[str, Any] = resp.json()
         return result
 
+    async def steam_purge(self, app_id: int) -> dict[str, Any]:
+        # Like steam_validate, a large game unlinks many cache files over NFS and
+        # can exceed the default 30s timeout — use a generous per-call timeout so
+        # purge doesn't AgentError on big apps.
+        resp = await self._request(
+            "POST",
+            "/v1/steam/purge",
+            json={"app_id": app_id},
+            timeout=httpx.Timeout(300.0, connect=10.0),
+        )
+        result: dict[str, Any] = resp.json()
+        return result
+
+    async def epic_purge(
+        self, *, app_id: int, version: str, cdn_base: str, raw_manifest_b64: str
+    ) -> dict[str, Any]:
+        resp = await self._request(
+            "POST",
+            "/v1/epic/purge",
+            json={
+                "app_id": app_id,
+                "version": version,
+                "cdn_base": cdn_base,
+                "raw_manifest_b64": raw_manifest_b64,
+            },
+            timeout=httpx.Timeout(300.0, connect=10.0),
+        )
+        result: dict[str, Any] = resp.json()
+        return result
+
     async def prefilled_apps(self) -> list[int]:
         resp = await self._request("GET", "/v1/steam/prefilled-apps")
         result: list[int] = resp.json()["app_ids"]

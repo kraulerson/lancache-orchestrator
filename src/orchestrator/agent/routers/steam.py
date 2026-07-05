@@ -11,6 +11,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.agent._paths import under_cache_root
 from orchestrator.agent.manifest_archive import sync_manifests_to_archive
 from orchestrator.agent.manifest_locator import list_prefilled_app_ids, locate_manifest_bins
 from orchestrator.agent.manifest_parser import parse_chunk_shas, parse_shas
@@ -21,7 +22,7 @@ from orchestrator.validator.cache_key import (
     slice_range_zero,
     steam_chunk_uri,
 )
-from orchestrator.validator.disk_stat import validate_chunks_scoped
+from orchestrator.validator.disk_stat import purge_chunks, validate_chunks_scoped
 
 _log = structlog.get_logger(__name__)
 
@@ -227,35 +228,42 @@ def _classify(total: int, cached: int) -> str:
     return "partial"
 
 
-@router.post("/v1/steam/validate")
-async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[str, Any]:
-    settings = request.app.state.settings
-    cache_root = Path(settings.lancache_nginx_cache_path)
-    roots = [Path(settings.steam_manifest_cache_dir), Path(settings.steam_manifest_archive_dir)]
-
-    # Pin manifest selection to the gid SteamPrefill actually prefilled for this
-    # app (its own downloaded record), so validate measures the CURRENT version
-    # rather than the newest manifest on disk — which can be a stale older build
-    # and is the cause of false-Partial badges. Per-depot fallback to newest-by-
-    # mtime when there's no record; tolerant of a missing/unreadable driver/file.
+def _prefilled_gids(request: Request, app_id: int) -> set[str]:
+    """The gids SteamPrefill actually downloaded for this app (its own record),
+    used to pin manifest selection to the CURRENT prefilled version rather than
+    the newest manifest on disk — a stale newer build is the false-Partial root
+    cause. Best-effort: tolerant of a missing/unreadable driver or file (returns
+    an empty set → newest-by-mtime fallback)."""
     try:
         state = request.app.state.prefill_driver.downloaded_state()
-        prefilled_gids = {str(g) for g in state.get(body.app_id, [])}
+        return {str(g) for g in state.get(app_id, [])}
     except Exception:
-        prefilled_gids = set()
+        return set()
 
-    bins = locate_manifest_bins(
-        body.app_id, cache_roots=roots, prefilled_gids=prefilled_gids or None
-    )
+
+def _steam_chunk_paths(
+    settings: Any, app_id: int, prefilled_gids: set[str]
+) -> tuple[dict[int, list[Path]], list[str], int, bool]:
+    """Locate the app's manifest .bin/.shas files, parse chunk SHAs, and derive
+    the nginx cache path for each unique (depot, sha). Shared by
+    ``/v1/steam/validate`` and ``/v1/steam/purge`` (DRY — the single source of the
+    manifest→cache-path enumeration). Returns
+    ``(depot_paths, versions, parsed_ok, bins_found)``:
+
+      * ``bins_found`` False → no manifest in cache for this app.
+      * ``parsed_ok == 0`` with ``bins_found`` True → manifests present but none
+        parseable.
+
+    A corrupt/foreign manifest (non-numeric depot field, unreadable file) is
+    skipped, never fatal (COR-1). ``.shas`` is the fetcher's sidecar (one SHA per
+    line); ``.bin`` is SteamPrefill's protobuf — same
+    ``{app}_{app}_{depot}_{gid}`` filename layout.
+    """
+    cache_root = Path(settings.lancache_nginx_cache_path)
+    roots = [Path(settings.steam_manifest_cache_dir), Path(settings.steam_manifest_archive_dir)]
+    bins = locate_manifest_bins(app_id, cache_roots=roots, prefilled_gids=prefilled_gids or None)
     if not bins:
-        return {
-            "chunks_total": 0,
-            "chunks_cached": 0,
-            "chunks_missing": 0,
-            "outcome": "error",
-            "versions": "",
-            "error": "no_manifest_in_cache",
-        }
+        return {}, [], 0, False
 
     slice_range = slice_range_zero(settings.cache_slice_size_bytes)
     identifier = settings.steam_cache_identifier
@@ -266,11 +274,6 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
     versions: list[str] = []
     parsed_ok = 0
     for binpath in bins:
-        # filename is {app}_{app}_{depot}_{gid}.{bin,shas}. A corrupt/foreign
-        # manifest (a non-numeric depot field, a deleted/unreadable file) must
-        # NOT 500 the whole request — skip it and keep validating the rest
-        # (COR-1). .shas is the fetcher's sidecar (one SHA per line); .bin is
-        # SteamPrefill's protobuf — same {app}_{app}_{depot}_{gid} field layout.
         try:
             parts = binpath.stem.split("_")
             depot_id = int(parts[2])
@@ -297,7 +300,25 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
             uri = steam_chunk_uri(depot_id, sha)
             h = cache_key(identifier, uri, slice_range)
             dpaths.append(cache_path(cache_root, h, levels))
+    return depot_paths, versions, parsed_ok, True
 
+
+@router.post("/v1/steam/validate")
+async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[str, Any]:
+    settings = request.app.state.settings
+    prefilled_gids = _prefilled_gids(request, body.app_id)
+    depot_paths, versions, parsed_ok, bins_found = _steam_chunk_paths(
+        settings, body.app_id, prefilled_gids
+    )
+    if not bins_found:
+        return {
+            "chunks_total": 0,
+            "chunks_cached": 0,
+            "chunks_missing": 0,
+            "outcome": "error",
+            "versions": "",
+            "error": "no_manifest_in_cache",
+        }
     if parsed_ok == 0:
         # Manifests existed but none could be parsed — a genuine error, not a
         # spurious 'cached' (which _classify would return for an empty path set).
@@ -369,3 +390,38 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
         "versions": ",".join(sorted(versions)),
         "error": None,
     }
+
+
+class SteamPurgeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    app_id: int = Field(..., ge=0)
+
+
+@router.post("/v1/steam/purge")
+async def steam_purge(body: SteamPurgeRequest, request: Request) -> dict[str, int]:
+    """Delete a Steam game's cached chunk files (F18). Enumerates the SAME chunk
+    paths as ``/v1/steam/validate`` (via ``_steam_chunk_paths``, pinned to the
+    prefilled gid), applies the cache-root path-safety guard, then unlinks each.
+
+    Idempotent: a never-cached app (no manifest in cache, or manifests present but
+    no files on disk) returns ``{deleted: 0}`` — never an error. The control plane
+    sets ``status='validation_failed'`` afterward so F5/F6 re-prefills a fresh copy
+    (ADR-0015 — purge is reversible)."""
+    settings = request.app.state.settings
+    prefilled_gids = _prefilled_gids(request, body.app_id)
+    depot_paths, _versions, _parsed_ok, _bins_found = _steam_chunk_paths(
+        settings, body.app_id, prefilled_gids
+    )
+    # Purge the whole game: every enumerated chunk across all depots (no depot-
+    # scoping — purge_chunks no-ops on paths that aren't present).
+    paths = [p for dpaths in depot_paths.values() for p in dpaths]
+    safe = under_cache_root(Path(settings.lancache_nginx_cache_path), paths)
+    deleted, failed, freed = await purge_chunks(safe)
+    _log.info(
+        "agent.steam_purge",
+        app_id=body.app_id,
+        deleted=deleted,
+        failed=failed,
+        bytes_freed=freed,
+    )
+    return {"deleted": deleted, "failed": failed, "bytes_freed": freed}

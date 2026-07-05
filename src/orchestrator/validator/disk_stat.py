@@ -138,6 +138,58 @@ async def validate_chunks(paths: list[Path], *, batch_size: int = 256) -> tuple[
     return cached, len(paths) - cached
 
 
+def _purge_batch(paths: list[Path]) -> tuple[int, int, int]:
+    """Unlink each present path. Returns (deleted, failed, bytes_freed). Runs in a thread.
+
+    A missing path is a silent no-op (idempotent — re-purge is safe). Bytes are
+    counted only for a path that is actually unlinked, so a present-but-undeletable
+    file (e.g. a directory, EACCES) counts as ``failed`` and contributes nothing to
+    ``bytes_freed``. Never raises — a best-effort failure is expected because the
+    re-prefill triggered by the purge is the true safety net (ADR-0015).
+    """
+    deleted = 0
+    failed = 0
+    freed = 0
+    for p in paths:
+        try:
+            st = p.stat()
+        except OSError:
+            continue  # not present → idempotent no-op, not a failure
+        try:
+            p.unlink()
+        except OSError:
+            failed += 1  # present but couldn't remove — best-effort, don't raise
+            continue
+        deleted += 1
+        freed += st.st_size  # only count bytes we actually reclaimed
+    return deleted, failed, freed
+
+
+async def purge_chunks(paths: list[Path], *, batch_size: int = 256) -> tuple[int, int, int]:
+    """Delete cache-chunk files. Return (deleted, failed, bytes_freed).
+
+    Mirrors ``validate_chunks``' offload: unlinks run on the same dedicated,
+    bounded cache-stat executor (#123.4) in batches, so a large purge never blocks
+    the event loop and a hung cache mount can't starve the shared default pool.
+    Callers MUST path-validate the list first (agent ``_under_cache_root`` guard);
+    this primitive trusts its input and only unlinks what it is given.
+    """
+    loop = asyncio.get_running_loop()
+    executor = _get_cache_stat_executor()
+    deleted = 0
+    failed = 0
+    freed = 0
+    for i in range(0, len(paths), batch_size):
+        batch = paths[i : i + batch_size]
+        b_deleted, b_failed, b_freed = await loop.run_in_executor(executor, _purge_batch, batch)
+        deleted += b_deleted
+        failed += b_failed
+        freed += b_freed
+    if failed:
+        _log.warning("purge.unlink_errors", error_count=failed, total=len(paths))
+    return deleted, failed, freed
+
+
 async def validate_chunks_scoped(paths: list[Path], *, batch_size: int = 256) -> tuple[int, int]:
     """Return (cached, present) for a chunk list.
 

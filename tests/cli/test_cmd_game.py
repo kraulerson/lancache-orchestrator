@@ -77,6 +77,21 @@ def test_game_validate_triggers(mock):
     assert r.exit_code == 0 and "51" in r.output
 
 
+def test_game_purge_triggers(mock):
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.method == "POST"
+        assert req.url.path == "/api/v1/games/5/purge"
+        return httpx.Response(202, json={"job_id": 55})
+
+    r = mock(["game", "purge", "5"], handler)
+    assert r.exit_code == 0 and "55" in r.output
+
+
+def test_game_purge_rejects_non_positive_id(cli_invoke):
+    r = cli_invoke(["game", "purge", "0"])
+    assert r.exit_code != 0
+
+
 def test_list_invalid_status_rejected_with_choices(cli_invoke):
     """Invalid --status must be rejected client-side, not silently empty (S11-E-04)."""
     r = cli_invoke(["game", "list", "--status", "uptodate"])  # valid is 'up_to_date'
