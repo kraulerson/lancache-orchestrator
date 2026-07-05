@@ -89,6 +89,7 @@ class JobResponse(BaseModel):
         "sweep",
         "manifest_fetch",
         "fetch_manifests",
+        "purge",
     ]
     game_id: int | None
     platform: Literal["steam", "epic"] | None
