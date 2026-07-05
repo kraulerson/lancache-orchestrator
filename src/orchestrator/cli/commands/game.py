@@ -115,6 +115,18 @@ def game_validate(ctx: click.Context, game_id: int) -> None:
     _trigger(ctx, game_id, "validate", "validate")
 
 
+@game.command("purge")
+@click.argument("game_id", type=int, callback=_positive_int)
+@click.pass_context
+@handles_api_errors
+def game_purge(ctx: click.Context, game_id: int) -> None:
+    """Delete a game's cached chunks, then flag it for re-prefill (F18).
+
+    Reversible: the game is re-downloaded from the CDN on the next prefill.
+    """
+    _trigger(ctx, game_id, "purge", "purge")
+
+
 def _resolve_app(ctx: click.Context, game_id: int) -> tuple[OrchClient, str, str]:
     """Return (client, platform, app_id) for a known game id, or raise ApiError.
 
