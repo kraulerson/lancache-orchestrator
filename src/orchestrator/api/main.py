@@ -39,6 +39,7 @@ from orchestrator.api.routers.manual_downloads import router as manual_downloads
 from orchestrator.api.routers.platforms import router as platforms_router
 from orchestrator.api.routers.prefill_exclusions import router as prefill_exclusions_router
 from orchestrator.api.routers.prefill_trigger import router as prefill_trigger_router
+from orchestrator.api.routers.purge_trigger import router as purge_trigger_router
 from orchestrator.api.routers.selection import router as selection_router
 from orchestrator.api.routers.status import router as status_router
 from orchestrator.api.routers.sweep_trigger import router as sweep_trigger_router
@@ -442,6 +443,7 @@ def create_app() -> FastAPI:
     app.include_router(sweep_trigger_router)
     app.include_router(fetch_manifests_trigger_router)
     app.include_router(prefill_trigger_router)
+    app.include_router(purge_trigger_router)
     app.include_router(sync_router)
     app.include_router(epic_sync_router)
     app.include_router(epic_auth_router)
