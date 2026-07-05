@@ -435,3 +435,54 @@ async def test_prune_steam_selection_posts_and_returns():
     client = _client(handler)
     res = await client.prune_steam_selection([2, 3], [5])
     assert res == {"removed": 2, "restored": 1, "remaining": 10}
+
+
+# --- F18 purge -------------------------------------------------------------
+
+
+async def test_steam_purge_single_call():
+    def handler(request):
+        assert request.method == "POST"
+        assert request.url.path == "/v1/steam/purge"
+        import json
+
+        assert json.loads(request.content) == {"app_id": 440}
+        return httpx.Response(200, json={"deleted": 3, "failed": 0, "bytes_freed": 999})
+
+    client = _client(handler)
+    res = await client.steam_purge(440)
+    assert res == {"deleted": 3, "failed": 0, "bytes_freed": 999}
+
+
+async def test_epic_purge_single_call():
+    def handler(request):
+        assert request.method == "POST"
+        assert request.url.path == "/v1/epic/purge"
+        import json
+
+        payload = json.loads(request.content)
+        assert payload == {
+            "app_id": 1449820,
+            "version": "21.0",
+            "cdn_base": "https://epicgames-download.akamaized.net",
+            "raw_manifest_b64": "dGVzdA==",
+        }
+        return httpx.Response(200, json={"deleted": 120, "failed": 1, "bytes_freed": 42})
+
+    client = _client(handler)
+    res = await client.epic_purge(
+        app_id=1449820,
+        version="21.0",
+        cdn_base="https://epicgames-download.akamaized.net",
+        raw_manifest_b64="dGVzdA==",
+    )
+    assert res == {"deleted": 120, "failed": 1, "bytes_freed": 42}
+
+
+async def test_steam_purge_non_2xx_raises():
+    def handler(request):
+        return httpx.Response(500, text="boom")
+
+    client = _client(handler)
+    with pytest.raises(AgentError):
+        await client.steam_purge(440)
