@@ -8,7 +8,12 @@ import pytest
 
 from orchestrator.core.settings import Settings
 from orchestrator.jobs.worker import Deps
-from orchestrator.validator.disk_stat import validate_chunks, validate_chunks_any, validate_game
+from orchestrator.validator.disk_stat import (
+    purge_chunks,
+    validate_chunks,
+    validate_chunks_any,
+    validate_game,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -36,6 +41,37 @@ async def test_batch_boundary(tmp_path):
         paths.append(p)
     cached, missing = await validate_chunks(paths, batch_size=256)
     assert (cached, missing) == (300, 0)
+
+
+# --- purge_chunks ------------------------------------------------------
+
+
+async def test_purge_chunks_deletes_present_counts_bytes(tmp_path):
+    a = tmp_path / "a"
+    a.write_bytes(b"12345")  # 5 bytes
+    b = tmp_path / "b"
+    b.write_bytes(b"67")  # 2 bytes
+    missing = tmp_path / "gone"  # never existed
+    deleted, failed, freed = await purge_chunks([a, b, missing])
+    assert (deleted, failed, freed) == (2, 0, 7)  # missing is a no-op, not a failure
+    assert not a.exists()
+    assert not b.exists()
+
+
+async def test_purge_chunks_empty():
+    assert await purge_chunks([]) == (0, 0, 0)
+
+
+async def test_purge_chunks_unlink_failure_counts_failed(tmp_path):
+    # A directory: stat() succeeds but unlink() raises OSError → counted as
+    # 'failed' (never raises), the entry survives, and its bytes are NOT freed.
+    d = tmp_path / "adir"
+    d.mkdir()
+    deleted, failed, freed = await purge_chunks([d])
+    assert deleted == 0
+    assert failed == 1
+    assert freed == 0
+    assert d.exists()
 
 
 async def test_empty_path_list(tmp_path):
