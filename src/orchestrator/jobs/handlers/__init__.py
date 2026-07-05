@@ -35,12 +35,14 @@ def _register_builtin_handlers() -> None:
     from orchestrator.jobs.handlers.fetch_manifests import fetch_manifests_handler
     from orchestrator.jobs.handlers.library_sync import library_sync_handler
     from orchestrator.jobs.handlers.prefill import prefill_handler
+    from orchestrator.jobs.handlers.purge import purge_handler
     from orchestrator.jobs.handlers.sweep import sweep_handler
     from orchestrator.jobs.handlers.validate import validate_handler
 
     register("fetch_manifests", fetch_manifests_handler)
     register("library_sync", library_sync_handler)
     register("prefill", prefill_handler)
+    register("purge", purge_handler)
     register("sweep", sweep_handler)
     register("validate", validate_handler)
 
