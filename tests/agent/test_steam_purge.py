@@ -108,3 +108,55 @@ def test_steam_purge_bad_app_id(tmp_path):
     client, _, _ = _seed(tmp_path)
     r = client.post("/v1/steam/purge", json={"app_id": -5})
     assert r.status_code == 422
+
+
+def test_steam_purge_skips_shared_redist_depot(tmp_path):
+    """Purge deletes the game's OWN depot chunks but NEVER the shared Steamworks
+    Common Redistributables depot (228990) — those chunks are shared with other
+    games (2026-07-04 fix). Both depots are cached; only the own depot is deleted."""
+    redist = 228990
+    mcache = tmp_path / "spcache"
+    (mcache / "v1").mkdir(parents=True)
+    (mcache / "v1" / f"{APP}_{APP}_{DEPOT}_{GID}.shas").write_text("\n".join(CHUNKS) + "\n")
+    redist_chunks = [f"{i:040x}" for i in range(10, 13)]  # distinct from CHUNKS
+    (mcache / "v1" / f"{APP}_{APP}_{redist}_{GID}.shas").write_text("\n".join(redist_chunks) + "\n")
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "successfullyDownloadedDepots.json").write_text("{}")
+
+    cache_root = tmp_path / "lancache"
+    slice_range = slice_range_zero(SLICE)
+    own_files = []
+    for sha in CHUNKS:
+        p = cache_path(
+            cache_root, cache_key(IDENT, steam_chunk_uri(DEPOT, sha), slice_range), LEVELS
+        )
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(CHUNK_BODY)
+        own_files.append(p)
+    redist_files = []
+    for sha in redist_chunks:
+        p = cache_path(
+            cache_root, cache_key(IDENT, steam_chunk_uri(redist, sha), slice_range), LEVELS
+        )
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(CHUNK_BODY)
+        redist_files.append(p)
+
+    settings = Settings(
+        orchestrator_token=TOKEN,
+        lancache_nginx_cache_path=cache_root,
+        cache_levels=LEVELS,
+        steam_cache_identifier=IDENT,
+        cache_slice_size_bytes=SLICE,
+        steam_manifest_cache_dir=mcache,
+        steam_prefill_config_dir=cfg,
+    )
+    client = TestClient(create_agent_app(settings=settings))
+    client.headers.update({"Authorization": f"Bearer {TOKEN}"})
+
+    body = client.post("/v1/steam/purge", json={"app_id": APP}).json()
+
+    assert body["deleted"] == len(CHUNKS)  # only the game's own depot
+    assert all(not p.exists() for p in own_files)
+    assert all(p.exists() for p in redist_files)  # shared redist preserved

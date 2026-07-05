@@ -19,6 +19,13 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Steam validate/purge exclude shared Steamworks Common Redistributables depots (false-partial fix) — 2026-07-05
+
+Go-live investigation: ~50 fully-cached Steam games flipped `cached → partial` on 2026-07-04 with **no game update**. Root cause: the DepotDownloader manifest fetcher (PR #213) started writing `.shas` sidecars that include the **shared Steamworks Common Redistributables depots** (app 228980 — VC++/DirectX runtime, depots 228981–228990) into each game's manifest. Those depots are shared across games and only ever *partially* cached, so the depot-scoping "drop depots with zero files present" rule couldn't exclude them (present > 0) — they dragged each game's percentage below 100%. A manifest containing depot 228990 (in 40 of the affected games) had never once validated as cached. The games' own content was fully cached the whole time.
+
+- **Changed:** the shared steam validate/purge enumeration (`agent/routers/steam.py::_steam_chunk_paths`) now skips depots in the new `steam_shared_redist_depots` setting (default = the app-228980 set `228981..228990`, env-overridable via `ORCH_STEAM_SHARED_REDIST_DEPOTS`). Cache status now reflects a game's OWN content. Purge also skips them — it must never delete chunks other games share.
+- Reversible + immediate: the next validation sweep re-marks the affected games `cached` with no re-fetch or WAN cost. A follow-up will fix the fetcher to stop writing redist `.shas` at the source.
+
 ### Added — F18 operator-driven cache purge (#37) — 2026-07-05
 
 A reversible, operator-driven per-game cache purge: delete a game's cached chunk files, then let the existing validate/re-prefill path re-download a clean copy. Covers the failure modes the disk-stat validator can't (silent bit-corruption, crash-orphan partials, operator "wipe and re-fetch") without a proactive full-SHA-verification scheduler. Per ADR-0015 (`docs/ADR documentation/0015-operator-driven-cache-purge.md`, Accepted). Mirrors the validate flow: control enqueues a `purge` job → the data-plane agent (which alone holds the cache filesystem) enumerates the game's chunk paths exactly as validate does and `unlink`s the present ones → control sets `status='validation_failed'` so F5/F6 re-prefills.

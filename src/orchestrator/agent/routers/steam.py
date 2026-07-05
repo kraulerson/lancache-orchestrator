@@ -269,9 +269,11 @@ def _steam_chunk_paths(
     identifier = settings.steam_cache_identifier
     levels = settings.cache_levels
 
+    shared_redist = settings.steam_shared_redist_depots
     seen: set[tuple[int, str]] = set()
     depot_paths: dict[int, list[Path]] = {}
     versions: list[str] = []
+    skipped_redist: set[int] = set()
     parsed_ok = 0
     for binpath in bins:
         try:
@@ -290,6 +292,14 @@ def _steam_chunk_paths(
             )
             continue
         parsed_ok += 1
+        if depot_id in shared_redist:
+            # Shared Steamworks Common Redistributables (app 228980) — runtime
+            # content shared across many games, only ever partially cached. Skip it
+            # so it doesn't drag a fully-cached game to 'partial', and so purge
+            # never deletes chunks other games depend on. The manifest still parsed
+            # (parsed_ok counts it) so an all-redist enumeration isn't a false error.
+            skipped_redist.add(depot_id)
+            continue
         versions.append(f"{depot_id}:{gid}")
         dpaths = depot_paths.setdefault(depot_id, [])
         for sha in chunk_shas:
@@ -300,6 +310,12 @@ def _steam_chunk_paths(
             uri = steam_chunk_uri(depot_id, sha)
             h = cache_key(identifier, uri, slice_range)
             dpaths.append(cache_path(cache_root, h, levels))
+    if skipped_redist:
+        _log.info(
+            "steam_validate.shared_redist_skipped",
+            app_id=app_id,
+            depots=sorted(skipped_redist),
+        )
     return depot_paths, versions, parsed_ok, True
 
 

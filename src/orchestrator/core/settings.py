@@ -172,6 +172,18 @@ class Settings(BaseSettings):
     epic_cache_identifiers: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["epicgames", "egs-cloudfront-chunks.epicgamescdn.com"]
     )
+    # Shared Steamworks Common Redistributables depots (app 228980) — VC++ /
+    # DirectX / etc. runtime redistributables referenced by MANY games via
+    # `depotfromapp`. The manifest fetcher enumerates them per game, but they are
+    # shared runtime content, not a game's own data, and are only ever PARTIALLY
+    # cached — counting them made ~50 fully-cached games read as "partial"
+    # (2026-07-04). steam validate + purge skip these depots so cache status
+    # reflects a game's OWN content (and purge never deletes chunks shared with
+    # other games). Comma-separated env (ORCH_STEAM_SHARED_REDIST_DEPOTS) or a real
+    # list; default = the app-228980 depot set 228981..228990.
+    steam_shared_redist_depots: Annotated[frozenset[int], NoDecode] = Field(
+        default_factory=lambda: frozenset(range(228981, 228991))
+    )
     # Prefill (F5) chunk-download concurrency. Pre-staged generic name; F5
     # uses it as the per-game parallel-chunk cap.
     chunk_concurrency: int = Field(default=32, ge=1, le=256)
@@ -325,6 +337,17 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [s.strip() for s in v.split(",") if s.strip()]
         return v
+
+    @field_validator("steam_shared_redist_depots", mode="before")
+    @classmethod
+    def _parse_shared_redist_depots(cls, v: Any) -> Any:
+        """Accept a comma-separated env string or a real iterable of depot ids;
+        empty/unset falls back to the app-228980 redist depot set."""
+        if v is None or v == "":
+            return frozenset(range(228981, 228991))
+        if isinstance(v, str):
+            return frozenset(int(s.strip()) for s in v.split(",") if s.strip())
+        return frozenset(int(x) for x in v)
 
     @field_validator("allowed_source_ips", mode="after")
     @classmethod

@@ -314,6 +314,20 @@ def test_validate_all_depots_unprefilled_is_missing(tmp_path):
     assert body["outcome"] == "missing"
 
 
+def test_validate_excludes_shared_redist_depot(tmp_path):
+    """A game with its OWN depot fully cached + a shared Steamworks Common
+    Redistributables depot (228990) only partially cached must validate as CACHED —
+    the shared redist is runtime content, not the game's own data (2026-07-04
+    false-partial fix). Before this fix the partial redist depot (present>0, so not
+    dropped by the never-prefilled rule) dragged the game to 'partial'."""
+    client = _build_multidepot(tmp_path, depot_cached={800441: (10, 10), 228990: (8, 4)})
+    body = client.post("/v1/steam/validate", json={"app_id": MD_APP}).json()
+    assert body["chunks_total"] == 10  # only the game's own depot counts
+    assert body["chunks_cached"] == 10
+    assert body["outcome"] == "cached"
+    assert "228990" not in body["versions"]  # redist depot excluded from versions
+
+
 def test_validate_mode000_depot_counted_cached(tmp_path):
     """A depot whose chunk files EXIST on disk but are mode-000 validates as
     CACHED: mode-000 is a transient nginx-over-NFS write-race that self-heals to
