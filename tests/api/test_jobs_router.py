@@ -156,6 +156,24 @@ class TestJobsFilterEnums:
         kinds = {j["kind"] for j in r.json()["jobs"]}
         assert kinds.issubset({"prefill", "validate"})
 
+    async def test_purge_kind_is_listed(self, client, populated_pool):
+        """F18: a 'purge' job must serialize into JobResponse (kind Literal includes
+        'purge'), not be dropped as an out-of-allowlist row — else the Game_shelf
+        purge poll (?kind=purge) never sees the job and its spinner runs to the
+        ceiling."""
+        await populated_pool.execute_write(
+            "INSERT INTO jobs (kind, platform, state, source) "
+            "VALUES ('purge', 'steam', 'succeeded', 'api')"
+        )
+        r = await client.get(
+            "/api/v1/jobs?kind=purge&limit=500",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 200
+        jobs = r.json()["jobs"]
+        assert len(jobs) >= 1
+        assert all(j["kind"] == "purge" for j in jobs)
+
     async def test_state_eq_running(self, client, jobs_pool_seeded):
         r = await client.get(
             "/api/v1/jobs?state=running&limit=500",
