@@ -205,6 +205,14 @@ class _FakeFetcher:
         return self._result
 
 
+def test_manifest_fetcher_built_with_cache_dir():
+    """create_agent_app wires the live manifest cache dir into the fetcher so it can
+    cover prefilled apps missing a .shas (new-purchase durability)."""
+    s = Settings(orchestrator_token="a" * 32)
+    app = create_agent_app(settings=s)
+    assert app.state.manifest_fetcher._manifest_cache_dir == s.steam_manifest_cache_dir
+
+
 def test_fetch_manifests_requires_bearer():
     app = create_agent_app(settings=Settings(orchestrator_token="a" * 32))
     app.state.manifest_fetcher = _FakeFetcher()
