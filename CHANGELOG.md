@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — newly-purchased Steam games stuck at `unknown` (new-purchase auto-coverage) — 2026-07-07
+
+A Steam game bought and cached by the host `SteamPrefill prefill --recently-purchased` cron stayed `status='unknown'` in the orchestrator indefinitely (Game_shelf showed "Unknown"). Root cause: the scheduled *gated* validation sweep enumerated only `up_to_date`/`validation_failed` games, and there is **no scheduled *full* sweep** — so a row inserted at the default `unknown` (library_sync writes title+owned only) was never auto-validated by any cron. (`games.metadata` being NULL was a red herring: the validator reads the on-disk `.bin`/`.shas`, which the host had already written; the legacy depot metadata on older rows is vestigial pre-③ data.)
+
+- **Fixed:** the gated validation sweep (`jobs/handlers/sweep.py::_CANDIDATE_SQL`) now also validates `unknown` **owned** games, so a recent purchase is auto-validated off its already-cached manifest within one 6h cycle (an uncovered `unknown` game returns `outcome='error'`, which validate leaves untouched — non-clobbering).
+- **Changed:** the Steam manifest fetcher (`platform/steam/manifest_fetcher.py`) now also covers apps with a live `.bin` but no durable `.shas` — recent purchases downloaded outside the SteamPrefill selection — bounded to that delta so the first run never triggers a full-library DepotDownloader logon burst (#228). Wired via `manifest_cache_dir=steam_manifest_cache_dir` in `agent/app.py`.
+- **Changed:** the selection reconcile (`scheduler/jobs.py::auto_classify_block`) now re-adds prefilled-but-not-excluded apps to `selectedAppsToPrefill.json`, so a recently-purchased download persists in `SteamPrefill --select-apps` and the durable prefill set (operator deselects, tracked as DB excludes, are still honored). No host-cron edit, no schema change, no 2FA; `games.metadata` untouched.
+
 ### Fixed — Steam validate/purge exclude shared Steamworks Common Redistributables depots (false-partial fix) — 2026-07-05
 
 Go-live investigation: ~50 fully-cached Steam games flipped `cached → partial` on 2026-07-04 with **no game update**. Root cause: the DepotDownloader manifest fetcher (PR #213) started writing `.shas` sidecars that include the **shared Steamworks Common Redistributables depots** (app 228980 — VC++/DirectX runtime, depots 228981–228990) into each game's manifest. Those depots are shared across games and only ever *partially* cached, so the depot-scoping "drop depots with zero files present" rule couldn't exclude them (present > 0) — they dragged each game's percentage below 100%. A manifest containing depot 228990 (in 40 of the affected games) had never once validated as cached. The games' own content was fully cached the whole time.
