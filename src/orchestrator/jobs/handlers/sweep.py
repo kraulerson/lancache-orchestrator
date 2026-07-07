@@ -22,8 +22,15 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+# Includes 'unknown' so a newly-purchased game (inserted at the default 'unknown'
+# by library_sync, then cached by the host SteamPrefill cron) is auto-validated by
+# the scheduled gated sweep — there is no scheduled FULL sweep, so without this an
+# 'unknown' game would never be validated. `owned = 1` bounds the churn; an
+# uncovered 'unknown' game returns outcome='error' which validate leaves untouched.
 _CANDIDATE_SQL = (
-    "SELECT id, status FROM games WHERE status IN ('up_to_date','validation_failed') ORDER BY id"
+    "SELECT id, status FROM games "
+    "WHERE status IN ('unknown','up_to_date','validation_failed') AND owned = 1 "
+    "ORDER BY id"
 )
 
 # `full` mode (validate-all backfill, 2026-06-24): validate EVERY game across

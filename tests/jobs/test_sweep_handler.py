@@ -91,6 +91,34 @@ async def test_sweep_validates_candidate_games_all_platforms(pool, monkeypatch):
     assert sorted(seen) == sorted([g_ok, g_vf, g_epic])
 
 
+async def test_gated_sweep_includes_unknown_owned_game(pool, monkeypatch):
+    """A newly-purchased game is inserted at status='unknown'; the gated sweep must
+    validate it (owned=1) so it flips off 'unknown' — but must NOT sweep an
+    unowned 'unknown' row (owned=0)."""
+    _healthy(monkeypatch)
+    g_unknown = await _seed(pool, status="unknown", app_id="648800")  # owned=1
+    g_ok = await _seed(pool, status="up_to_date", app_id="730")
+    # unowned unknown row — must be skipped (owned guard).
+    await pool.execute_write(
+        "INSERT INTO games (platform, app_id, title, owned, status) "
+        "VALUES ('steam','999','t',0,'unknown')"
+    )
+    g_unowned = (await pool.read_one("SELECT id FROM games WHERE app_id='999'"))["id"]
+
+    seen: list[int] = []
+
+    async def fake_validate_one(pool_, deps_, game_id, settings):
+        seen.append(game_id)
+        from orchestrator.validator.disk_stat import ValidationResult
+
+        return ValidationResult(1, 1, 0, "cached", "100", None)
+
+    monkeypatch.setattr("orchestrator.jobs.handlers.sweep.validate_one_game", fake_validate_one)
+    await sweep_handler(_job(), Deps(pool=pool, agent_client=_Agent()))
+    assert g_unknown in seen and g_ok in seen
+    assert g_unowned not in seen
+
+
 async def test_sweep_isolates_per_game_errors(pool, monkeypatch):
     _healthy(monkeypatch)
     g1 = await _seed(pool, app_id="1")
@@ -236,7 +264,9 @@ async def test_default_payload_keeps_status_gated(pool, monkeypatch):
     job = {"id": 1, "kind": "sweep", "payload": None}
     await sweep_handler(job, Deps(pool=pool, agent_client=_Agent()))
     assert captured["sql"] == sweep_mod._CANDIDATE_SQL
-    assert "status IN ('up_to_date','validation_failed')" in captured["sql"]
+    # Gated (not full) SQL: status-scoped incl. 'unknown' (new-purchase auto-cover), owned-guarded.
+    assert "status IN ('unknown','up_to_date','validation_failed')" in captured["sql"]
+    assert "owned = 1" in captured["sql"]
 
 
 async def test_malformed_payload_falls_back_to_gated(pool, monkeypatch):
