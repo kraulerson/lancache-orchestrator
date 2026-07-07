@@ -346,3 +346,43 @@ def test_fetch_all_bounds_transient_retries_then_counts_failed(tmp_path, monkeyp
     r = f.fetch_all()
     assert r.fetched == 1 and r.failed == 1
     assert attempts[730] == 3  # 1 initial + 2 retries, then given up
+
+
+def test_enumerate_unions_uncovered_cache_apps(tmp_path):
+    """Durability: an app with a live `.bin` but no `.shas` (a --recently-purchased
+    game outside the selection) is enumerated; one already covered by a `.shas` is
+    NOT; selection apps are always included."""
+    steam_cfg = tmp_path / "Config"
+    steam_cfg.mkdir()
+    (steam_cfg / "selectedAppsToPrefill.json").write_text(json.dumps([111]))
+    cache = tmp_path / "cache"
+    (cache / "v1").mkdir(parents=True)
+    archive = tmp_path / "archive"
+    (archive / "v1").mkdir(parents=True)
+    (cache / "v1" / "222_222_2221_gidA.bin").write_bytes(b"x")  # .bin, no .shas -> enumerate
+    (cache / "v1" / "333_333_3331_gidB.bin").write_bytes(b"x")  # .bin + .shas -> skip
+    (archive / "v1" / "333_333_3331_gidB.shas").write_text("")
+    f = DepotDownloaderManifestFetcher(
+        binary=tmp_path / "DepotDownloader",
+        config_dir=tmp_path / "dd-config",
+        steam_config_dir=steam_cfg,
+        archive_dir=archive,
+        delay_sec=0.0,
+        manifest_cache_dir=cache,
+    )
+    assert f._enumerate_app_ids() == [111, 222]
+
+
+def test_enumerate_selection_only_when_no_cache_dir(tmp_path):
+    steam_cfg = tmp_path / "Config"
+    steam_cfg.mkdir()
+    (steam_cfg / "selectedAppsToPrefill.json").write_text(json.dumps([111]))
+    f = DepotDownloaderManifestFetcher(
+        binary=tmp_path / "DepotDownloader",
+        config_dir=tmp_path / "dd-config",
+        steam_config_dir=steam_cfg,
+        archive_dir=tmp_path / "archive",
+        delay_sec=0.0,
+        manifest_cache_dir=None,
+    )
+    assert f._enumerate_app_ids() == [111]
