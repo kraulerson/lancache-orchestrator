@@ -83,6 +83,7 @@ class DepotDownloaderManifestFetcher:
         username: str = "",
         max_retries: int = 3,
         retry_backoff_sec: float = 15.0,
+        manifest_cache_dir: Path | None = None,
     ) -> None:
         self._binary = Path(binary)
         self._config_dir = Path(config_dir)
@@ -92,6 +93,9 @@ class DepotDownloaderManifestFetcher:
         self._username = username
         self._max_retries = max_retries
         self._retry_backoff_sec = retry_backoff_sec
+        # Live SteamPrefill .bin manifest cache (e.g. /steamprefill-cache). When
+        # set, enumeration also covers apps prefilled outside the selection.
+        self._manifest_cache_dir = Path(manifest_cache_dir) if manifest_cache_dir else None
 
     def login_from_session(self) -> None:
         """Verify a usable persisted DepotDownloader session exists (no password,
@@ -123,7 +127,29 @@ class DepotDownloaderManifestFetcher:
                 apps.add(int(k))
             except (TypeError, ValueError):
                 continue
-        return sorted(apps)
+        # Durability (#213 follow-up): also cover apps prefilled OUTSIDE the
+        # selection — a `.bin` in the live cache with no `.shas` in the archive yet
+        # (e.g. a `--recently-purchased` game). Bounded to that delta so the first
+        # run never triggers a full-library DepotDownloader logon burst (#228).
+        have_bin = self._app_ids_with_ext(self._manifest_cache_dir, "bin")
+        have_shas = self._app_ids_with_ext(self._archive_dir, "shas")
+        return sorted(apps | (have_bin - have_shas))
+
+    @staticmethod
+    def _app_ids_with_ext(directory: Path | None, ext: str) -> set[int]:
+        """app_ids that have a ``<dir>/v1/{app}_*.{ext}`` manifest. Inlined (no
+        ``manifest_locator`` import) to preserve agent import-isolation."""
+        apps: set[int] = set()
+        if directory is None:
+            return apps
+        v1 = directory / "v1"
+        if not v1.is_dir():
+            return apps
+        for path in v1.glob(f"*.{ext}"):
+            first = path.stem.split("_", 1)[0]
+            if first.isdigit():
+                apps.add(int(first))
+        return apps
 
     def _write_shas(self, app_id: int, depot_id: int, gid: str, shas: set[str]) -> bool:
         """Write {app}_{app}_{depot}_{gid}.shas (one lowercase 40-hex SHA1/line).

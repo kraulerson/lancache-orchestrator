@@ -285,6 +285,22 @@ async def enqueue_auto_classify_block(pool: Pool, agent_client: AgentClient | No
             )
             exclude_ids = [i for i in (as_int(r["app_id"]) for r in excl) if i is not None]
             restore_ids = [i for i in (as_int(r["app_id"]) for r in allow) if i is not None]
+            # Also (re)add prefilled-but-not-excluded games to the selection so a
+            # game the host `--recently-purchased` cron downloaded (a `.bin` in the
+            # agent cache, outside the curated selection) persists in
+            # selectedAppsToPrefill.json — showing checked in `--select-apps` and
+            # staying in the durable prefill set. Same `.bin`-cache source as
+            # library_sync. Best-effort: a prefilled_apps() failure leaves the
+            # allow-only restore set.
+            try:
+                prefilled = await agent_client.prefilled_apps()
+            except Exception as e:  # best-effort — a failed enum must not crash the tick
+                prefilled = []
+                _log.warning(
+                    "scheduler.auto_classify_block.prefilled_apps_failed", reason=str(e)[:200]
+                )
+            exclude_set = set(exclude_ids)
+            restore_ids = sorted({*restore_ids, *(a for a in prefilled if a not in exclude_set)})
             if exclude_ids or restore_ids:
                 res = await agent_client.prune_steam_selection(exclude_ids, restore_ids)
                 _log.info("scheduler.auto_classify_block.pruned", **res)

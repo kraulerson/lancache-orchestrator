@@ -440,6 +440,38 @@ class TestAutoClassifyBlockActuation:
         assert 1 in exclude_ids  # the music app auto-excluded
         assert 9 in restore_ids  # the operator allow
 
+    async def test_reconcile_readds_prefilled_non_excluded(self, pool):
+        """A prefilled (has-a-.bin) game that is not excluded — e.g. a
+        --recently-purchased download — is (re)added to the selection; an
+        excluded prefilled app is not."""
+        from unittest.mock import AsyncMock
+
+        from orchestrator.scheduler.jobs import enqueue_auto_classify_block
+
+        await _seed_classified(pool, "900", "music", "OST")  # → excluded
+        agent = AsyncMock()
+        agent.prune_steam_selection.return_value = {"removed": 1, "restored": 1, "remaining": 5}
+        agent.prefilled_apps.return_value = [648800, 900]  # both prefilled; 900 is excluded
+        await enqueue_auto_classify_block(pool, agent)
+        exclude_ids, restore_ids = agent.prune_steam_selection.await_args.args
+        assert 648800 in restore_ids  # prefilled + not excluded → re-added
+        assert 900 not in restore_ids  # excluded → not re-added
+        assert 900 in exclude_ids
+
+    async def test_reconcile_survives_prefilled_apps_error(self, pool):
+        """A prefilled_apps() failure must not crash the tick; the prune still runs
+        with the DB allow set only."""
+        from unittest.mock import AsyncMock
+
+        from orchestrator.scheduler.jobs import enqueue_auto_classify_block
+
+        await _seed_classified(pool, "900", "music", "OST")
+        agent = AsyncMock()
+        agent.prune_steam_selection.return_value = {"removed": 1, "restored": 0, "remaining": 5}
+        agent.prefilled_apps.side_effect = RuntimeError("agent down")
+        await enqueue_auto_classify_block(pool, agent)  # must not raise
+        agent.prune_steam_selection.assert_awaited_once()
+
     async def test_no_agent_client_skips_prune(self, pool):
         from orchestrator.scheduler.jobs import enqueue_auto_classify_block
 
