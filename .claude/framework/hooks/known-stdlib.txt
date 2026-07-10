@@ -55,6 +55,7 @@ js:node:worker_threads
 js:node:test
 
 # Python standard library
+py:__future__
 py:os
 py:sys
 py:json
@@ -116,7 +117,6 @@ py:concurrent
 py:queue
 py:secrets
 py:uuid
-py:__future__
 
 # Go standard library
 go:fmt

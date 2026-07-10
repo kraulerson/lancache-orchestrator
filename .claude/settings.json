@@ -10,12 +10,24 @@
       "WebFetch(domain:*)"
     ],
     "deny": [
+      "Bash(curl * | bash)",
       "Bash(rm -rf /)",
       "Bash(rm -rf /*)",
-      "Bash(curl * | bash)",
       "Bash(wget * | bash)",
+      "Edit(/.claude/framework/**)",
+      "Edit(/.claude/manifest.json)",
+      "Edit(/.claude/settings.json)",
+      "Edit(/.claude/settings.local.json)",
+      "Edit(//private/tmp/.claude_*)",
+      "Edit(//tmp/.claude_*)",
       "Read(./.env)",
-      "Read(./.env.*)"
+      "Read(./.env.*)",
+      "Write(/.claude/framework/**)",
+      "Write(/.claude/manifest.json)",
+      "Write(/.claude/settings.json)",
+      "Write(/.claude/settings.local.json)",
+      "Write(//private/tmp/.claude_*)",
+      "Write(//tmp/.claude_*)"
     ]
   },
   "hooks": {
@@ -29,16 +41,6 @@
         ]
       }
     ],
-    "PreCompact": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/pre-compact-reminder.sh"
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -46,10 +48,6 @@
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/enforce-evaluate.sh"
-          },
-          {
-            "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/marker-guard.sh"
           },
           {
             "type": "command",
@@ -70,16 +68,20 @@
         ]
       },
       {
-        "matcher": "Bash|Write|Edit",
+        "matcher": "Bash|Write|Edit|NotebookEdit",
         "hooks": [
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/config-guard.sh"
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/marker-guard.sh"
           }
         ]
       },
       {
-        "matcher": "Write|Edit",
+        "matcher": "Write|Edit|NotebookEdit",
         "hooks": [
           {
             "type": "command",
@@ -100,6 +102,16 @@
         ]
       }
     ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/session-end.sh"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [
@@ -116,6 +128,16 @@
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/stop-checklist.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/compliance-reinforce.sh"
           }
         ]
       }
