@@ -16,8 +16,9 @@ from fastapi.responses import JSONResponse
 
 _log = structlog.get_logger(__name__)
 
-# Same allowlist the agent enforces — a single traversal-safe path component.
-_LAUNCHER_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# Same allowlist the agent enforces — a traversal-safe path component that may
+# contain spaces/dots (Amazon Games, Itch.io) but never a '/'.
+_LAUNCHER_RE = re.compile(r"^[A-Za-z0-9 ._-]+$")
 
 router = APIRouter(prefix="/api/v1", tags=["manual-downloads"])
 
@@ -32,14 +33,16 @@ router = APIRouter(prefix="/api/v1", tags=["manual-downloads"])
     },
     summary="List manually-downloaded game folders for a launcher",
 )
-async def manual_downloads(launcher: str, request: Request) -> JSONResponse:
+async def manual_downloads(
+    launcher: str, request: Request, include_files: bool = False
+) -> JSONResponse:
     if not _LAUNCHER_RE.match(launcher):
         return JSONResponse(content={"detail": "invalid launcher"}, status_code=400)
     client = getattr(request.app.state, "agent_client", None)
     if client is None:
         return JSONResponse(content={"detail": "agent not configured"}, status_code=503)
     try:
-        result = await client.manual_downloads(launcher)
+        result = await client.manual_downloads(launcher, include_files=include_files)
     except Exception as e:  # agent down / transport error — never 500
         _log.error("api.manual_downloads.agent_error", launcher=launcher, reason=str(e)[:200])
         return JSONResponse(content={"detail": "agent unavailable"}, status_code=503)
