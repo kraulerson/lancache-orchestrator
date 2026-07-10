@@ -13,9 +13,11 @@ class _FakeAgent:
         self._result = result
         self._exc = exc
         self.calls: list[str] = []
+        self.include_files_calls: list[bool] = []
 
-    async def manual_downloads(self, launcher: str):
+    async def manual_downloads(self, launcher: str, include_files: bool = False):
         self.calls.append(launcher)
+        self.include_files_calls.append(include_files)
         if self._exc is not None:
             raise self._exc
         return self._result
@@ -33,10 +35,24 @@ async def test_proxies_agent_listing(client, unit_app):
 
 async def test_invalid_launcher_400(client, unit_app):
     unit_app.state.agent_client = _FakeAgent(result={})
-    # A dot is not allowed (traversal-safe allowlist) — rejected before the agent.
-    r = await client.get("/api/v1/manual-downloads/a.b", headers=AUTH)
+    # Dots/spaces ARE allowed now (Itch.io / Amazon Games); a char outside the
+    # allowlist (e.g. '@') is still rejected before the agent.
+    r = await client.get("/api/v1/manual-downloads/a@b", headers=AUTH)
     assert r.status_code == 400
     assert unit_app.state.agent_client.calls == []  # never reached the agent
+
+
+async def test_accepts_space_launcher_and_forwards_include_files(client, unit_app):
+    unit_app.state.agent_client = _FakeAgent(
+        result={"launcher": "Amazon Games", "present": True, "entries": ["A Game"]}
+    )
+    r = await client.get("/api/v1/manual-downloads/Amazon Games", headers=AUTH)
+    assert r.status_code == 200
+    r2 = await client.get("/api/v1/manual-downloads/Itch.io?include_files=true", headers=AUTH)
+    assert r2.status_code == 200
+    agent = unit_app.state.agent_client
+    assert agent.calls == ["Amazon Games", "Itch.io"]
+    assert agent.include_files_calls == [False, True]
 
 
 async def test_no_agent_configured_503(client, unit_app):

@@ -486,3 +486,17 @@ async def test_steam_purge_non_2xx_raises():
     client = _client(handler)
     with pytest.raises(AgentError):
         await client.steam_purge(440)
+
+
+async def test_manual_downloads_encodes_launcher_and_include_files():
+    captured: dict[str, list[str]] = {"paths": []}
+
+    def handler(request):
+        captured["paths"].append(request.url.raw_path.decode())
+        return httpx.Response(200, json={"launcher": "x", "present": True, "entries": []})
+
+    client = _client(handler)
+    await client.manual_downloads("Amazon Games")
+    await client.manual_downloads("Itch.io", include_files=True)
+    assert captured["paths"][0] == "/v1/manual-downloads/Amazon%20Games"
+    assert captured["paths"][1] == "/v1/manual-downloads/Itch.io?include_files=true"

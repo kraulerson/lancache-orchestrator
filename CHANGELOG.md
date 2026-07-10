@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Changed — manual-downloads endpoint supports Amazon/Humble/Itch (space/dot launchers + files) — 2026-07-10
+
+The manual-download listing (`GET /v1/manual-downloads/{launcher}` + control proxy) is extended so Game_shelf can diff Amazon, Humble Bundle, and Itch.io downloads against the owned library, not just GOG. (#222)
+
+- **Changed:** the launcher-name allowlist widens from `^[A-Za-z0-9_-]+$` to `^[A-Za-z0-9 ._-]+$` (both agent and control routers), so folder names with a space or dot — `Amazon Games`, `Humble Bundle`, `Itch.io` — are reachable. Path traversal stays impossible (no `/`; the resolve-under-root guard rejects `.`/`..`).
+- **Changed:** a new `?include_files=true` query lists loose installer/archive *files* (Humble/Itch downloads are single files, not per-game folders), not just directories. Default `false` keeps GOG/Amazon dir-only listing byte-identical (zero regression).
+- **Changed:** `AgentClient.manual_downloads(launcher, include_files=False)` URL-encodes the launcher (spaces/dots) and forwards the flag.
+
 ### Fixed — newly-purchased Steam games stuck at `unknown` (new-purchase auto-coverage) — 2026-07-07
 
 A Steam game bought and cached by the host `SteamPrefill prefill --recently-purchased` cron stayed `status='unknown'` in the orchestrator indefinitely (Game_shelf showed "Unknown"). Root cause: the scheduled *gated* validation sweep enumerated only `up_to_date`/`validation_failed` games, and there is **no scheduled *full* sweep** — so a row inserted at the default `unknown` (library_sync writes title+owned only) was never auto-validated by any cron. (`games.metadata` being NULL was a red herring: the validator reads the on-disk `.bin`/`.shas`, which the host had already written; the legacy depot metadata on older rows is vestigial pre-③ data.)

@@ -80,3 +80,34 @@ def test_requires_auth(tmp_path):
     app = create_agent_app(settings=_settings(tmp_path))
     client = TestClient(app)
     assert client.get("/v1/manual-downloads/GOG").status_code == 401
+
+
+def test_accepts_launcher_with_space_and_dot(tmp_path):
+    # Amazon Games / Humble Bundle / Itch.io folder names contain a space or dot;
+    # the launcher allowlist must accept them (traversal still blocked — no '/').
+    for folder in ("Amazon Games", "Humble Bundle", "Itch.io"):
+        (tmp_path / folder / "A Game").mkdir(parents=True)
+    app = create_agent_app(settings=_settings(tmp_path))
+    client = TestClient(app, headers=AUTH)
+    for folder in ("Amazon Games", "Humble Bundle", "Itch.io"):
+        r = client.get(f"/v1/manual-downloads/{folder}")
+        assert r.status_code == 200, folder
+        assert r.json()["entries"] == ["A Game"], folder
+
+
+def test_include_files_lists_files_when_true(tmp_path):
+    hb = tmp_path / "Humble Bundle"
+    hb.mkdir(parents=True)
+    (hb / "VVVVVV-04212026.zip").write_text("x")
+    (hb / "A Folder Game").mkdir()
+    (hb / "!downloading").write_text("x")
+    (hb / ".hidden").write_text("x")
+    app = create_agent_app(settings=_settings(tmp_path))
+    client = TestClient(app, headers=AUTH)
+    default = client.get("/v1/manual-downloads/Humble Bundle").json()["entries"]
+    assert default == ["A Folder Game"]  # dirs only, unchanged default
+    resp = client.get("/v1/manual-downloads/Humble Bundle?include_files=true")
+    assert resp.json()["entries"] == [
+        "A Folder Game",
+        "VVVVVV-04212026.zip",
+    ]  # file added; !/. skipped
