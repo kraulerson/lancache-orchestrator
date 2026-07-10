@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -242,11 +243,16 @@ class AgentClient:
         result: list[int] = resp.json()["app_ids"]
         return result
 
-    async def manual_downloads(self, launcher: str) -> dict[str, Any]:
-        """List the manually-downloaded game folders under `<cache>/<launcher>/`
-        on the agent host (#222). Returns {launcher, present, entries}. The caller
-        validates `launcher` (alnum/_/-) before it reaches the path."""
-        resp = await self._request("GET", f"/v1/manual-downloads/{launcher}")
+    async def manual_downloads(self, launcher: str, include_files: bool = False) -> dict[str, Any]:
+        """List the manually-downloaded game entries under `<cache>/<launcher>/`
+        on the agent host (#222). Returns {launcher, present, entries}. The launcher
+        may contain spaces/dots (e.g. "Amazon Games") so it is URL-encoded here; the
+        caller still validates it against the allowlist. With include_files, loose
+        files (Humble/Itch installers) are listed too, not just directories."""
+        path = f"/v1/manual-downloads/{quote(launcher, safe='')}"
+        if include_files:
+            path += "?include_files=true"
+        resp = await self._request("GET", path)
         result: dict[str, Any] = resp.json()
         return result
 
