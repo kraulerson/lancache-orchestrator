@@ -19,6 +19,16 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — `game block`/`unblock`/`show` failed for game ids past the first 500 — 2026-08-09
+
+`orchestrator-cli game block <id>`, `unblock <id>`, and `show <id>` resolved a game id by fetching `GET /api/v1/games?limit=500` and scanning the result. The server caps that list at 500 rows, so any game outside the first 500 was unreachable — with ~3,177 games in the library, that was the large majority. Hit live while blocking 15 dead/delisted Epic apps (repeated Epic manifest API `HTTP 404`) after the cache-recovery incident: 13 of 15 could not be blocked, and the block-list had to be written directly, bypassing API validation. (#260)
+
+- **Fixed:** `_resolve_app()` and `game_show()` now resolve via `GET /api/v1/games/{game_id}` through a shared `_fetch_game()` helper — correct for any id, and O(1) instead of fetching 500 rows. The detail endpoint already existed (#141); the list-scan and its "no detail endpoint exists" docstrings were stale.
+- **Changed:** a missing id now reports `game <id> not found` instead of `game <id> not found (in the first 500)`, which described the removed list-scan and misled operators into thinking the game merely sorted too late.
+- `game prefill`/`validate`/`purge` were never affected — they POST to `/api/v1/games/{game_id}/…` and never resolved the id client-side.
+
+Note (unchanged behavior, documented for operators): the block-list only gates **scheduled** prefill. An explicit force-prefill still runs on a blocked game, so a bulk force-prefill re-attempts known-dead apps.
+
 ### Changed — manual-downloads endpoint supports Amazon/Humble/Itch (space/dot launchers + files) — 2026-07-10
 
 The manual-download listing (`GET /v1/manual-downloads/{launcher}` + control proxy) is extended so Game_shelf can diff Amazon, Humble Bundle, and Itch.io downloads against the owned library, not just GOG. (#222)

@@ -29,14 +29,23 @@ def test_game_list_sends_limit_not_per_page(mock):
     assert mock(["game", "list", "--limit", "10"], handler).exit_code == 0
 
 
+def _detail(req: httpx.Request) -> httpx.Response:
+    """Serve GET /api/v1/games/{id} from _GAMES, 404 when the id is unknown."""
+    gid = int(req.url.path.rsplit("/", 1)[-1])
+    match = next((g for g in _GAMES["games"] if g["id"] == gid), None)
+    if match is None:
+        return httpx.Response(404, json={"detail": "No game with that id"})
+    return httpx.Response(200, json={"game": match})
+
+
 def test_game_show_found(mock):
-    r = mock(["game", "show", "2"], lambda req: httpx.Response(200, json=_GAMES))
+    r = mock(["game", "show", "2"], _detail)
     assert r.exit_code == 0
     assert "Turaco" in r.output
 
 
 def test_game_show_not_found_exits_1(mock):
-    r = mock(["game", "show", "999"], lambda req: httpx.Response(200, json=_GAMES))
+    r = mock(["game", "show", "999"], _detail)
     assert r.exit_code == 1
 
 
@@ -108,21 +117,18 @@ def test_show_rejects_non_positive_id(cli_invoke):
 
 def test_game_block_resolves_and_posts(mock):
     def handler(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/api/v1/games":
+        if req.url.path == "/api/v1/games/5":
             return httpx.Response(
                 200,
                 json={
-                    "games": [
-                        {
-                            "id": 5,
-                            "platform": "steam",
-                            "app_id": "730",
-                            "title": "CS",
-                            "status": "up_to_date",
-                            "blocked": False,
-                        }
-                    ],
-                    "meta": {},
+                    "game": {
+                        "id": 5,
+                        "platform": "steam",
+                        "app_id": "730",
+                        "title": "CS",
+                        "status": "up_to_date",
+                        "blocked": False,
+                    }
                 },
             )
         assert req.method == "POST" and req.url.path == "/api/v1/block-list"
@@ -152,28 +158,26 @@ def test_game_block_resolves_and_posts(mock):
 
 def test_game_block_unknown_id_exit_1(mock):
     r = mock(
-        ["game", "block", "999"], lambda req: httpx.Response(200, json={"games": [], "meta": {}})
+        ["game", "block", "999"],
+        lambda req: httpx.Response(404, json={"detail": "No game with that id"}),
     )
     assert r.exit_code == 1
 
 
 def test_game_unblock_resolves_and_deletes(mock):
     def handler(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/api/v1/games":
+        if req.url.path == "/api/v1/games/5":
             return httpx.Response(
                 200,
                 json={
-                    "games": [
-                        {
-                            "id": 5,
-                            "platform": "steam",
-                            "app_id": "730",
-                            "title": "CS",
-                            "status": "up_to_date",
-                            "blocked": True,
-                        }
-                    ],
-                    "meta": {},
+                    "game": {
+                        "id": 5,
+                        "platform": "steam",
+                        "app_id": "730",
+                        "title": "CS",
+                        "status": "up_to_date",
+                        "blocked": True,
+                    }
                 },
             )
         assert req.method == "DELETE" and req.url.path == "/api/v1/block-list/steam/730"
@@ -201,26 +205,105 @@ def test_game_list_shows_blocked_column(mock):
     assert r.exit_code == 0 and "BLOCKED" in r.output
 
 
+def _detail_only(game: dict, on_action=None):
+    """Handler where the *list* endpoint holds no rows but the detail endpoint
+    resolves the game — i.e. an id past the server's 500-row list cap (#260).
+
+    Resolving via the list is what the bug did, so a list-scanning CLI finds
+    nothing here and exits 1; resolving via GET /games/{id} succeeds.
+    """
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/v1/games":
+            return httpx.Response(200, json={"games": [], "meta": {"total": 0}})
+        if req.url.path == f"/api/v1/games/{game['id']}":
+            return httpx.Response(200, json={"game": game})
+        return (on_action or (lambda r: httpx.Response(200, json={})))(req)
+
+    return handler
+
+
+_FAR_GAME = {
+    "id": 15488,
+    "platform": "epic",
+    "app_id": "4e980122452a4b48a99a83126e226053",
+    "title": "Dead Cells",
+    "status": "failed",
+    "blocked": False,
+}
+
+
+def test_game_block_resolves_id_past_list_cap(mock):
+    """#260: blocking a game whose id is past the 500-row list cap must work."""
+    posted = {}
+
+    def on_action(req: httpx.Request) -> httpx.Response:
+        import json as _j
+
+        assert req.method == "POST" and req.url.path == "/api/v1/block-list"
+        posted.update(_j.loads(req.content))
+        return httpx.Response(201, json={"id": 1, **posted, "blocked_at": "t"})
+
+    r = mock(["game", "block", "15488", "--reason", "dead"], _detail_only(_FAR_GAME, on_action))
+    assert r.exit_code == 0, r.output
+    assert posted["platform"] == "epic"
+    assert posted["app_id"] == "4e980122452a4b48a99a83126e226053"
+
+
+def test_game_unblock_resolves_id_past_list_cap(mock):
+    """#260: unblocking a game past the list cap must work."""
+
+    def on_action(req: httpx.Request) -> httpx.Response:
+        assert req.method == "DELETE"
+        assert req.url.path == "/api/v1/block-list/epic/4e980122452a4b48a99a83126e226053"
+        return httpx.Response(200, json={"removed": 1})
+
+    r = mock(["game", "unblock", "15488"], _detail_only(_FAR_GAME, on_action))
+    assert r.exit_code == 0, r.output
+
+
+def test_game_show_resolves_id_past_list_cap(mock):
+    """#260: showing a game past the list cap must work."""
+    r = mock(["game", "show", "15488"], _detail_only(_FAR_GAME))
+    assert r.exit_code == 0, r.output
+    assert "Dead Cells" in r.output
+
+
+def test_game_show_unknown_id_message_has_no_stale_pagination_wording(mock):
+    """A genuinely missing id reports not-found without the '(in the first 500)'
+    wording, which described the removed list-scan and misleads operators."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        # List answers normally (empty) so a list-scanning CLI emits the stale
+        # wording; the detail endpoint is the one reporting the real 404.
+        if req.url.path == "/api/v1/games":
+            return httpx.Response(200, json={"games": [], "meta": {"total": 0}})
+        return httpx.Response(404, json={"detail": "No game with that id"})
+
+    r = mock(["game", "show", "999"], handler)
+    out = r.output + (r.stderr or "")
+    assert r.exit_code == 1
+    assert "first 500" not in out
+    assert "999" in out, "not-found message should name the id the operator typed"
+
+
 def test_game_unblock_url_encodes_app_id(mock):
     """An app_id with a slash (Epic appName) must be percent-encoded so it stays
     a single path segment and doesn't mis-route (SEV-4 adversarial finding)."""
 
     def handler(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/api/v1/games":
+        if req.url.path == "/api/v1/games/5":
             return httpx.Response(
                 200,
                 json={
-                    "games": [
-                        {
-                            "id": 5,
-                            "platform": "epic",
-                            "app_id": "a/b",
-                            "title": "X",
-                            "status": "unknown",
-                            "blocked": True,
-                        }
-                    ],
-                    "meta": {},
+                    "game": {
+                        "id": 5,
+                        "platform": "epic",
+                        "app_id": "a/b",
+                        "title": "X",
+                        "status": "unknown",
+                        "blocked": True,
+                    }
                 },
             )
         raw = req.url.raw_path.decode()

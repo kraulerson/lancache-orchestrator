@@ -1,4 +1,4 @@
-"""F11 — ``game`` subcommands. ``show`` filters the list (no GET /games/{id})."""
+"""F11 — ``game`` subcommands. Id lookups use GET /games/{game_id}."""
 
 from __future__ import annotations
 
@@ -62,19 +62,32 @@ def game_list(ctx: click.Context, platform: str | None, status_: str | None, lim
     click.echo(output.table(["ID", "PLATFORM", "APP_ID", "TITLE", "STATUS", "BLOCKED"], rows))
 
 
+def _fetch_game(client: OrchClient, game_id: int) -> dict[str, object]:
+    """Return the game row for ``game_id`` via ``GET /api/v1/games/{game_id}``.
+
+    Resolving an id must not go through the list endpoint: the server caps
+    ``/games`` at 500 rows, so a list-scan cannot see most of the library and
+    silently fails for higher ids (#260).
+    """
+    try:
+        data = client.get(f"/api/v1/games/{game_id}")
+    except ApiError as e:
+        if str(e).startswith("HTTP 404"):
+            raise ApiError(f"game {game_id} not found") from None
+        raise
+    game: dict[str, object] = data["game"]
+    return game
+
+
 @game.command("show")
 @click.argument("game_id", type=int, callback=_positive_int)
 @click.pass_context
 @handles_api_errors
 def game_show(ctx: click.Context, game_id: int) -> None:
-    """Show one game (filters the list — no detail endpoint exists)."""
-    client = make_client(ctx)
-    data = client.get("/api/v1/games", limit=500)
-    match = next((g for g in data["games"] if g["id"] == game_id), None)
-    if match is None:
-        raise ApiError(f"game {game_id} not found (in the first 500)")
+    """Show one game."""
+    match = _fetch_game(make_client(ctx), game_id)
     for key, value in match.items():
-        rendered = output.status_label(value) if key == "status" else value
+        rendered = output.status_label(str(value)) if key == "status" else value
         click.echo(f"{key:18} {rendered}")
 
 
@@ -130,14 +143,10 @@ def game_purge(ctx: click.Context, game_id: int) -> None:
 def _resolve_app(ctx: click.Context, game_id: int) -> tuple[OrchClient, str, str]:
     """Return (client, platform, app_id) for a known game id, or raise ApiError.
 
-    Resolves via the list (no detail endpoint), mirroring ``game show``. Needed
-    because the block-list is keyed by (platform, app_id), not game id."""
+    Needed because the block-list is keyed by (platform, app_id), not game id."""
     client = make_client(ctx)
-    data = client.get("/api/v1/games", limit=500)
-    match = next((g for g in data["games"] if g["id"] == game_id), None)
-    if match is None:
-        raise ApiError(f"game {game_id} not found (in the first 500)")
-    return client, match["platform"], match["app_id"]
+    match = _fetch_game(client, game_id)
+    return client, str(match["platform"]), str(match["app_id"])
 
 
 @game.command("block")
