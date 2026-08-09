@@ -32,6 +32,7 @@ The CI dependency audit began failing on `h2==4.3.0`: **GHSA-6hr6-w5qg-qmwg** (m
 
 - **Fixed:** `_resolve_app()` and `game_show()` now resolve via `GET /api/v1/games/{game_id}` through a shared `_fetch_game()` helper — correct for any id, and O(1) instead of fetching 500 rows. The detail endpoint already existed (#141); the list-scan and its "no detail endpoint exists" docstrings were stale.
 - **Changed:** a missing id now reports `game <id> not found` instead of `game <id> not found (in the first 500)`, which described the removed list-scan and misled operators into thinking the game merely sorted too late.
+- **Changed:** `ApiError` now carries `status_code` and the server's `detail`, and the CLI branches on those instead of string-matching the rendered message. An adversarial review of the first cut caught that prefix-matching `"HTTP 404"` classified *every* 404 as a missing game — so a wrong `--url`/`ORCH_API_URL`, a reverse proxy, or a pre-#141 server reported `game <id> not found`, reproducing the very misdiagnosis this change exists to remove. Only a 404 whose detail is the games router's `game not found` is now attributed to the id; any other 404 keeps the server's own message.
 - `game prefill`/`validate`/`purge` were never affected — they POST to `/api/v1/games/{game_id}/…` and never resolved the id client-side.
 
 Note (unchanged behavior, documented for operators): the block-list only gates **scheduled** prefill. An explicit force-prefill still runs on a blocked game, so a bulk force-prefill re-attempts known-dead apps.

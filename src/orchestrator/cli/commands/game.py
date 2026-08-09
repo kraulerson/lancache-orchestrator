@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import quote
 
 import click
@@ -62,7 +63,14 @@ def game_list(ctx: click.Context, platform: str | None, status_: str | None, lim
     click.echo(output.table(["ID", "PLATFORM", "APP_ID", "TITLE", "STATUS", "BLOCKED"], rows))
 
 
-def _fetch_game(client: OrchClient, game_id: int) -> dict[str, object]:
+# The games router's body for a missing game. A 404 carrying anything else came
+# from somewhere other than "no such game" — a wrong --url/ORCH_API_URL, a
+# reverse proxy, or a server predating the detail endpoint — and must keep the
+# server's own message instead of being blamed on the id (#261).
+_GAME_NOT_FOUND_DETAIL = "game not found"
+
+
+def _fetch_game(client: OrchClient, game_id: int) -> dict[str, Any]:
     """Return the game row for ``game_id`` via ``GET /api/v1/games/{game_id}``.
 
     Resolving an id must not go through the list endpoint: the server caps
@@ -72,10 +80,10 @@ def _fetch_game(client: OrchClient, game_id: int) -> dict[str, object]:
     try:
         data = client.get(f"/api/v1/games/{game_id}")
     except ApiError as e:
-        if str(e).startswith("HTTP 404"):
+        if e.status_code == 404 and e.detail == _GAME_NOT_FOUND_DETAIL:
             raise ApiError(f"game {game_id} not found") from None
         raise
-    game: dict[str, object] = data["game"]
+    game: dict[str, Any] = data["game"]
     return game
 
 
@@ -87,7 +95,7 @@ def game_show(ctx: click.Context, game_id: int) -> None:
     """Show one game."""
     match = _fetch_game(make_client(ctx), game_id)
     for key, value in match.items():
-        rendered = output.status_label(str(value)) if key == "status" else value
+        rendered = output.status_label(value) if key == "status" else value
         click.echo(f"{key:18} {rendered}")
 
 
@@ -146,7 +154,7 @@ def _resolve_app(ctx: click.Context, game_id: int) -> tuple[OrchClient, str, str
     Needed because the block-list is keyed by (platform, app_id), not game id."""
     client = make_client(ctx)
     match = _fetch_game(client, game_id)
-    return client, str(match["platform"]), str(match["app_id"])
+    return client, match["platform"], match["app_id"]
 
 
 @game.command("block")

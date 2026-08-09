@@ -30,11 +30,18 @@ def test_game_list_sends_limit_not_per_page(mock):
 
 
 def _detail(req: httpx.Request) -> httpx.Response:
-    """Serve GET /api/v1/games/{id} from _GAMES, 404 when the id is unknown."""
-    gid = int(req.url.path.rsplit("/", 1)[-1])
-    match = next((g for g in _GAMES["games"] if g["id"] == gid), None)
+    """Serve GET /api/v1/games/{id} from _GAMES, 404 when the id is unknown.
+
+    Any other path (e.g. a regression reintroducing the list scan) gets a plain
+    404 rather than an exception, so the test fails on its own assertion instead
+    of an opaque ValueError raised inside the transport.
+    """
+    tail = req.url.path.rsplit("/", 1)[-1]
+    if not tail.isdigit():
+        return httpx.Response(404, json={"detail": "Not Found"})
+    match = next((g for g in _GAMES["games"] if g["id"] == int(tail)), None)
     if match is None:
-        return httpx.Response(404, json={"detail": "No game with that id"})
+        return httpx.Response(404, json={"detail": "game not found"})
     return httpx.Response(200, json={"game": match})
 
 
@@ -233,8 +240,14 @@ _FAR_GAME = {
 }
 
 
-def test_game_block_resolves_id_past_list_cap(mock):
-    """#260: blocking a game whose id is past the 500-row list cap must work."""
+def test_game_block_resolves_epic_app_id_via_detail_endpoint(mock):
+    """#260: an id the list endpoint cannot return (past its 500-row cap) still
+    resolves, and an Epic 32-hex app_id round-trips into the block-list body.
+
+    (The sibling `unblock`/`show` "past the cap" cases were dropped as duplicates:
+    the mock enforces no cap, so a high id is indistinguishable from a low one to
+    the code under test, and both paths are already covered above.)
+    """
     posted = {}
 
     def on_action(req: httpx.Request) -> httpx.Response:
@@ -250,25 +263,6 @@ def test_game_block_resolves_id_past_list_cap(mock):
     assert posted["app_id"] == "4e980122452a4b48a99a83126e226053"
 
 
-def test_game_unblock_resolves_id_past_list_cap(mock):
-    """#260: unblocking a game past the list cap must work."""
-
-    def on_action(req: httpx.Request) -> httpx.Response:
-        assert req.method == "DELETE"
-        assert req.url.path == "/api/v1/block-list/epic/4e980122452a4b48a99a83126e226053"
-        return httpx.Response(200, json={"removed": 1})
-
-    r = mock(["game", "unblock", "15488"], _detail_only(_FAR_GAME, on_action))
-    assert r.exit_code == 0, r.output
-
-
-def test_game_show_resolves_id_past_list_cap(mock):
-    """#260: showing a game past the list cap must work."""
-    r = mock(["game", "show", "15488"], _detail_only(_FAR_GAME))
-    assert r.exit_code == 0, r.output
-    assert "Dead Cells" in r.output
-
-
 def test_game_show_unknown_id_message_has_no_stale_pagination_wording(mock):
     """A genuinely missing id reports not-found without the '(in the first 500)'
     wording, which described the removed list-scan and misleads operators."""
@@ -276,9 +270,10 @@ def test_game_show_unknown_id_message_has_no_stale_pagination_wording(mock):
     def handler(req: httpx.Request) -> httpx.Response:
         # List answers normally (empty) so a list-scanning CLI emits the stale
         # wording; the detail endpoint is the one reporting the real 404.
+        # Detail text matches what the server actually sends (games router).
         if req.url.path == "/api/v1/games":
             return httpx.Response(200, json={"games": [], "meta": {"total": 0}})
-        return httpx.Response(404, json={"detail": "No game with that id"})
+        return httpx.Response(404, json={"detail": "game not found"})
 
     r = mock(["game", "show", "999"], handler)
     out = r.output + (r.stderr or "")
@@ -313,3 +308,98 @@ def test_game_unblock_url_encodes_app_id(mock):
 
     r = mock(["game", "unblock", "5"], handler)
     assert r.exit_code == 0
+
+
+# --- review remediation (#261 adversarial review) -------------------------------
+#
+# The CLI must distinguish "this game does not exist" (the games router answers
+# 404 {"detail": "game not found"}) from "this URL does not serve that route"
+# (FastAPI's default 404 {"detail": "Not Found"}). Classifying by string-prefixing
+# the ApiError message conflated the two and reported a misconfigured --url as a
+# missing game — reintroducing the exact misdiagnosis #260 was filed to remove.
+
+
+def test_route_level_404_is_not_reported_as_missing_game(mock):
+    """A 404 from a wrong base URL / missing route must surface as an API error,
+    NOT as 'game <id> not found' (which sends the operator hunting the wrong id)."""
+    r = mock(
+        ["game", "block", "15488"],
+        lambda req: httpx.Response(404, json={"detail": "Not Found"}),
+    )
+    out = r.output + (r.stderr or "")
+    assert r.exit_code == 1
+    assert "not found" in out.lower()
+    # The failure must not be attributed to the game id.
+    assert "game 15488 not found" not in out, out
+    assert "404" in out, out
+
+
+def test_game_not_found_404_still_reports_the_game_id(mock):
+    """The genuine missing-game 404 keeps its operator-friendly message."""
+    r = mock(
+        ["game", "block", "15488"],
+        lambda req: httpx.Response(404, json={"detail": "game not found"}),
+    )
+    out = r.output + (r.stderr or "")
+    assert r.exit_code == 1
+    assert "game 15488 not found" in out, out
+
+
+def test_non_404_api_error_passes_through_unchanged(mock):
+    """Regression guard: a 503 must keep the server's message. Without this, a
+    later broadening of the except-block would turn an outage into 'not found'
+    and send operators to hand-edit the block list."""
+    r = mock(
+        ["game", "block", "15488"],
+        lambda req: httpx.Response(503, json={"detail": "database unavailable"}),
+    )
+    out = r.output + (r.stderr or "")
+    assert r.exit_code == 1
+    assert "database unavailable" in out, out
+    assert "not found" not in out.lower(), out
+
+
+def test_malformed_status_in_detail_response_is_an_error_not_a_fake_status(mock):
+    """A null/non-str `status` is a malformed API response. It must trip the
+    handles_api_errors backstop (exit 1), not render a fabricated '• NONE' at
+    exit 0 that a script would read as a successful status query."""
+    broken = {"id": 7, "platform": "steam", "app_id": "730", "title": "X", "status": None}
+    r = mock(["game", "show", "7"], lambda req: httpx.Response(200, json={"game": broken}))
+    assert r.exit_code == 1, r.output
+    # The bug rendered the null as a status badge ("status  • NONE"); assert on
+    # that rendering, not the bare substring (the correct AttributeError message
+    # legitimately contains "NoneType").
+    assert "• NONE" not in r.output.upper(), r.output
+
+
+def test_null_app_id_is_not_coerced_into_a_literal_none_string(mock):
+    """A null app_id must not be stringified to "None" and sent to the block-list
+    endpoint — that targets nothing while reporting success."""
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/v1/games/7":
+            broken = {
+                "id": 7,
+                "platform": "steam",
+                "app_id": None,
+                "title": "X",
+                "status": "failed",
+            }
+            return httpx.Response(200, json={"game": broken})
+        seen["path"] = req.url.path
+        return httpx.Response(200, json={"removed": 0})
+
+    r = mock(["game", "unblock", "7"], handler)
+    assert r.exit_code == 1, r.output
+    assert "None" not in seen.get("path", ""), seen
+
+
+def test_game_show_renders_field_lines_not_the_raw_envelope(mock):
+    """Pins `game show`'s rendering contract. Without this, dropping the
+    data["game"] unwrap still passes every other show test, because they are
+    substring checks that also match the envelope's dict repr."""
+    r = mock(["game", "show", "2"], _detail)
+    assert r.exit_code == 0, r.output
+    assert "title              Turaco" in r.output, r.output
+    assert "{'id'" not in r.output, r.output
