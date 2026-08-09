@@ -19,6 +19,13 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Security — pin transitive `h2` to 4.4.1 (GHSA-6hr6-w5qg-qmwg) — 2026-08-09
+
+The CI dependency audit began failing on `h2==4.3.0`: **GHSA-6hr6-w5qg-qmwg** (medium) — *"duplicate Host header could facilitate request smuggling"*, vulnerable `<= 4.4.0`, fixed in `4.4.1`. `h2` is transitive via `httpx[http2]` (the orchestrator uses httpx as a client for Epic CDN pulls and agent RPC). Newly disclosed rather than a regression: main last ran green on 2026-07-22 and would fail this audit today.
+
+- **Security:** `h2==4.4.1` pinned in `requirements.in`, following the convention already used there for `python-dotenv` and `starlette` — an explicit transitive override with the advisory cited inline, so a future `pip-compile` cannot silently regress it. httpx 0.28.1 requires only `h2>=3,<5`, so no httpx bump is needed.
+- **Infrastructure:** lockfiles regenerated. `hpack` 4.1.0 → 4.2.0 (required by h2 4.4.1). In `requirements-dev.txt` the `--allow-unsafe` build-tool pins moved with the regeneration: `pip` 26.0.1 → 26.2.1 and `setuptools` 83.0.0 → 84.0.0 (dev lockfile only; not shipped at runtime).
+
 ### Changed — manual-downloads endpoint supports Amazon/Humble/Itch (space/dot launchers + files) — 2026-07-10
 
 The manual-download listing (`GET /v1/manual-downloads/{launcher}` + control proxy) is extended so Game_shelf can diff Amazon, Humble Bundle, and Itch.io downloads against the owned library, not just GOG. (#222)
