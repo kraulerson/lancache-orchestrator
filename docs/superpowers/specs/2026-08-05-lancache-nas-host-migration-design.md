@@ -123,19 +123,26 @@ The design is sound and the benefits are real, but the first-draft runbook had d
 - **Standing eviction monitor:** replace the one-shot acceptance test with a permanent monitor (nginx-unlink watch on local ext4 + object-count-vs-key-budget alert to uptime-kuma `.57`) before removing the trap; decommission the VM only on firmware-survival evidence + an off-host backup, not a bare timer.
 - **Index size:** `10000m` kept per Karl's decision (16 GB host); the honest caveat is that zone RSS grows with key count and competes with page cache — mitigated by post-cutover memory monitoring, not a fallback to 8000m.
 
-## ⚠ Root cause RETRACTED post-cutover — read the as-built section
+## ⚠ Root cause NOT ascertained — read the as-built section before relying on this
 
 This design attributes the mass chunk-deletion to **nginx cache-manager eviction from a full
-`keys_zone`**, and derives its acceptance criterion from that. Post-cutover fanotify evidence
-disproved it: nginx performed **zero unlinks in six days**, the real deletions came from
-**`nfsd`**, and the cache subsequently grew *past* the supposed object ceiling with no eviction.
-The migration fixed the incident by **removing NFS**, not by enlarging the index.
+`keys_zone`**, and derives its acceptance criterion from that. **The cause was never
+established.** All 85,427 real deletions were attributed to `comm=nfsd` — but `nfsd` is the NFS
+*server* daemon, and the watcher sits on the server side, so it cannot see which process on the
+`.40` VM issued the unlink. nginx's own cache-manager evicting would look identical.
 
-The design and its hardening are otherwise sound and were executed essentially as written. See
+What is known: the zone was **~94% full** (~30.7 M objects against a ~32.8 M key capacity at
+`4000m`), which is the condition under which nginx evicts; and post-cutover the cache grew past
+that ceiling with no deletions — but NFS removal and the zone enlargement landed together, so
+that observation cannot separate the two hypotheses.
+
+The acceptance criterion here is also wrong: "zero `nfsd` deletions proves the index no longer
+evicts" is a non-sequitur — it proves NFS is gone. The meaningful check is zero nginx `DELETE`
+(unlink) events, distinct from `MOVED_FROM` (which is nginx *writing*).
+
+Because capacity remains live, the key-budget alarm is **required**, not optional. See
 **"AS-BUILT"** at the end of
-`docs/superpowers/plans/2026-08-05-lancache-nas-host-migration.md` for the corrected root cause,
-the corrected acceptance criterion, and the execution deviations (notably the
-`ORCH_LANCACHE_BASE_URL` trap, which silently broke all Epic caching).
+`docs/superpowers/plans/2026-08-05-lancache-nas-host-migration.md`.
 
 ## Out of scope
 

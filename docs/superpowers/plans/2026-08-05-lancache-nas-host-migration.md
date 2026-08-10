@@ -106,11 +106,12 @@ ssh karl@192.168.1.30 'docker run --rm -v orchestrator-db:/v nouchka/sqlite3 /v/
 - [ ] **Capture agent env, strip secrets → `agent.env`:**
 ```bash
 ssh karl@192.168.1.40 'docker inspect orchestrator-agent --format "{{range .Config.Env}}{{println .}}{{end}}"' \
- | grep -E '^(ORCH_|HOME=|TZ=)' | grep -viE 'PASSWORD|TOKEN|SECRET|2FA|OTP' \
+ | grep -E '^(ORCH_|HOME=|TZ=)' | grep -viE 'PASSWORD|SECRET|2FA|OTP' \
  | ssh karl@192.168.1.30 'cat > /home/karl/lancache-host/agent.env'
 ```
 Then verify it has `ORCH_*` keys and NO secret keys; confirm no `ORCH_*_HOST`/`_BIND` hard-codes `.40` (if any bind var exists, set it to `.44`).
-- [ ] Write `/home/karl/lancache-host/.env` (lancache only): `CACHE_INDEX_SIZE=10000m`, `CACHE_DISK_SIZE=54000g`, `MIN_FREE_DISK=100g`, `CACHE_MAX_AGE=3650d`, `CACHE_SLICE_SIZE=10m`, `GENERICCACHE_VERSION=2`, `CACHE_MODE=monolithic`, `USE_GENERIC_CACHE=true`, `NOFETCH=true`, `CACHE_DOMAINS_REPO=https://github.com/uklans/cache-domains.git`, `CACHE_DOMAINS_BRANCH=master`, `UPSTREAM_DNS=192.168.1.1`, `LANCACHE_IP=192.168.1.40`, `TZ=America/Denver`.
+- [ ] **Append `ORCH_LANCACHE_BASE_URL=http://192.168.1.40` to `agent.env`.** The default is `http://127.0.0.1`, correct ONLY when the agent is co-located with lancache. On this split topology every Epic chunk silently fails to cache while the job appears to run (see AS-BUILT). Steam is unaffected, which is what makes it look like an Epic bug.
+- [ ] Write `/home/karl/lancache-host/.env` (lancache only): `CACHE_INDEX_SIZE=10000m`, `CACHE_DISK_SIZE=54000g`, `MIN_FREE_DISK=100g`, `CACHE_MAX_AGE=3650d`, `CACHE_SLICE_SIZE=10m`, `GENERICCACHE_VERSION=2`, `CACHE_MODE=monolithic`, `USE_GENERIC_CACHE=true`, `NOFETCH=true`, `CACHE_DOMAINS_REPO=https://github.com/uklans/cache-domains.git`, `CACHE_DOMAINS_BRANCH=master`, `UPSTREAM_DNS=192.168.1.41; 192.168.1.42`, `LANCACHE_IP=192.168.1.40`, `TZ=America/Denver`.
 - [ ] Write `docker-compose.yml` — monolithic (digest-pinned, `.40`, logging caps), dns (shared netns), agent (`.44`, `dns:["192.168.1.40"]`, `agent.env`, logging caps):
 ```yaml
 services:
@@ -130,7 +131,7 @@ services:
     container_name: lancache-dns
     restart: unless-stopped
     network_mode: "service:lancache-monolithic"
-    environment: [ "USE_GENERIC_CACHE=true", "LANCACHE_IP=192.168.1.40", "UPSTREAM_DNS=192.168.1.1" ]
+    environment: [ "USE_GENERIC_CACHE=true", "LANCACHE_IP=192.168.1.40", "UPSTREAM_DNS=192.168.1.41; 192.168.1.42" ]
     depends_on: [ lancache-monolithic ]
     logging: { driver: json-file, options: { max-size: "50m", max-file: "5" } }
   orchestrator-agent:
@@ -203,9 +204,9 @@ ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter
 - [ ] Write `/home/karl/lancache-host/prefill-cron` as a **concrete crontab** (installed in D2, NOT now):
 ```
 # Steam every 6h — through the agent (inherits dns .40)
-0 */6 * * * docker exec orchestrator-agent sh -c "cd /SteamPrefill && HOME=/steamprefill-cache ./SteamPrefill prefill --no-ansi >> /steamprefill-cache/cron.log 2>&1"
+0 */6 * * * docker exec orchestrator-agent sh -c "cd /SteamPrefill && HOME=/tmp ./SteamPrefill prefill --no-ansi" >> /home/karl/lancache-host/steamprefill-cache/cron.log 2>&1
 # Nightly SteamPrefill self-update
-0 23 * * * docker exec orchestrator-agent sh -c "cd /SteamPrefill && HOME=/steamprefill-cache ./update.sh"
+0 23 * * * docker exec orchestrator-agent sh -c "cd /SteamPrefill && HOME=/tmp ./update.sh" >> /home/karl/lancache-host/steamprefill-cache/update.log 2>&1
 # GOG 04:00,16:00 — run with .40 resolver (see C6); prefer inside a container with --dns 192.168.1.40
 0 4,16 * * * docker run --rm --dns 192.168.1.40 -v /volume1/cache/GOG:/gog python:3.12-slim sh -c "cd /gog && python3 gogrepoc.py download ..."
 # NOTE: EpicPrefill prefill_cronjob.sh is copied but NOT installed — Epic prefill is orchestrator-owned (avoid double-prefill).
@@ -230,7 +231,7 @@ ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter
 - [ ] GARP so LAN forgets the dead VM's MAC (M-4): `ssh karl@192.168.1.30 'docker run --rm --privileged --net=host debian:12 arping -U -c3 -I bridge0 192.168.1.40'` (or from inside the monolithic container). Pause the orchestrator lancache heartbeat + Game_shelf cache-health check for the window.
 
 ### Task B4: Repoint the orchestrator (gated on agent reachability — IMP-2)
-- [ ] **GATE:** `ssh root@10.100.23.105 'curl -fsS -m5 http://192.168.1.44:8780/health && echo AGENT_REACHABLE'`. Only proceed on success.
+- [ ] **GATE:** `ssh root@10.100.23.105 'curl -fsS -m5 http://192.168.1.44:8780/v1/health && echo AGENT_REACHABLE'`. Only proceed on success.
 - [ ] `ssh root@10.100.23.105 'sed -i "s#^ORCH_AGENT_BASE_URL=.*#ORCH_AGENT_BASE_URL=http://192.168.1.44:8780#" /root/orch-lxc.env && grep ORCH_AGENT_BASE_URL /root/orch-lxc.env'` (heartbeat URL stays `.40`).
 - [ ] `ssh root@10.100.23.105 'bash /root/deploy-orchestrator-lxc.sh'`
 
@@ -254,7 +255,7 @@ ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter
 ### Task C4: ACCEPTANCE — forced prefill WROTE to cache AND zero new evictions (B-1, M-6)
 - [ ] Positive-control the trap (local ext4 now, not nfsd): `docker exec lancache-monolithic sh -c 'touch /data/cache/__probe && rm /data/cache/__probe'` → cache-catcher logs the nginx-host-side unlink.
 - [ ] Snapshot: trap deletion count; object/byte count under a chosen depot dir on `/volume1/cache`.
-- [ ] Run a small forced Steam prefill: `docker exec orchestrator-agent sh -c 'cd /SteamPrefill && HOME=/steamprefill-cache ./SteamPrefill prefill --force --no-ansi 2>&1 | tail -5'`.
+- [ ] Run a small forced Steam prefill: `docker exec orchestrator-agent sh -c 'cd /SteamPrefill && HOME=/tmp ./SteamPrefill prefill --force --no-ansi 2>&1 | tail -5'`.
 - [ ] **PASS requires ALL:** (a) C3 `getent` returned `.40`; (b) the depot's object/byte count on `/volume1/cache` **INCREASED** (proves it wrote through the cache, not WAN); (c) the trap deletion count did **NOT** increase (proves no eviction); (d) new Epic objects key under `epicgames/...`, none `egs-cloudfront-...`.
 
 ### Task C5: Durability drills (blockers B-3, B-4)
@@ -271,15 +272,20 @@ ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter
 - [ ] Confirm host stack down: `ssh karl@192.168.1.30 'cd /home/karl/lancache-host && docker compose down'`.
 - [ ] **(Karl-run, classifier-gated)** Restart the intact VM: `nsenter … virsh start 7047a7b9-8496-4a01-af1a-c216e6865a5c`. Confirm `domstate` = `running` and the VM's lancache serves before declaring rollback complete.
 - [ ] Revert `ORCH_AGENT_BASE_URL` to `192.168.1.40:8780` on `.105` + redeploy.
-- [ ] Both stacks bind the same local `/volume1/cache`; rollback loses no data because storage is shared and the CONFIGHASH-pinned CACHE_KEY makes either stack's objects valid HITs for the other. (Pre-cutover object-count snapshot = the evidence.)
+- [ ] **FIRST: `sudo systemctl disable --now lancache-stack.service`** — otherwise the next boot re-runs `compose up` and a macvlan container claims `192.168.1.40` while the VM already holds it (duplicate IP + two nginx writing one cache tree). This violates the plan's own IMP-4 mutual-exclusion rule.
+- [ ] Cached OBJECTS are shared (the CONFIGHASH-pinned CACHE_KEY makes either stack's objects valid HITs for the other), so no re-download is needed. But rollback is **not risk-free**: the VM reaches the cache over **NFS**, and NFS is the path by which ~85k cache files were deleted during the incident. Rolling back re-enables that exposure. Treat it as an emergency measure, and re-arm the deletion monitor immediately.
 
 ---
 
 ## PHASE D — Post-cutover (after C passes)
 - [ ] **D1:** Resume the paused recovery — restart the Steam force-refill against the fixed cache, then a full re-validate sweep to flip Game_shelf statuses.
-- [ ] **D2:** Install `/home/karl/lancache-host/prefill-cron` (Steam 6h + nightly update + GOG, finalized in C6). Epic stays orchestrator-owned (not installed).
-- [ ] **D3 (IMP-8):** Stand up a STANDING eviction monitor before removing the trap: (1) a permanent watcher of **nginx worker unlinks** on local ext4 (not nfsd); (2) a `.30` cron computing on-disk object-count vs the `CACHE_INDEX_SIZE` key budget, alerting at ~80% to uptime-kuma (`.57`); add a DNS `:53` probe to the orchestrator heartbeat.
-- [ ] **D4 (IMP-9):** Off-host backup of `/home/karl/lancache-host/` (compose, `.env`, `agent.env`, `cachedomains/` incl. Epic overlay, prefill `Config/`, `create-network.sh`, the two systemd units) to `.105`/Mac. Decommission the VM (`virsh undefine` + reclaim disk) ONLY after: C5 reboot survival PASSED, the firmware-case rebuild-from-backup drill PASSED, the standing monitor (D3) verified firing, the mode-000/index_serv class stayed quiet ≥1 reboot cycle, AND ~1 week floor elapsed. Remove the temporary trap only after D3 is confirmed firing.
+- [x] **D2 (Steam):** DONE 2026-08-10. `karl` cannot install a crontab on UGOS (`/var/spool/cron` denied, no passwordless sudo) — installed by the operator via `sudo crontab -u karl`. **`HOME=/tmp`, NOT `/steamprefill-cache`** (see AS-BUILT).
+- [ ] **D2 (GOG):** NOT installed — the documented job cannot work (bridge container + `--dns 192.168.1.40` is blocked by macvlan isolation; target `Game_backup/` does not exist). Tracked in issue #267.
+- [x] **D2 (Epic):** DONE 2026-08-10 — Epic is orchestrator-owned via `ORCH_SCHEDULED_PREFILL_ENABLED`, which was **false** and is now **true**. Both halves of the prefill split were off until this date.
+- [x] **D3 part 1 (unlink watcher):** DONE — the cache-catcher fanotify guard (see AS-BUILT). Counts only real `DELETE` (unlink) of non-temp files; `MOVED_FROM` is nginx *writing*.
+- [ ] **D3 part 2 (key-budget alarm): STILL REQUIRED.** An earlier draft of the AS-BUILT dropped this on the strength of a root-cause retraction that was itself wrong (see the RETRACTION-CORRECTED note). At 4000m the zone held ~32.8M keys and the library was ~30.7M — **94% full**. At 10000m (~81.9M keys) it is ~42%. Alarm at ~80% of the key budget, i.e. ~65M objects.
+- [ ] **D3 part 3 (DNS `:53` probe): STILL REQUIRED.** Not implemented. This is exactly the check that would have caught the ~12h `lancache-dns` orphan recorded in the AS-BUILT.
+- [ ] **D4 (IMP-9):** Off-host backup of `/home/karl/lancache-host/` (compose, `.env`, `agent.env`, `cachedomains/` incl. Epic overlay, prefill `Config/`, `create-network.sh`, the two systemd units, **the `cache-catcher/Dockerfile` and the `cache-catcher-log` volume — which holds `alert.env` (SMTP credential), `fanotify_guard.py`, `entrypoint.sh` and the persisted CA bundle; without it a restored stack has NO alerting**, and **the installed crontab**) to `.105`/Mac. Decommission the VM (`virsh undefine` + reclaim disk) ONLY after: C5 reboot survival PASSED, the firmware-case rebuild-from-backup drill PASSED, the standing monitor (D3) verified firing, the mode-000/index_serv class stayed quiet ≥1 reboot cycle, AND ~1 week floor elapsed. Remove the temporary trap only after D3 is confirmed firing.
 
 ---
 
@@ -296,29 +302,48 @@ Everything above is the plan **as written before cutover**. It is preserved uned
 reasoning — including a wrong turn — is the most useful part of the record. This section
 records what actually happened. Where the two disagree, **this section is correct**.
 
-## ⚠ RETRACTED: the keys_zone-eviction root cause
+## ⚠ ROOT CAUSE: NOT ascertained. (An earlier draft of this section RETRACTED the
+## keys_zone theory. That retraction was itself wrong and is withdrawn.)
 
-The plan frames the mass chunk-deletion as **nginx cache-manager eviction** caused by a
-full `keys_zone` (4000m at ~30.7 M objects), and sets the acceptance test accordingly.
-**That theory is wrong.** Post-cutover fanotify evidence:
+**What is established.** Over six days of whole-filesystem fanotify monitoring on the NAS,
+**85,427** real cache-file `DELETE` (unlink) operations were recorded, and **every one was
+attributed to `comm=nfsd`**. Post-cutover, on local ext4 with `keys_zone=10000m`, there have
+been **zero** deletions and the cache has grown to ~34.4 M objects.
 
-- Over six days of whole-filesystem `FAN_DELETE|FAN_MOVED_FROM` monitoring, nginx performed
-  **zero (0) `DELETE`/unlink operations** on cache files — only `MOVED_FROM` events, which
-  are nginx *writing* cache (`use_temp_path=off` renames `<hash>.NNNN` into place).
-- The only real cache-file deletions in the whole log came from **`comm=nfsd`** (2026-08-04).
-- Post-cutover the cache grew to **~34.4 M objects — past the supposed ~30.7 M "ceiling"** —
-  with zero eviction, at `keys_zone=10000m`, `max_size=54000g`, `min_free=100g`,
-  `inactive=3650d`, 30 TB free.
+**What that does NOT establish — and why the earlier retraction was wrong.** `nfsd` is the
+kernel NFS *server* daemon on the NAS. It deletes files only because a **remote client asked
+it to**. The watcher runs on the NAS (`/volume1`) — the *server* side of the export — so it
+**cannot see the originating process**. Any deletion initiated by anything on the `.40` VM,
+**including nginx's own cache-manager**, arrives as an NFS UNLINK executed by `nfsd` and is
+logged as `comm=nfsd`, never as `comm=nginx`.
 
-**Actual root cause: NFS.** The migration fixed the incident because it moved the cache to a
-local ext4 bind mount and removed the NFS layer — not because it enlarged the index. The
-index bump was harmless and remains a reasonable headroom decision, but it was not the fix.
+So "`nfsd` deleted the files" identifies the **transport, not the actor**. An earlier draft of
+this section read that as proof nginx never evicted. It is not. The originating process was
+never identified, and now cannot be — the VM is retired.
 
-**Corrected acceptance criterion.** The plan's "zero `nfsd` chunk-deletions proves the index
-no longer evicts" is a non-sequitur: absence of `nfsd` deletions proves NFS is gone. The
-meaningful eviction check is **zero nginx `DELETE` (unlink) events** — distinct from
-`MOVED_FROM`, which is normal write traffic. Conflating the two produced a false
+**The capacity hypothesis is, if anything, strengthened.** nginx sizes its key zone at roughly
+128 bytes per key:
+
+| | keys_zone | capacity | objects | utilisation |
+|---|---|---|---|---|
+| VM, at incident | 4000m | ~32.8 M keys | ~30.7 M | **~94%** |
+| NAS host, now | 10000m | ~81.9 M keys | ~34.4 M | ~42% |
+
+At ~94% the zone was effectively full — precisely the condition under which nginx's
+cache-manager evicts to reclaim keys. And the post-cutover growth *past* the old ~30.7 M
+ceiling is exactly what a larger zone predicts. Note also that the post-cutover "zero nginx
+unlinks" observation cannot discriminate between the hypotheses, because the zone was enlarged
+at the same time NFS was removed — both changes landed together.
+
+**Corrected acceptance criterion.** The plan's "zero `nfsd` chunk-deletions proves the index no
+longer evicts" is a non-sequitur regardless of cause: absence of `nfsd` deletions proves NFS is
+gone. The meaningful eviction check is **zero nginx `DELETE` (unlink) events**, which must be
+distinguished from `MOVED_FROM` — with `use_temp_path=off` nginx renames `<hash>.NNNN` into
+place when *writing*, so `MOVED_FROM` is write traffic. Conflating the two produced a false
 "cache eviction detected" alarm on 2026-08-09 during the recovery refill.
+
+**Operational consequence.** Because capacity remains a live hypothesis, the **key-budget alarm
+(D3 part 2) must be implemented**, not dropped. Alarm at ~80% of the key budget (~65 M objects).
 
 ## Execution deviations (things the plan did not anticipate)
 
@@ -349,7 +374,7 @@ meaningful eviction check is **zero nginx `DELETE` (unlink) events** — distinc
   partial + 177 failed at the worst point). Residual: 15 dead/delisted Epic apps (404,
   blocked), 3 intentionally-excluded Steam tools, a few sweep-settled partials.
 - **Cache:** ~34.4 M objects, zero real eviction, local ext4, no NFS.
-- **D1** done. **D2** cron installed. **D3** superseded — see below. **D4** still gated.
+- **D1** done. **D2** — see the corrected D2 entries above: BOTH halves of the prefill split were off until 2026-08-10 (the host cron was never installed AND `ORCH_SCHEDULED_PREFILL_ENABLED` was false). Steam + Epic now live; GOG blocked (issue #267). **D3** part 1 done; parts 2 and 3 still required. **D4** still gated.
 
 ## D3 as-built — the standing monitor (and its C5 durability fix)
 
