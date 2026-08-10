@@ -1182,7 +1182,7 @@ triggers, and inspection — plus two local in-process admin commands. Fills the
   - `game show`/`block`/`unblock` resolve an id via `GET /games/{game_id}`
     (superseded the original list-scan; see #260).
 
-**Test Coverage:** 101 CLI tests (`CliRunner` + `httpx.MockTransport`): exit-code
+**Test Coverage:** 100 CLI tests (`CliRunner` + `httpx.MockTransport`): exit-code
 mapping, the Steam 2FA two-step (200/202→200) asserting secrets are never
 echoed, `config show` redaction, `db migrate`/`vacuum` on a temp DB, the `limit`
 pagination param, `game show` found/not-found, and id resolution via the detail

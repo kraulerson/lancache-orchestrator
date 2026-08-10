@@ -63,26 +63,20 @@ def game_list(ctx: click.Context, platform: str | None, status_: str | None, lim
     click.echo(output.table(["ID", "PLATFORM", "APP_ID", "TITLE", "STATUS", "BLOCKED"], rows))
 
 
-# The games router's body for a missing game. A 404 carrying anything else came
-# from somewhere other than "no such game" — a wrong --url/ORCH_API_URL, a
-# reverse proxy, or a server predating the detail endpoint — and must keep the
-# server's own message instead of being blamed on the id (#261).
-_GAME_NOT_FOUND_DETAIL = "game not found"
-
-
 def _fetch_game(client: OrchClient, game_id: int) -> dict[str, Any]:
     """Return the game row for ``game_id`` via ``GET /api/v1/games/{game_id}``.
 
     Resolving an id must not go through the list endpoint: the server caps
     ``/games`` at 500 rows, so a list-scan cannot see most of the library and
     silently fails for higher ids (#260).
+
+    A 404 is deliberately NOT re-worded. The server already answers a missing
+    game with ``game not found``, so the client's own ``HTTP 404: game not
+    found`` is clear; rewriting it required classifying the status, which
+    conflated a missing game with a missing *route* (a wrong ``--url``) and
+    reproduced the very misdiagnosis #260 exists to remove.
     """
-    try:
-        data = client.get(f"/api/v1/games/{game_id}")
-    except ApiError as e:
-        if e.status_code == 404 and e.detail == _GAME_NOT_FOUND_DETAIL:
-            raise ApiError(f"game {game_id} not found") from None
-        raise
+    data = client.get(f"/api/v1/games/{game_id}")
     game: dict[str, Any] = data["game"]
     return game
 
@@ -193,9 +187,10 @@ def game_block(ctx: click.Context, game_id: int, reason: str | None) -> None:
 def game_unblock(ctx: click.Context, game_id: int) -> None:
     """Remove a game from the block list (idempotent)."""
     client, platform, app_id = _resolve_app(ctx, game_id)
-    # Encode app_id — an Epic appName can contain '/' which would otherwise split
-    # into extra path segments and mis-route the DELETE.
-    resp = client.delete(f"/api/v1/block-list/{platform}/{quote(app_id, safe='')}")
+    # Encode BOTH segments. An Epic appName can contain '/', and a '/'/'?'/'#'
+    # in either field would otherwise split the path and re-target the DELETE at
+    # a different block-list row while still reporting success (#261).
+    resp = client.delete(f"/api/v1/block-list/{quote(platform, safe='')}/{quote(app_id, safe='')}")
     if (resp or {}).get("removed"):
         output.success(f"unblocked game {game_id} ({platform}:{app_id}).")
     else:

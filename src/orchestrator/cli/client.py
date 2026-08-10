@@ -28,20 +28,7 @@ class AuthError(OrchClientError):
 
 
 class ApiError(OrchClientError):
-    """A non-2xx response. Carries the HTTP status and the server's ``detail``.
-
-    Callers MUST branch on ``status_code``/``detail`` rather than string-matching
-    the rendered message: a 404 from a missing *route* (wrong --url, reverse
-    proxy) and a 404 for a missing *resource* render alike, and conflating them
-    reports a misconfigured URL as a missing record (#260/#261).
-    """
-
     exit_code = 1
-
-    def __init__(self, message: str, *, status_code: int | None = None, detail: str = "") -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.detail = detail
 
 
 class OrchClient:
@@ -94,16 +81,7 @@ class OrchClient:
                 detail = str(resp.json().get("detail", ""))
             except Exception:
                 detail = resp.text[:200]
-            if not detail:
-                # A bodiless error (common from reverse proxies) would otherwise
-                # render as a bare "HTTP 404: " with nothing after the colon —
-                # exactly the misconfigured-URL case this must make actionable.
-                detail = resp.reason_phrase or "no response body"
-            raise ApiError(
-                f"HTTP {resp.status_code}: {detail}",
-                status_code=resp.status_code,
-                detail=detail,
-            )
+            raise ApiError(f"HTTP {resp.status_code}: {detail}")
         if resp.content:
             return resp.json()
         return None
