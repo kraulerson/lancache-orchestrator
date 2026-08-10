@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import httpx
 
+from orchestrator.cli.commands.game import _GAME_NOT_FOUND_DETAIL
+
 _GAMES = {
     "games": [
         {"id": 1, "platform": "steam", "app_id": "730", "title": "CS2", "status": "up_to_date"},
@@ -36,12 +38,16 @@ def _detail(req: httpx.Request) -> httpx.Response:
     404 rather than an exception, so the test fails on its own assertion instead
     of an opaque ValueError raised inside the transport.
     """
-    tail = req.url.path.rsplit("/", 1)[-1]
+    # Dispatch on the full path shape, not just "last segment is numeric" — a
+    # block-list route (…/block-list/steam/730) also ends in digits and would
+    # otherwise be answered as a game lookup, giving a false pass.
+    prefix = "/api/v1/games/"
+    tail = req.url.path[len(prefix) :] if req.url.path.startswith(prefix) else ""
     if not tail.isdigit():
         return httpx.Response(404, json={"detail": "Not Found"})
     match = next((g for g in _GAMES["games"] if g["id"] == int(tail)), None)
     if match is None:
-        return httpx.Response(404, json={"detail": "game not found"})
+        return httpx.Response(404, json={"detail": _GAME_NOT_FOUND_DETAIL})
     return httpx.Response(200, json={"game": match})
 
 
@@ -51,9 +57,10 @@ def test_game_show_found(mock):
     assert "Turaco" in r.output
 
 
-def test_game_show_not_found_exits_1(mock):
-    r = mock(["game", "show", "999"], _detail)
-    assert r.exit_code == 1
+# (test_game_show_not_found_exits_1 removed: it asserted only exit_code == 1,
+# which BOTH 404 branches produce, so it could not fail for any reason
+# test_game_show_unknown_id_message_has_no_stale_pagination_wording — which
+# asserts the same exit code plus the message content — does not already catch.)
 
 
 def test_game_prefill_triggers(mock):
@@ -164,11 +171,15 @@ def test_game_block_resolves_and_posts(mock):
 
 
 def test_game_block_unknown_id_exit_1(mock):
+    # Must send the body the server actually returns (_GAME_NOT_FOUND_DETAIL),
+    # not the OpenAPI `responses` description text — otherwise this travels the
+    # re-raise branch and stops covering the missing-game path it is named for.
     r = mock(
         ["game", "block", "999"],
-        lambda req: httpx.Response(404, json={"detail": "No game with that id"}),
+        lambda req: httpx.Response(404, json={"detail": _GAME_NOT_FOUND_DETAIL}),
     )
     assert r.exit_code == 1
+    assert "game 999 not found" in (r.output + (r.stderr or ""))
 
 
 def test_game_unblock_resolves_and_deletes(mock):
@@ -403,3 +414,84 @@ def test_game_show_renders_field_lines_not_the_raw_envelope(mock):
     assert r.exit_code == 0, r.output
     assert "title              Turaco" in r.output, r.output
     assert "{'id'" not in r.output, r.output
+
+
+# --- round-3 remediation (#261 re-review) ---------------------------------------
+#
+# The first remediation guarded app_id only by accident (quote() raises on None)
+# and left `platform` interpolated raw, so unblock still issued
+# DELETE /block-list/None/<app_id> at exit 0. Validate the resolved identity at
+# the source instead of relying on what a downstream call happens to reject.
+
+
+def _game_body(**over):
+    game = {"id": 7, "platform": "steam", "app_id": "730", "title": "X", "status": "failed"}
+    game.update(over)
+    return {"game": game}
+
+
+def _detail_7(body, on_action=None):
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/v1/games/7":
+            return httpx.Response(200, json=body)
+        return (on_action or (lambda r: httpx.Response(200, json={"removed": 0})))(req)
+
+    return handler
+
+
+def test_unblock_rejects_null_platform_instead_of_targeting_none(mock):
+    """A null platform must not reach the block-list path as the literal 'None'."""
+    seen = {}
+
+    def on_action(req: httpx.Request) -> httpx.Response:
+        seen["path"] = req.url.path
+        return httpx.Response(200, json={"removed": 0})
+
+    r = mock(["game", "unblock", "7"], _detail_7(_game_body(platform=None), on_action))
+    assert r.exit_code == 1, r.output
+    assert "path" not in seen, seen
+
+
+def test_block_rejects_null_app_id_instead_of_posting_null(mock):
+    """`block` must not POST a null app_id — it has no quote() to raise for it."""
+    seen = {}
+
+    def on_action(req: httpx.Request) -> httpx.Response:
+        seen["path"] = req.url.path
+        return httpx.Response(201, json={})
+
+    r = mock(["game", "block", "7"], _detail_7(_game_body(app_id=None), on_action))
+    assert r.exit_code == 1, r.output
+    assert "path" not in seen, seen
+
+
+def test_non_404_carrying_game_not_found_detail_is_not_a_missing_game(mock):
+    """Pins the status_code half of the classifier. A 503 whose body happens to
+    read 'game not found' must NOT be reported as a missing game — otherwise the
+    status_code check is dead weight and an outage reads as a deleted game."""
+    r = mock(
+        ["game", "block", "7"],
+        lambda req: httpx.Response(503, json={"detail": "game not found"}),
+    )
+    out = r.output + (r.stderr or "")
+    assert r.exit_code == 1
+    assert "503" in out, out
+    assert "game 7 not found" not in out, out
+
+
+def test_game_show_writes_nothing_when_a_field_is_malformed(mock):
+    """Output must be all-or-nothing: a malformed field must not leave a partial
+    record on stdout that a redirect would capture as a valid short record."""
+    r = mock(["game", "show", "7"], lambda req: httpx.Response(200, json=_game_body(status=5)))
+    assert r.exit_code == 1, r.output
+    assert "platform" not in r.output, r.output
+    assert "730" not in r.output, r.output
+
+
+def test_bodiless_404_still_names_the_status(mock):
+    """A 404 with no JSON body must not render as a blank 'HTTP 404: '."""
+    r = mock(["game", "show", "7"], lambda req: httpx.Response(404, content=b""))
+    out = (r.output + (r.stderr or "")).strip()
+    assert r.exit_code == 1
+    assert "404" in out, out
+    assert not out.endswith(":"), out

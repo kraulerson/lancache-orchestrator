@@ -1182,10 +1182,13 @@ triggers, and inspection — plus two local in-process admin commands. Fills the
   - `game show`/`block`/`unblock` resolve an id via `GET /games/{game_id}`
     (superseded the original list-scan; see #260).
 
-**Test Coverage:** 47 CLI tests (`CliRunner` + `httpx.MockTransport`): exit-code
+**Test Coverage:** 101 CLI tests (`CliRunner` + `httpx.MockTransport`): exit-code
 mapping, the Steam 2FA two-step (200/202→200) asserting secrets are never
 echoed, `config show` redaction, `db migrate`/`vacuum` on a temp DB, the `limit`
-pagination param, `game show` found/not-found. Full suite: 1121 pass.
+pagination param, `game show` found/not-found, and id resolution via the detail
+endpoint — including that a route-level 404 is not misreported as a missing game
+and that a malformed field never yields partial output (#260/#261).
+Full suite: 1583 pass.
 ruff/mypy(strict)/gitleaks/semgrep clean. New deps: none.
 
 **Related ADRs:** None new. Spec:
@@ -1194,7 +1197,6 @@ ruff/mypy(strict)/gitleaks/semgrep clean. New deps: none.
 
 **Known Limitations:**
   - **No `--json`** (machine output deferred Post-MVP, OQ6).
-  - **`game block|unblock` deferred** — ships with the F8 block-list API.
   - **`game list` shows at most 500 rows** and does not surface `meta.has_more`,
     so a truncated table is indistinguishable from a complete one. (Id *lookup*
     is no longer capped — `show`/`block`/`unblock` use `GET /games/{game_id}`

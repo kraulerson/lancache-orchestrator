@@ -35,6 +35,8 @@ The CI dependency audit began failing on `h2==4.3.0`: **GHSA-6hr6-w5qg-qmwg** (m
 - **Changed:** `ApiError` now carries `status_code` and the server's `detail`, and the CLI branches on those instead of string-matching the rendered message. An adversarial review of the first cut caught that prefix-matching `"HTTP 404"` classified *every* 404 as a missing game — so a wrong `--url`/`ORCH_API_URL`, a reverse proxy, or a pre-#141 server reported `game <id> not found`, reproducing the very misdiagnosis this change exists to remove. Only a 404 whose detail is the games router's `game not found` is now attributed to the id; any other 404 keeps the server's own message.
 - `game prefill`/`validate`/`purge` were never affected — they POST to `/api/v1/games/{game_id}/…` and never resolved the id client-side.
 
+- **Changed (exit codes):** `game show` now **exits 1** on a malformed API record (e.g. a non-string `status`) instead of exiting 0 having rendered a fabricated value, and it writes its output all-or-nothing so a redirect never captures a half-written record. `game block`/`unblock` now reject a response whose `platform`/`app_id` is missing or non-string instead of sending the literal `"None"` to the block-list endpoint and reporting success. Scripts that read these exit codes will see failures where they previously saw success — that is the point: the previous success was false.
+
 Note (unchanged behavior, documented for operators): the block-list only gates **scheduled** prefill. An explicit force-prefill still runs on a blocked game, so a bulk force-prefill re-attempts known-dead apps.
 
 ### Changed — manual-downloads endpoint supports Amazon/Humble/Itch (space/dot launchers + files) — 2026-07-10

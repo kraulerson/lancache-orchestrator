@@ -815,7 +815,15 @@ class TestGameDetail:
             headers={"Authorization": f"Bearer {VALID_TOKEN}"},
         )
         assert r.status_code == 404
-        assert "not found" in r.json()["detail"].lower()
+        # Pinned to the exact literal, not a substring: the CLI classifies a
+        # missing game by equality against this detail, so a reword here (e.g.
+        # aligning with the prefill/validate/purge routers' "game {id} not
+        # found") would silently downgrade `orchestrator-cli game show <id>`
+        # to a raw "HTTP 404: ..." with no other failing test. Keep the two
+        # ends bound (#261).
+        from orchestrator.cli.commands.game import _GAME_NOT_FOUND_DETAIL
+
+        assert r.json()["detail"] == _GAME_NOT_FOUND_DETAIL
 
     async def test_non_integer_id_returns_400(self, client, populated_pool):
         # The app's global RequestValidationError handler maps path/query/body

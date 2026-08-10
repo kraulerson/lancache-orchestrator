@@ -94,6 +94,11 @@ class OrchClient:
                 detail = str(resp.json().get("detail", ""))
             except Exception:
                 detail = resp.text[:200]
+            if not detail:
+                # A bodiless error (common from reverse proxies) would otherwise
+                # render as a bare "HTTP 404: " with nothing after the colon —
+                # exactly the misconfigured-URL case this must make actionable.
+                detail = resp.reason_phrase or "no response body"
             raise ApiError(
                 f"HTTP {resp.status_code}: {detail}",
                 status_code=resp.status_code,

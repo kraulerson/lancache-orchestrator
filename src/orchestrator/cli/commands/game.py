@@ -94,9 +94,14 @@ def _fetch_game(client: OrchClient, game_id: int) -> dict[str, Any]:
 def game_show(ctx: click.Context, game_id: int) -> None:
     """Show one game."""
     match = _fetch_game(make_client(ctx), game_id)
-    for key, value in match.items():
-        rendered = output.status_label(value) if key == "status" else value
-        click.echo(f"{key:18} {rendered}")
+    # Render every field before writing any of it: a malformed field must not
+    # leave a half-written record on stdout that a redirect would capture as a
+    # valid (just short) game (#261).
+    lines = [
+        f"{key:18} {output.status_label(value) if key == 'status' else value}"
+        for key, value in match.items()
+    ]
+    click.echo("\n".join(lines))
 
 
 def _trigger(
@@ -154,7 +159,16 @@ def _resolve_app(ctx: click.Context, game_id: int) -> tuple[OrchClient, str, str
     Needed because the block-list is keyed by (platform, app_id), not game id."""
     client = make_client(ctx)
     match = _fetch_game(client, game_id)
-    return client, match["platform"], match["app_id"]
+    platform, app_id = match.get("platform"), match.get("app_id")
+    # Validate here rather than leaning on what a downstream call happens to
+    # reject: `unblock` only caught a bad app_id because quote() raises on
+    # non-str, and nothing at all caught a bad platform — so a null field
+    # reached the wire as the literal "None" and reported success (#261).
+    if not isinstance(platform, str) or not platform:
+        raise ApiError(f"game {game_id}: API response has no usable platform")
+    if not isinstance(app_id, str) or not app_id:
+        raise ApiError(f"game {game_id}: API response has no usable app_id")
+    return client, platform, app_id
 
 
 @game.command("block")
