@@ -15,7 +15,7 @@ lancache currently runs **inside a VM (`.40`, ~10 GB RAM) hosted on the UGREEN D
 
 Additionally the `.40` VM is chronically **CPU-steal-bound** (qemu contention on the NAS).
 
-**Goal:** move lancache (monolithic + DNS), the orchestrator-agent, and the Steam/Epic/GOG prefill tooling **off the VM and onto the NAS host as Docker containers on a macvlan network**, so we can (a) give the index far more RAM (stop eviction), (b) read the cache as a local filesystem (kill the NFS bug class), and (c) drop the VM CPU-steal — while keeping the `.40` IP so no client reconfiguration is needed.
+**Goal:** move lancache (monolithic + DNS), the orchestrator-agent, and the Steam/Epic/GOG prefill tooling **off the VM and onto the NAS host as Docker containers on a macvlan network**, so we can (a) give the index far more RAM (**remove the keys_zone-full eviction trigger at the current ~30.7 M-object library** — the trigger `max_size`/`inactive` remain far from their limits), (b) read the cache as a local filesystem (kill the NFS bug class), and (c) drop the VM CPU-steal (contention remains, unmeasured) — while keeping the `.40` IP so no client reconfiguration is needed.
 
 ## Verified feasibility (live, this session)
 
@@ -108,6 +108,34 @@ NAS .30 host (VM retired) ──► docker macvlan net  (parent bridge0, 192.168
 - **UGOS reboot / persistence** → containers use `restart=unless-stopped`; macvlan net + compose defined on persistent storage; cron on host; verify survives a NAS reboot before decommissioning the VM.
 - **Custom Epic domain clobbered by repo pull** → persistent overlay, not an edit to the tracked `epicgames.txt`.
 - **Auth/2FA** → Config copied as files; Claude never reads/echoes tokens; re-auth (if needed) is Karl's.
+
+## Review hardening (2026-08-05 adversarial review — 4 blockers + IMP-1–9)
+
+The design is sound and the benefits are real, but the first-draft runbook had defects that would let the migration silently fail its own acceptance test. Material design changes now baked into the plan:
+
+- **Agent DNS (blocker):** a macvlan container does NOT inherit the host resolver — the agent MUST set `dns: ["192.168.1.40"]`, else prefill resolves CDN domains to the real internet and caches nothing. The acceptance test must assert both that the agent resolves to `.40` AND that cache bytes on `/volume1/cache` **increased** (not merely that the deletion trap stayed flat).
+- **Agent env (blocker):** the agent runs its own captured `agent.env` (secrets stripped), never the lancache `.env`.
+- **DNS-restart watcher (blocker):** because dns shares monolithic's netns, a monolithic restart silently kills `.40:53`. A host systemd watcher (`docker events … event=start → docker restart lancache-dns`) fixes it; verified by a restart drill.
+- **Boot-guard network (blocker):** the macvlan net is imperative + `external` → a UGOS firmware update that re-provisions Docker wipes it. A `lancache-stack` systemd unit recreates the net + `compose up` after boot; verified by a firmware-case rebuild drill.
+- **Prove the network before cutover:** the only prior proof was a 3-packet ICMP ping on a non-standard macvlan-on-a-Linux-bridge topology. A full L4 pre-flight (sustained TCP 80/443 past the 300 s FDB window, UDP+TCP 53, same-host sibling `.44→.40`, cross-subnet `.105→.44`) runs on throwaway IPs `.45/.46` **before** the destructive VM shutdown, and B4 is gated on `.105→.44:8780` reachability.
+- **Digest-pin images:** monolithic + dns pinned to the running VM's exact digest (not a fresh `:latest`), because a `:latest` that changed `levels=2:2`/cache-key would orphan all ~25 TB.
+- **VM/host mutual exclusion:** confirm `virsh domstate = shut off` before `compose up`; the two lancache stacks must never run simultaneously against the shared cache.
+- **Standing eviction monitor:** replace the one-shot acceptance test with a permanent monitor (nginx-unlink watch on local ext4 + object-count-vs-key-budget alert to uptime-kuma `.57`) before removing the trap; decommission the VM only on firmware-survival evidence + an off-host backup, not a bare timer.
+- **Index size:** `10000m` kept per Karl's decision (16 GB host); the honest caveat is that zone RSS grows with key count and competes with page cache — mitigated by post-cutover memory monitoring, not a fallback to 8000m.
+
+## ⚠ Root cause RETRACTED post-cutover — read the as-built section
+
+This design attributes the mass chunk-deletion to **nginx cache-manager eviction from a full
+`keys_zone`**, and derives its acceptance criterion from that. Post-cutover fanotify evidence
+disproved it: nginx performed **zero unlinks in six days**, the real deletions came from
+**`nfsd`**, and the cache subsequently grew *past* the supposed object ceiling with no eviction.
+The migration fixed the incident by **removing NFS**, not by enlarging the index.
+
+The design and its hardening are otherwise sound and were executed essentially as written. See
+**"AS-BUILT"** at the end of
+`docs/superpowers/plans/2026-08-05-lancache-nas-host-migration.md` for the corrected root cause,
+the corrected acceptance criterion, and the execution deviations (notably the
+`ORCH_LANCACHE_BASE_URL` trap, which silently broke all Epic caching).
 
 ## Out of scope
 
