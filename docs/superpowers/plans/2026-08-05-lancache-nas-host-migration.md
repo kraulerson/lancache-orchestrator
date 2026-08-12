@@ -1,6 +1,9 @@
-# lancache → NAS-host Docker migration — implementation plan (runbook, rev 2)
+# lancache → NAS-host Docker migration — implementation plan (runbook, rev 3)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax. This is an **infra migration runbook**, not app code — each task's "test" is a verification command with expected output. **Rev 2** incorporates the 2026-08-05 adversarial review (4 blockers + IMP-1–9 + minors).
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax. This is an **infra migration runbook**, not app code — each task's "test" is a verification command with expected output.
+>
+> **Rev 2** incorporated the 2026-08-05 pre-cutover adversarial review (4 blockers + IMP-1–9 + minors).
+> **Rev 3 (2026-08-12)** folds the post-cutover reality back into the tasks: the corrected root cause (see **ROOT CAUSE** in AS-BUILT), the review defects that would have failed silently (zero-byte systemd units from heredocs without `-i`; a firmware drill that never ran `ExecStart`; a rollback that disabled the boot guard fourth while calling itself first), and the four live faults found on 2026-08-12 (deviations 6–9). **The migration is DONE — Phases A/B/C are a historical record.** What is still open is listed under PHASE D.
 
 **Goal:** Move lancache (monolithic + DNS), the orchestrator-agent, and Steam/Epic/GOG prefill off the `.40` VM onto the NAS host (`.30`) as Docker containers on a macvlan network — **removing the keys_zone-full eviction trigger at the current ~30.7 M-object library** (the incident's cause), reading the cache as a local filesystem (kills the NFS bug class), and dropping the VM CPU-steal — while keeping the `.40` IP so no client reconfiguration is needed.
 
@@ -17,7 +20,7 @@
 - **Agent DNS (blocker B-1):** the agent service MUST set `dns: ["192.168.1.40"]` — a macvlan container does not inherit the host resolver; without this, prefill resolves CDN domains to the real internet and caches nothing.
 - **Agent env (blocker B-2):** the agent uses its OWN `agent.env` (captured, secrets stripped), NEVER the lancache `.env`.
 - **VM/host mutual exclusion (IMP-4):** the VM lancache and the host lancache must NEVER run simultaneously against `/volume1/cache`. Before `compose up`, confirm `virsh domstate <uuid>` = `shut off`. Before rollback `virsh start`, confirm `docker compose ps` shows the host stack fully down.
-- **Epic overlay:** pre-populate `/data/cachedomains`, add `egs-cloudfront-chunks.epicgamescdn.com` to `epicgames.txt`, run monolithic with `NOFETCH=true` (entrypoint does `git reset --hard` every start otherwise).
+- **Epic overlay — BOTH containers, or it silently does nothing:** pre-populate `/data/cachedomains`, add `egs-cloudfront-chunks.epicgamescdn.com` to `epicgames.txt`, and mount that same directory into **`lancache-monolithic`** (`/data/cachedomains`) **AND `lancache-dns`** (`/opt/cache-domains`), with `NOFETCH=true` on **both** — each re-fetches upstream cache-domains at every start otherwise (monolithic `git reset --hard`; dns re-clones via `dnstool generate`). Mounting it into monolithic alone is the exact configuration that let Epic Launcher traffic bypass the cache for the whole post-cutover period: nginx knew the domain, DNS did not, so clients were never sent to `.40`. Verify at the DNS layer, not just the nginx map (C2/C3).
 - **Destructive/classifier-gated steps** (Phase B VM shutdown/start, Phase-C `--privileged --pid=host` trap execs, rollback `virsh start`): **Karl runs/approves.** Claude does all non-destructive build + verification.
 - **Secrets:** never read/echo Steam/Epic passwords, 2FA, tokens. Copy Config/auth dirs file-to-file only. Re-auth (if a session expired) is Karl's.
 - **Working dir on `.30`:** `/home/karl/lancache-host/` — confirm it's on `/volume1` (Task A9), not the small system disk.
@@ -287,6 +290,50 @@ ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter
 
 ### Task A12: Prefill cron artifact + GOG runtime inventory (IMP-6, M-12)
 - [ ] Inventory GOG on `.40` BEFORE shutdown: `ssh karl@192.168.1.40 'crontab -l | grep -i gog; head -1 /lancache/lancache/cache/GOG/downloadscript; python3 --version; pip3 freeze 2>/dev/null | grep -iE "requests|html5lib|xml" '` — capture interpreter + deps + cookie/config location.
+- [ ] Write `/home/karl/lancache-host/run-steam-prefill.sh` (`chmod +x`). The crontab below calls
+  it; **without this file the Steam line is a no-op.** It exists because a bare `flock -n` in cron
+  skips *silently*, and SteamPrefill has been observed to finish and then hang forever (AS-BUILT
+  deviation 8) — one hung holder would then skip every tick with nothing said:
+```sh
+#!/bin/sh
+set -u
+BASE=/home/karl/lancache-host
+LOCK="$BASE/.locks/steamprefill.lock"; SKIPS="$BASE/.locks/steamprefill.skips"
+LOG="$BASE/steamprefill-cache/cron.log"; MAX_SKIPS=3; RUN_MAX=10h
+mkdir -p "$(dirname "$LOCK")" "$(dirname "$LOG")"
+say() { echo "$(date -Is) $*" >> "$LOG"; }
+alert() { docker exec cache-catcher python3 /log/fanotify_guard.py --send-alert "$1" "$2" \
+            >> "$LOG" 2>&1 || say "ALERT-SEND-FAILED: $1"; }
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  n=$(cat "$SKIPS" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$SKIPS"
+  say "SKIP #$n: previous Steam prefill still holding the lock"
+  if [ "$n" -ge "$MAX_SKIPS" ]; then
+    alert "lancache ALERT: Steam prefill skipped $n runs in a row" \
+      "Lock held across $n scheduled runs (~$((n * 6))h). Either a prefill is still running, or a
+SteamPrefill finished and hung without exiting. Check: ps -eo pid,etime,args | grep SteamPrefill
+If it already printed 'Prefill complete!', it is hung. Log: $LOG"
+    echo 0 > "$SKIPS"
+  fi
+  exit 0
+fi
+echo 0 > "$SKIPS"; say "START steam prefill"
+timeout -k 60 "$RUN_MAX" docker exec orchestrator-agent sh -c \
+  'cd /SteamPrefill && HOME=/tmp ./SteamPrefill prefill --no-ansi' >> "$LOG" 2>&1
+rc=$?
+case "$rc" in
+  0)       say "END steam prefill ok" ;;
+  124|137) say "TIMEOUT: killed after $RUN_MAX (rc=$rc)"
+           alert "lancache ALERT: Steam prefill timed out after $RUN_MAX" \
+             "Killed after $RUN_MAX. The docker exec client was terminated; the in-container
+SteamPrefill may still run. Check: ps -eo pid,etime,args | grep SteamPrefill. Log: $LOG" ;;
+  *)       say "END steam prefill rc=$rc" ;;
+esac
+exit 0
+```
+  The `--send-alert` mode reuses the cache-catcher's configured SMTP path, so this script never
+  touches the credential. Drill both paths before relying on them: send a test alert, then hold
+  the lock artificially and run the script `MAX_SKIPS` times — the last run must email.
 - [ ] Write `/home/karl/lancache-host/prefill-cron` as a **concrete crontab** (installed in D2, NOT now):
 ```
 # Steam every 6h — through the agent (inherits dns .40). Do NOT inline this with a
@@ -294,8 +341,9 @@ ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter
 # (AS-BUILT deviation 8), and a hung holder would skip every later tick in silence.
 # run-steam-prefill.sh keeps the lock, counts skips, and emails after 3 in a row.
 0 */6 * * * /home/karl/lancache-host/run-steam-prefill.sh
-# Nightly SteamPrefill self-update
-0 23 * * * docker exec orchestrator-agent sh -c "cd /SteamPrefill && HOME=/tmp ./update.sh" >> /home/karl/lancache-host/steamprefill-cache/update.log 2>&1
+# Nightly SteamPrefill self-update — WAITS (up to 1h) on the SAME lock rather than
+# swapping the binary out from under a running prefill.
+0 23 * * * flock -w 3600 /home/karl/lancache-host/.locks/steamprefill.lock docker exec orchestrator-agent sh -c "cd /SteamPrefill && HOME=/tmp ./update.sh" >> /home/karl/lancache-host/steamprefill-cache/update.log 2>&1
 # GOG 04:00,16:00 — see C6. NO --dns 192.168.1.40: a bridge-network container CANNOT
 # reach the macvlan lancache at .40 (verified RESOLVE-FAILED), and gogrepoc writes
 # installers straight to disk, so lancache interception is neither possible nor wanted.
@@ -344,6 +392,17 @@ denied and there is no passwordless sudo. The operator installs it: `sudo cronta
 
 ### Task C3: Agent validate + DNS resolution
 - [ ] `docker exec orchestrator-agent getent hosts lancache.steamcontent.com` → **`192.168.1.40`** (proves B-1 fix).
+- [ ] **The Epic overlay must resolve too — check DNS, not just the nginx map.** C2 only proves
+  monolithic *would* cache the domain; it proves nothing about whether clients are sent there:
+```bash
+docker exec orchestrator-agent getent hosts egs-cloudfront-chunks.epicgamescdn.com  # MUST be 192.168.1.40
+docker exec orchestrator-agent getent hosts epicgames-download1.akamaized.net       # control: 192.168.1.40
+docker exec orchestrator-agent getent hosts github.com                              # control: NOT .40 (upstream passthrough)
+```
+  A public CloudFront address on the first line means `lancache-dns` re-cloned over the overlay —
+  the Global-Constraints "BOTH containers" rule was not applied. **This does not show up in
+  orchestrator metrics:** Epic prefill targets `.40` by IP with a `Host:` header and never
+  consults DNS, so it reports success while every real client bypasses the cache (deviation 6).
 - [ ] Trigger validate of one cached Steam game via the orchestrator; agent logs show `POST /v1/steam/validate ... 200 OK` reading local `/data/cache`.
 
 ### Task C4: ACCEPTANCE — forced prefill WROTE to cache AND zero new evictions (B-1, M-6)
@@ -417,10 +476,17 @@ ssh karl@192.168.1.30 'docker run --rm -v /volume1/cache/GOG:/lancache/lancache/
   `compose up`, a macvlan container claims `192.168.1.40` while the VM already holds it, and two
   nginx write one cache tree (duplicate IP; violates the plan's own IMP-4 mutual exclusion).
   `karl` has **no passwordless sudo on UGOS** — `sudo systemctl …` will prompt and fail over
-  a non-interactive ssh. Use the same nsenter form as A10/A11:
+  a non-interactive ssh. Use the same nsenter form as A10/A11.
+  **`disable`, NOT `disable --now`:** `--now` also *stops* the unit, which runs its
+  `ExecStop=… docker compose down` and takes **cache-catcher** with it — destroying the monitor
+  STEP 2 exists to preserve, before STEP 2 even runs. Plain `disable` is all that is needed
+  here; the running stack is brought down deliberately, by name, in STEP 2.
 ```bash
 ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 \
-  nsenter -t 1 -m -u -i -n -p -- systemctl disable --now lancache-stack.service'
+  nsenter -t 1 -m -u -i -n -p -- systemctl disable lancache-stack.service'
+# verify it will not fire at next boot:
+ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 \
+  nsenter -t 1 -m -u -i -n -p -- systemctl is-enabled lancache-stack.service'   # expect: disabled
 ```
 - [ ] **STEP 2 — bring the host stack down, but keep the monitor alive.** A bare
   `docker compose down` now also stops **`cache-catcher`** (it became a compose service in C5),
