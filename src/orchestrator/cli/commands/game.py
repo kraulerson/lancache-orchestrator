@@ -1,7 +1,8 @@
-"""F11 — ``game`` subcommands. ``show`` filters the list (no GET /games/{id})."""
+"""F11 — ``game`` subcommands. Id lookups use GET /games/{game_id}."""
 
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import quote
 
 import click
@@ -62,20 +63,39 @@ def game_list(ctx: click.Context, platform: str | None, status_: str | None, lim
     click.echo(output.table(["ID", "PLATFORM", "APP_ID", "TITLE", "STATUS", "BLOCKED"], rows))
 
 
+def _fetch_game(client: OrchClient, game_id: int) -> dict[str, Any]:
+    """Return the game row for ``game_id`` via ``GET /api/v1/games/{game_id}``.
+
+    Resolving an id must not go through the list endpoint: the server caps
+    ``/games`` at 500 rows, so a list-scan cannot see most of the library and
+    silently fails for higher ids (#260).
+
+    A 404 is deliberately NOT re-worded. The server already answers a missing
+    game with ``game not found``, so the client's own ``HTTP 404: game not
+    found`` is clear; rewriting it required classifying the status, which
+    conflated a missing game with a missing *route* (a wrong ``--url``) and
+    reproduced the very misdiagnosis #260 exists to remove.
+    """
+    data = client.get(f"/api/v1/games/{game_id}")
+    game: dict[str, Any] = data["game"]
+    return game
+
+
 @game.command("show")
 @click.argument("game_id", type=int, callback=_positive_int)
 @click.pass_context
 @handles_api_errors
 def game_show(ctx: click.Context, game_id: int) -> None:
-    """Show one game (filters the list — no detail endpoint exists)."""
-    client = make_client(ctx)
-    data = client.get("/api/v1/games", limit=500)
-    match = next((g for g in data["games"] if g["id"] == game_id), None)
-    if match is None:
-        raise ApiError(f"game {game_id} not found (in the first 500)")
-    for key, value in match.items():
-        rendered = output.status_label(value) if key == "status" else value
-        click.echo(f"{key:18} {rendered}")
+    """Show one game."""
+    match = _fetch_game(make_client(ctx), game_id)
+    # Render every field before writing any of it: a malformed field must not
+    # leave a half-written record on stdout that a redirect would capture as a
+    # valid (just short) game (#261).
+    lines = [
+        f"{key:18} {output.status_label(value) if key == 'status' else value}"
+        for key, value in match.items()
+    ]
+    click.echo("\n".join(lines))
 
 
 def _trigger(
@@ -130,14 +150,19 @@ def game_purge(ctx: click.Context, game_id: int) -> None:
 def _resolve_app(ctx: click.Context, game_id: int) -> tuple[OrchClient, str, str]:
     """Return (client, platform, app_id) for a known game id, or raise ApiError.
 
-    Resolves via the list (no detail endpoint), mirroring ``game show``. Needed
-    because the block-list is keyed by (platform, app_id), not game id."""
+    Needed because the block-list is keyed by (platform, app_id), not game id."""
     client = make_client(ctx)
-    data = client.get("/api/v1/games", limit=500)
-    match = next((g for g in data["games"] if g["id"] == game_id), None)
-    if match is None:
-        raise ApiError(f"game {game_id} not found (in the first 500)")
-    return client, match["platform"], match["app_id"]
+    match = _fetch_game(client, game_id)
+    platform, app_id = match.get("platform"), match.get("app_id")
+    # Validate here rather than leaning on what a downstream call happens to
+    # reject: `unblock` only caught a bad app_id because quote() raises on
+    # non-str, and nothing at all caught a bad platform — so a null field
+    # reached the wire as the literal "None" and reported success (#261).
+    if not isinstance(platform, str) or not platform:
+        raise ApiError(f"game {game_id}: API response has no usable platform")
+    if not isinstance(app_id, str) or not app_id:
+        raise ApiError(f"game {game_id}: API response has no usable app_id")
+    return client, platform, app_id
 
 
 @game.command("block")
@@ -162,9 +187,10 @@ def game_block(ctx: click.Context, game_id: int, reason: str | None) -> None:
 def game_unblock(ctx: click.Context, game_id: int) -> None:
     """Remove a game from the block list (idempotent)."""
     client, platform, app_id = _resolve_app(ctx, game_id)
-    # Encode app_id — an Epic appName can contain '/' which would otherwise split
-    # into extra path segments and mis-route the DELETE.
-    resp = client.delete(f"/api/v1/block-list/{platform}/{quote(app_id, safe='')}")
+    # Encode BOTH segments. An Epic appName can contain '/', and a '/'/'?'/'#'
+    # in either field would otherwise split the path and re-target the DELETE at
+    # a different block-list row while still reporting success (#261).
+    resp = client.delete(f"/api/v1/block-list/{quote(platform, safe='')}/{quote(app_id, safe='')}")
     if (resp or {}).get("removed"):
         output.success(f"unblocked game {game_id} ({platform}:{app_id}).")
     else:
