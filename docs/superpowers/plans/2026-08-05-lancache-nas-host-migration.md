@@ -53,7 +53,14 @@ curl -s -o /dev/null -w "%{http_code} %{size_download}\n" http://192.168.1.45/  
 # sustained: a >5MB transfer + a 310s keepalive; expect no stall/reset
 ```
 - [ ] **(2) DNS over UDP and TCP** to `.46`: `dig @192.168.1.46 +short a.probe.test` and `dig +tcp @192.168.1.46 +short a.probe.test` → both `1.2.3.4`.
-- [ ] **(3) same-host sibling path `.45↔.46`** (models `.44→.40`): `ssh karl@192.168.1.30 'docker exec mvpre80 sh -c "wget -qO- http://192.168.1.46 >/dev/null && echo SIBLING_OK || echo SIBLING_FAIL"'`. If FAIL → macvlan same-host hairpin drop; resolve (reflective-relay / parent=eth0 / ipvlan-L2) BEFORE cutover — do NOT proceed.
+- [ ] **(3) same-host sibling path `.45↔.46`** (models `.44→.40`). **Probe the service each peer actually runs** — `mvpre53` serves DNS only, never HTTP, so an HTTP probe at `.46:80` fails on both a healthy and a broken hairpin and proves nothing. Probe in both directions, each against the right port:
+```bash
+# .45 (nginx) -> .46 (dnsmasq): DNS over the sibling path
+ssh karl@192.168.1.30 'docker exec mvpre80 sh -c "nslookup a.probe.test 192.168.1.46 >/dev/null 2>&1 && echo SIBLING_DNS_OK || echo SIBLING_DNS_FAIL"'
+# .46 (dnsmasq) -> .45 (nginx): HTTP over the sibling path
+ssh karl@192.168.1.30 'docker exec mvpre53 sh -c "wget -qO- http://192.168.1.45/ >/dev/null 2>&1 && echo SIBLING_HTTP_OK || echo SIBLING_HTTP_FAIL"'
+```
+  Both must print `_OK`. If either FAILs → macvlan same-host hairpin drop; resolve (reflective-relay / parent=eth0 / ipvlan-L2) BEFORE cutover — do NOT proceed. (`nslookup`/`wget` are busybox applets present in `nginx:alpine`; no extra install needed.)
 - [ ] **(4) cross-subnet `.105→.45`**: `ssh root@10.100.23.105 'curl -fsS -m5 http://192.168.1.45/ >/dev/null && echo ROUTED_OK || echo ROUTED_FAIL'`.
 - [ ] Tear down: `ssh karl@192.168.1.30 'docker rm -f mvpre80 mvpre53'`.
 - [ ] Confirm `.1` gateway DHCP pool does NOT span `.40`–`.59` (reserve `.40`/`.44`) — ask Karl to check the router, else risk a lease collision.
@@ -109,7 +116,25 @@ ssh karl@192.168.1.40 'docker inspect orchestrator-agent --format "{{range .Conf
  | grep -E '^(ORCH_|HOME=|TZ=)' | grep -viE 'PASSWORD|SECRET|2FA|OTP' \
  | ssh karl@192.168.1.30 'cat > /home/karl/lancache-host/agent.env'
 ```
-Then verify it has `ORCH_*` keys and NO secret keys; confirm no `ORCH_*_HOST`/`_BIND` hard-codes `.40` (if any bind var exists, set it to `.44`).
+Then confirm no `ORCH_*_HOST`/`_BIND` hard-codes `.40` (if any bind var exists, set it to `.44`).
+- [ ] **What the strip does and does NOT remove.** The `grep -viE` above drops
+  `PASSWORD|SECRET|2FA|OTP` only. **`ORCH_TOKEN` is deliberately KEPT** — it is the agent's
+  shared-secret for control-plane RPC and the agent will not serve without it. So `agent.env`
+  **does** contain a credential. Do not "verify no secret keys are present"; verify instead
+  that the *account* secrets are gone and the token survived:
+```bash
+ssh karl@192.168.1.30 'cd /home/karl/lancache-host && \
+  grep -cE "PASSWORD|SECRET|2FA|OTP" agent.env; \
+  grep -c "^ORCH_TOKEN=" agent.env'      # expect: 0 then 1
+```
+- [ ] **Lock the file down — it holds a credential.** `docker inspect`/`env_file` do not care
+  about mode, but the file lands world-readable by default under a shared `/home/karl`:
+```bash
+ssh karl@192.168.1.30 'chmod 600 /home/karl/lancache-host/agent.env && \
+  stat -c "%a %n" /home/karl/lancache-host/agent.env'    # expect: 600
+```
+  Apply the same to `.env` if it ever gains a secret, and note this file in the D4 backup as
+  credential-bearing.
 - [ ] **Append `ORCH_LANCACHE_BASE_URL=http://192.168.1.40` to `agent.env`.** The default is `http://127.0.0.1`, correct ONLY when the agent is co-located with lancache. On this split topology every Epic chunk silently fails to cache while the job appears to run (see AS-BUILT). Steam is unaffected, which is what makes it look like an Epic bug.
 - [ ] Write `/home/karl/lancache-host/.env` (lancache only): `CACHE_INDEX_SIZE=10000m`, `CACHE_DISK_SIZE=54000g`, `MIN_FREE_DISK=100g`, `CACHE_MAX_AGE=3650d`, `CACHE_SLICE_SIZE=10m`, `GENERICCACHE_VERSION=2`, `CACHE_MODE=monolithic`, `USE_GENERIC_CACHE=true`, `NOFETCH=true`, `CACHE_DOMAINS_REPO=https://github.com/uklans/cache-domains.git`, `CACHE_DOMAINS_BRANCH=master`, `UPSTREAM_DNS=192.168.1.41; 192.168.1.42`, `LANCACHE_IP=192.168.1.40`, `TZ=America/Denver`.
 - [ ] Write `docker-compose.yml` — monolithic (digest-pinned, `.40`, logging caps), dns (shared netns), agent (`.44`, `dns:["192.168.1.40"]`, `agent.env`, logging caps):
@@ -131,13 +156,26 @@ services:
     container_name: lancache-dns
     restart: unless-stopped
     network_mode: "service:lancache-monolithic"
-    environment: [ "USE_GENERIC_CACHE=true", "LANCACHE_IP=192.168.1.40", "UPSTREAM_DNS=192.168.1.41; 192.168.1.42" ]
+    # NOFETCH + the SHARED cachedomains mount are load-bearing. The dns image runs
+    # `dnstool generate`, which re-clones uklans/cache-domains into /opt/cache-domains
+    # at EVERY start. Without these two lines the container silently ignores the local
+    # Epic overlay, so `egs-cloudfront-chunks.epicgamescdn.com` resolves to the real
+    # CloudFront and every Epic Launcher download bypasses the cache — while the
+    # orchestrator's own Epic prefill keeps working (it targets .40 by IP with a Host
+    # header), which is exactly what hides the fault. See AS-BUILT deviation 6.
+    environment: [ "USE_GENERIC_CACHE=true", "LANCACHE_IP=192.168.1.40", "UPSTREAM_DNS=192.168.1.41; 192.168.1.42", "NOFETCH=true" ]
+    volumes:
+      - ./cachedomains:/opt/cache-domains
     depends_on: [ lancache-monolithic ]
     logging: { driver: json-file, options: { max-size: "50m", max-file: "5" } }
   orchestrator-agent:
     image: orchestrator:dpa
     container_name: orchestrator-agent
     restart: unless-stopped
+    # REQUIRED — the image's default entrypoint is the CONTROL BRAIN (uvicorn :8765),
+    # not the agent. Without this the container comes up healthy-looking and nothing
+    # ever answers :8780. See AS-BUILT deviation 1.
+    entrypoint: [ "/app/.venv/bin/python", "-m", "orchestrator.agent" ]
     dns: [ "192.168.1.40" ]
     env_file: agent.env
     networks: { lancache_mv: { ipv4_address: 192.168.1.44 } }
@@ -148,12 +186,37 @@ services:
       - orchestrator-db:/var/lib/orchestrator
       - ./steamprefill-cache:/steamprefill-cache
       - ./SteamPrefill:/SteamPrefill
+    # REQUIRED — the image's inherited healthcheck probes the BRAIN on :8765, which the
+    # agent never binds, so the container sits permanently "unhealthy". That is not
+    # cosmetic: a health signal that is always red cannot report a real agent outage.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://127.0.0.1:8780/v1/health').raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: { driver: json-file, options: { max-size: "50m", max-file: "5" } }
+  # Standing eviction + mode-000 monitor (D3 part 1). A compose service, NOT a
+  # `docker exec` side-process — see C5: the guard must be the container's MAIN
+  # process or any restart silently ends alerting.
+  cache-catcher:
+    image: cache-catcher:guard          # python3 + ca-certificates BAKED IN, not apt-installed live
+    container_name: cache-catcher
+    restart: unless-stopped
+    privileged: true                    # fanotify FAN_MARK_FILESYSTEM
+    pid: host                           # resolve culprit pid/comm via /proc
+    network_mode: bridge                # needs egress to SMTP; must not claim a macvlan IP
+    entrypoint: ["/bin/sh", "/log/entrypoint.sh"]
+    volumes:
+      - cache-catcher-log:/log
+      - /volume1:/volume1
     logging: { driver: json-file, options: { max-size: "50m", max-file: "5" } }
 networks: { lancache_mv: { external: true } }
 volumes:
   depotdownloader-config: { external: true }
   orchestrator-manifests: { external: true }
   orchestrator-db: { external: true }
+  cache-catcher-log: { external: true }
 ```
 - [ ] `ssh karl@192.168.1.30 'cd /home/karl/lancache-host && docker compose config >/dev/null && echo COMPOSE_OK'`
 
@@ -161,27 +224,46 @@ volumes:
 - [ ] `ssh karl@192.168.1.30 'df -h /home/karl/lancache-host /volume1'`. If the working dir is on the small system/root partition, relocate it (and bind-mount dirs `logs/`, `cachedomains/`, `SteamPrefill/`, `steamprefill-cache/`) under `/volume1/` and update compose paths. (The monolithic image already rotates `/data/logs` internally; the json-file caps in A8 bound `docker logs`.)
 
 ### Task A10: DNS-restart watcher unit (blocker B-3)
-- [ ] Install a systemd unit on `.30` (host) that restarts `lancache-dns` whenever `lancache-monolithic` (re)starts — DNS shares monolithic's netns, so a monolithic restart silently orphans DNS otherwise:
+> **`docker run` needs `-i` to accept the heredoc.** Without it the container gets an
+> immediately-closed stdin, `cat >` writes a **zero-byte unit file**, and `systemctl enable`
+> "succeeds" against an empty unit — the failure is silent until the day you need it. Every
+> heredoc-fed `docker run` in A10/A11 uses `--rm -i`.
+
+- [ ] Install a systemd unit on `.30` (host) that recovers `lancache-dns` whenever
+  `lancache-monolithic` starts. DNS shares monolithic's netns, so:
+  - a monolithic **restart** orphans DNS → `docker restart lancache-dns` is enough;
+  - a monolithic **recreate** (any `compose up -d` after a config edit) destroys the netns the
+    DNS container is joined to → a restart cannot re-attach it and DNS must be **recreated**.
+    This is the case that cost ~12 h of dead Steam manifest fetches (AS-BUILT deviation 3), so
+    the unit does the recreate form, which is correct for both.
 ```bash
-ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter -t 1 -m -u -i -n -p -- sh -c "cat > /etc/systemd/system/lancache-dns-watch.service" ' <<'EOF'
+ssh karl@192.168.1.30 'docker run --rm -i --privileged --pid=host debian:12 nsenter -t 1 -m -u -i -n -p -- sh -c "cat > /etc/systemd/system/lancache-dns-watch.service"' <<'EOF'
 [Unit]
-Description=Restart lancache-dns when monolithic restarts
+Description=Recreate lancache-dns when monolithic (re)starts
 After=docker.service
 Requires=docker.service
 [Service]
 Restart=always
-ExecStart=/bin/sh -c 'docker events --filter container=lancache-monolithic --filter event=start --format "{{.Actor.Attributes.name}}" | while read _; do docker restart lancache-dns; done'
+RestartSec=5
+WorkingDirectory=/home/karl/lancache-host
+ExecStart=/bin/sh -c 'docker events --filter container=lancache-monolithic --filter event=start --format "{{.Actor.Attributes.name}}" | while read _; do sleep 3; cd /home/karl/lancache-host && docker compose up -d --force-recreate lancache-dns; done'
 [Install]
 WantedBy=multi-user.target
 EOF
-ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter -t 1 -m -u -i -n -p -- sh -c "systemctl daemon-reload && systemctl enable lancache-dns-watch"'
+ssh karl@192.168.1.30 'docker run --rm -i --privileged --pid=host debian:12 nsenter -t 1 -m -u -i -n -p -- sh -c "systemctl daemon-reload && systemctl enable lancache-dns-watch"'
 ```
-(Enable now; it starts firing once the stack is up in B3.)
+- [ ] **Verify the unit is not empty** (the whole point of `-i`):
+```bash
+ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter -t 1 -m -u -i -n -p -- sh -c "wc -c < /etc/systemd/system/lancache-dns-watch.service"'   # expect: >0 (~500)
+```
+(Enable now; it starts firing once the stack is up in B3.) **This unit is a backstop, not a
+guarantee** — D3 part 3's independent `:53` probe from a macvlan sibling is what actually
+detects a DNS outage.
 
 ### Task A11: Boot-guard unit — survive reboot AND firmware/Docker-state wipe (blocker B-4)
 - [ ] Install a systemd unit on `.30` that, after `docker.service`, runs `create-network.sh` then `compose up -d` (so a firmware update that wipes the docker network is self-healing):
 ```bash
-ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter -t 1 -m -u -i -n -p -- sh -c "cat > /etc/systemd/system/lancache-stack.service"' <<'EOF'
+ssh karl@192.168.1.30 'docker run --rm -i --privileged --pid=host debian:12 nsenter -t 1 -m -u -i -n -p -- sh -c "cat > /etc/systemd/system/lancache-stack.service"' <<'EOF'
 [Unit]
 Description=lancache host stack (macvlan net + compose)
 After=docker.service
@@ -195,7 +277,11 @@ ExecStop=/bin/sh -c 'cd /home/karl/lancache-host && docker compose down'
 [Install]
 WantedBy=multi-user.target
 EOF
-ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter -t 1 -m -u -i -n -p -- sh -c "systemctl daemon-reload && systemctl enable lancache-stack"'
+ssh karl@192.168.1.30 'docker run --rm -i --privileged --pid=host debian:12 nsenter -t 1 -m -u -i -n -p -- sh -c "systemctl daemon-reload && systemctl enable lancache-stack"'
+```
+- [ ] **Verify the unit is not empty** (see A10 on `-i`):
+```bash
+ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter -t 1 -m -u -i -n -p -- sh -c "wc -c < /etc/systemd/system/lancache-stack.service"'   # expect: >0 (~380)
 ```
 - [ ] Verify UGOS's own container manager won't fight this on boot (ask Karl / inspect UGOS docker-app autostart).
 
@@ -203,15 +289,23 @@ ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter
 - [ ] Inventory GOG on `.40` BEFORE shutdown: `ssh karl@192.168.1.40 'crontab -l | grep -i gog; head -1 /lancache/lancache/cache/GOG/downloadscript; python3 --version; pip3 freeze 2>/dev/null | grep -iE "requests|html5lib|xml" '` — capture interpreter + deps + cookie/config location.
 - [ ] Write `/home/karl/lancache-host/prefill-cron` as a **concrete crontab** (installed in D2, NOT now):
 ```
-# Steam every 6h — through the agent (inherits dns .40)
-0 */6 * * * docker exec orchestrator-agent sh -c "cd /SteamPrefill && HOME=/tmp ./SteamPrefill prefill --no-ansi" >> /home/karl/lancache-host/steamprefill-cache/cron.log 2>&1
+# Steam every 6h — through the agent (inherits dns .40). Do NOT inline this with a
+# bare `flock -n`: SteamPrefill has been observed to FINISH and then hang forever
+# (AS-BUILT deviation 8), and a hung holder would skip every later tick in silence.
+# run-steam-prefill.sh keeps the lock, counts skips, and emails after 3 in a row.
+0 */6 * * * /home/karl/lancache-host/run-steam-prefill.sh
 # Nightly SteamPrefill self-update
 0 23 * * * docker exec orchestrator-agent sh -c "cd /SteamPrefill && HOME=/tmp ./update.sh" >> /home/karl/lancache-host/steamprefill-cache/update.log 2>&1
-# GOG 04:00,16:00 — run with .40 resolver (see C6); prefer inside a container with --dns 192.168.1.40
-0 4,16 * * * docker run --rm --dns 192.168.1.40 -v /volume1/cache/GOG:/gog python:3.12-slim sh -c "cd /gog && python3 gogrepoc.py download ..."
+# GOG 04:00,16:00 — see C6. NO --dns 192.168.1.40: a bridge-network container CANNOT
+# reach the macvlan lancache at .40 (verified RESOLVE-FAILED), and gogrepoc writes
+# installers straight to disk, so lancache interception is neither possible nor wanted.
+# Mount path must be /lancache/lancache/cache/GOG — downloadscript hard-codes it and the
+# #222 manual-download scanner reads the same tree.
+0 4,16 * * * docker run --rm -v /volume1/cache/GOG:/lancache/lancache/cache/GOG -w /lancache/lancache/cache/GOG python:3.12-slim sh -c 'pip install -q html5lib psutil requests && python3 gogrepoc.py update && sh /lancache/lancache/cache/GOG/downloadscript' >> /volume1/cache/GOG/cron.log 2>&1
 # NOTE: EpicPrefill prefill_cronjob.sh is copied but NOT installed — Epic prefill is orchestrator-owned (avoid double-prefill).
 ```
-(GOG line is finalized in C6 once the interpreter/deps/cookie are reproduced.)
+(GOG line finalized in C6. **`karl` cannot install a crontab on UGOS** — `/var/spool/cron` is
+denied and there is no passwordless sudo. The operator installs it: `sudo crontab -u karl <file>`.)
 
 ---
 
@@ -259,33 +353,102 @@ ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter
 - [ ] **PASS requires ALL:** (a) C3 `getent` returned `.40`; (b) the depot's object/byte count on `/volume1/cache` **INCREASED** (proves it wrote through the cache, not WAN); (c) the trap deletion count did **NOT** increase (proves no eviction); (d) new Epic objects key under `epicgames/...`, none `egs-cloudfront-...`.
 
 ### Task C5: Durability drills (blockers B-3, B-4)
-- [ ] **DNS-restart:** `docker restart lancache-monolithic`; wait 15 s; `dig @192.168.1.40 +short lancache.steamcontent.com` → still `.40` with no manual step (proves A10 watcher).
-- [ ] **Graceful reboot** (Karl-approved): reboot `.30`; confirm all 3 containers + net auto-start via A11 and cache serves.
-- [ ] **Firmware-case** (simulated): `docker compose down && docker network rm lancache_mv`; run ONLY the boot guard (`systemctl start lancache-stack`); confirm full stack returns + DNS/cache serve.
+> **Every DNS assertion here must be made from a macvlan sibling, never from `.30`.** The NAS
+> host cannot reach its own macvlan children, so `dig @192.168.1.40` run on `.30` times out
+> whether DNS is healthy or dead (AS-BUILT deviation 4). Define once and reuse:
+> `DIGPROBE='docker exec orchestrator-agent getent hosts lancache.steamcontent.com'`
+> (the agent is on `.44`, a sibling, with `dns: [192.168.1.40]`).
+
+- [ ] **DNS drill 1 — monolithic RESTART:** `docker restart lancache-monolithic`; wait 15 s; run
+  `DIGPROBE` → `192.168.1.40`.
+- [ ] **DNS drill 2 — monolithic RECREATE (the case that actually bit us):**
+  `docker compose up -d --force-recreate lancache-monolithic`; wait 20 s; run `DIGPROBE` →
+  `192.168.1.40`. A watcher that only `docker restart`s DNS **fails this drill** — the netns it
+  was joined to no longer exists. This drill is the acceptance test for the A10 recreate fix.
+- [ ] **Graceful reboot** (Karl-approved): reboot `.30`; confirm **all four** containers
+  (`lancache-monolithic`, `lancache-dns`, `orchestrator-agent`, `cache-catcher`) plus the
+  macvlan network auto-start via A11, cache serves, and the fanotify guard is alive
+  (`docker exec cache-catcher pgrep -f fanotify_guard`).
+- [ ] **Firmware-case (simulated) — `systemctl start` is a NO-OP here; use `restart`.** The unit
+  is `Type=oneshot RemainAfterExit=yes`, so after boot it is already `active (exited)` and
+  `systemctl start` returns success **without running `ExecStart`** — the drill would pass
+  while proving nothing. Force the unit through a real stop/start:
+```bash
+ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 nsenter -t 1 -m -u -i -n -p -- sh -c "
+  systemctl is-active lancache-stack;                      # expect: active
+  systemctl stop lancache-stack;                            # runs ExecStop (compose down)
+  docker network rm lancache_mv || true;                    # simulate the firmware wipe
+  systemctl is-active lancache-stack;                       # expect: inactive
+  systemctl start lancache-stack;                           # NOW ExecStart really runs
+  sleep 20; docker ps --format \"{{.Names}}\" | sort"'
+```
+  Expect all four container names back and the network recreated. Then re-run `DIGPROBE` and a
+  cache HIT.
 
 ### Task C6: GOG runtime on `.30` (IMP-6)
-- [ ] Reproduce GOG per A12 inventory (prefer inside a `python:3.12` container with `--dns 192.168.1.40` + copied cookie); run ONE fetch; confirm a cache HIT/write on `.40`. Finalize the D2 GOG cron line. Do this BEFORE D2 and BEFORE D4 destroys the only known-good GOG runtime.
+> **Correction to the pre-cutover assumption.** This task originally said to run GOG "inside a
+> `python:3.12` container with `--dns 192.168.1.40`". That is **impossible on this topology**: a
+> bridge-network container cannot reach a macvlan address on the same host (verified
+> RESOLVE-FAILED, AS-BUILT deviation 4), and to put the job on the macvlan it would need its own
+> reserved IP. It is also **unnecessary** — `gogrepoc.py` downloads full installers straight to
+> disk; there is no chunked CDN traffic for lancache to intercept, and the copy on disk *is* the
+> cache that Game_shelf's manual-coverage scanner (#222) reads.
+
+- [ ] Reproduce GOG per the A12 inventory in a plain `python:3.12-slim` container on the default
+  bridge, with the cookie/config carried in via the mounted GOG dir:
+```bash
+ssh karl@192.168.1.30 'docker run --rm -v /volume1/cache/GOG:/lancache/lancache/cache/GOG \
+  -w /lancache/lancache/cache/GOG python:3.12-slim \
+  sh -c "pip install -q html5lib psutil requests && python3 gogrepoc.py update"'
+```
+- [ ] Confirm it authenticated and wrote a manifest (no credential echoed):
+  `ssh karl@192.168.1.30 'ls -la /volume1/cache/GOG/gog-manifest.dat'` → recent mtime, size > 0.
+- [ ] Confirm the download target matches the scanner: `downloadscript` writes under
+  `/lancache/lancache/cache/GOG/` (**not** a `Game_backup/` subdirectory — that path does not
+  exist and was a pre-cutover guess).
+- [ ] Finalize the D2 GOG cron line. Do this BEFORE D2 and BEFORE D4 destroys the only
+  known-good GOG runtime.
 
 ---
 
-## Rollback (any Phase B/C failure)
-- [ ] Confirm host stack down: `ssh karl@192.168.1.30 'cd /home/karl/lancache-host && docker compose down'`.
-- [ ] **(Karl-run, classifier-gated)** Restart the intact VM: `nsenter … virsh start 7047a7b9-8496-4a01-af1a-c216e6865a5c`. Confirm `domstate` = `running` and the VM's lancache serves before declaring rollback complete.
-- [ ] Revert `ORCH_AGENT_BASE_URL` to `192.168.1.40:8780` on `.105` + redeploy.
-- [ ] **FIRST: `sudo systemctl disable --now lancache-stack.service`** — otherwise the next boot re-runs `compose up` and a macvlan container claims `192.168.1.40` while the VM already holds it (duplicate IP + two nginx writing one cache tree). This violates the plan's own IMP-4 mutual-exclusion rule.
-- [ ] Cached OBJECTS are shared (the CONFIGHASH-pinned CACHE_KEY makes either stack's objects valid HITs for the other), so no re-download is needed. But rollback is **not risk-free**: the VM reaches the cache over **NFS**, and NFS is the path by which ~85k cache files were deleted during the incident. Rolling back re-enables that exposure. Treat it as an emergency measure, and re-arm the deletion monitor immediately.
+## Rollback (any Phase B/C failure) — steps are ORDERED; do not reorder
+
+- [ ] **STEP 1 — disable the boot guard BEFORE anything else.** Otherwise the next boot re-runs
+  `compose up`, a macvlan container claims `192.168.1.40` while the VM already holds it, and two
+  nginx write one cache tree (duplicate IP; violates the plan's own IMP-4 mutual exclusion).
+  `karl` has **no passwordless sudo on UGOS** — `sudo systemctl …` will prompt and fail over
+  a non-interactive ssh. Use the same nsenter form as A10/A11:
+```bash
+ssh karl@192.168.1.30 'docker run --rm --privileged --pid=host debian:12 \
+  nsenter -t 1 -m -u -i -n -p -- systemctl disable --now lancache-stack.service'
+```
+- [ ] **STEP 2 — bring the host stack down, but keep the monitor alive.** A bare
+  `docker compose down` now also stops **`cache-catcher`** (it became a compose service in C5),
+  which is the only thing watching for the very deletions rollback re-exposes. Stop the lancache
+  services by name and leave the catcher running:
+```bash
+ssh karl@192.168.1.30 'cd /home/karl/lancache-host && \
+  docker compose stop lancache-monolithic lancache-dns orchestrator-agent && \
+  docker ps --filter name=cache-catcher --format "{{.Names}} {{.Status}}"'   # expect: cache-catcher Up
+```
+  If you must use `docker compose down`, immediately `docker compose up -d cache-catcher`.
+- [ ] **STEP 3 — (Karl-run, classifier-gated)** Restart the intact VM:
+  `nsenter … virsh start 7047a7b9-8496-4a01-af1a-c216e6865a5c`. Confirm `domstate` = `running`
+  and the VM's lancache serves before declaring rollback complete.
+- [ ] **STEP 4** — Revert `ORCH_AGENT_BASE_URL` to `192.168.1.40:8780` on `.105` + redeploy.
+- [ ] Cached OBJECTS are shared (the CONFIGHASH-pinned CACHE_KEY makes either stack's objects valid HITs for the other), so no re-download is needed. But rollback is **not risk-free**: the VM reaches the cache over **NFS**, which is how nginx's evictions reached the disk during the incident, and the VM's `keys_zone` is back to `4000m` — the original trigger. Rolling back re-enables the exact failure mode. Treat it as an emergency measure, keep the deletion monitor running throughout (STEP 2), and get off it quickly.
 
 ---
 
 ## PHASE D — Post-cutover (after C passes)
 - [ ] **D1:** Resume the paused recovery — restart the Steam force-refill against the fixed cache, then a full re-validate sweep to flip Game_shelf statuses.
-- [x] **D2 (Steam):** DONE 2026-08-10. `karl` cannot install a crontab on UGOS (`/var/spool/cron` denied, no passwordless sudo) — installed by the operator via `sudo crontab -u karl`. **`HOME=/tmp`, NOT `/steamprefill-cache`** (see AS-BUILT).
+- [x] **D2 (Steam):** DONE 2026-08-10. `karl` cannot install a crontab on UGOS (`/var/spool/cron` denied, no passwordless sudo) — installed by the operator via `sudo crontab -u karl`. **`HOME=/tmp`, NOT `/steamprefill-cache`** (see AS-BUILT). **Superseded by `prefill-cron-v4`** (2026-08-12): the inline job is replaced by `run-steam-prefill.sh`, which makes a stalled prefill email instead of skipping silently. Install still needs the operator.
 - [ ] **D2 (GOG):** NOT installed — the documented job cannot work (bridge container + `--dns 192.168.1.40` is blocked by macvlan isolation; target `Game_backup/` does not exist). Tracked in issue #267.
 - [x] **D2 (Epic):** DONE 2026-08-10 — Epic is orchestrator-owned via `ORCH_SCHEDULED_PREFILL_ENABLED`, which was **false** and is now **true**. Both halves of the prefill split were off until this date.
 - [x] **D3 part 1 (unlink watcher):** DONE — the cache-catcher fanotify guard (see AS-BUILT). Counts only real `DELETE` (unlink) of non-temp files; `MOVED_FROM` is nginx *writing*.
-- [ ] **D3 part 2 (key-budget alarm): STILL REQUIRED.** An earlier draft of the AS-BUILT dropped this on the strength of a root-cause retraction that was itself wrong (see the RETRACTION-CORRECTED note). At 4000m the zone held ~32.8M keys and the library was ~30.7M — **94% full**. At 10000m (~81.9M keys) it is ~42%. Alarm at ~80% of the key budget, i.e. ~65M objects.
+- [ ] **D3 part 2 (key-budget alarm): STILL REQUIRED.** An earlier draft of the AS-BUILT dropped this on the strength of a root-cause retraction that was itself wrong (see **ROOT CAUSE** above). At 4000m the zone held ~32.8M keys and the library was ~30.7M — **94% full**, which is the trigger that caused the incident. At 10000m (~81.9M keys) it is ~42%. Alarm at ~80% of the key budget, i.e. ~65M objects.
 - [ ] **D3 part 3 (DNS `:53` probe): STILL REQUIRED.** Not implemented. This is exactly the check that would have caught the ~12h `lancache-dns` orphan recorded in the AS-BUILT.
-- [ ] **D4 (IMP-9):** Off-host backup of `/home/karl/lancache-host/` (compose, `.env`, `agent.env`, `cachedomains/` incl. Epic overlay, prefill `Config/`, `create-network.sh`, the two systemd units, **the `cache-catcher/Dockerfile` and the `cache-catcher-log` volume — which holds `alert.env` (SMTP credential), `fanotify_guard.py`, `entrypoint.sh` and the persisted CA bundle; without it a restored stack has NO alerting**, and **the installed crontab**) to `.105`/Mac. Decommission the VM (`virsh undefine` + reclaim disk) ONLY after: C5 reboot survival PASSED, the firmware-case rebuild-from-backup drill PASSED, the standing monitor (D3) verified firing, the mode-000/index_serv class stayed quiet ≥1 reboot cycle, AND ~1 week floor elapsed. Remove the temporary trap only after D3 is confirmed firing.
+- [ ] **D4 (IMP-9):** Off-host backup of `/home/karl/lancache-host/` (compose, `.env`, `agent.env`, `cachedomains/` incl. Epic overlay, prefill `Config/`, `create-network.sh`, the two systemd units, **the `cache-catcher/Dockerfile` and the `cache-catcher-log` volume — which holds `alert.env` (SMTP credential), `fanotify_guard.py`, `entrypoint.sh` and the persisted CA bundle; without it a restored stack has NO alerting**, **`run-steam-prefill.sh` + `prefill-cron-v4`**, and **the installed crontab**) to `.105`/Mac. Note `agent.env` is credential-bearing (`ORCH_TOKEN`) and mode `600` — back it up as a secret, not as config. Decommission the VM (`virsh undefine` + reclaim disk) ONLY after: C5 reboot survival PASSED, the firmware-case rebuild-from-backup drill PASSED, the standing monitor (D3) verified firing, the mode-000/index_serv class stayed quiet ≥1 reboot cycle, AND ~1 week floor elapsed. Remove the temporary trap only after D3 is confirmed firing.
 
 ---
 
@@ -302,48 +465,61 @@ Everything above is the plan **as written before cutover**. It is preserved uned
 reasoning — including a wrong turn — is the most useful part of the record. This section
 records what actually happened. Where the two disagree, **this section is correct**.
 
-## ⚠ ROOT CAUSE: NOT ascertained. (An earlier draft of this section RETRACTED the
-## keys_zone theory. That retraction was itself wrong and is withdrawn.)
+## ROOT CAUSE — the plan's original attribution is correct and stands
 
-**What is established.** Over six days of whole-filesystem fanotify monitoring on the NAS,
-**85,427** real cache-file `DELETE` (unlink) operations were recorded, and **every one was
-attributed to `comm=nfsd`**. Post-cutover, on local ext4 with `keys_zone=10000m`, there have
-been **zero** deletions and the cache has grown to ~34.4 M objects.
+**Actor: nginx's cache-manager. Trigger: a `keys_zone` at ~94 % of its key capacity.** This is
+what the plan and spec said before cutover, and it is what the evidence supports.
 
-**What that does NOT establish — and why the earlier retraction was wrong.** `nfsd` is the
-kernel NFS *server* daemon on the NAS. It deletes files only because a **remote client asked
-it to**. The watcher runs on the NAS (`/volume1`) — the *server* side of the export — so it
-**cannot see the originating process**. Any deletion initiated by anything on the `.40` VM,
-**including nginx's own cache-manager**, arrives as an NFS UNLINK executed by `nfsd` and is
-logged as `comm=nfsd`, never as `comm=nginx`.
+**The two independent observations agree.**
 
-So "`nfsd` deleted the files" identifies the **transport, not the actor**. An earlier draft of
-this section read that as proof nginx never evicted. It is not. The originating process was
-never identified, and now cannot be — the VM is retired.
+| Vantage | Tool | What it saw |
+|---|---|---|
+| `.40` VM — NFS **client**, sees the originating process | bpftrace | `nginx` unlinking at **~31/s**; ~85 k files gone before the VM was killed |
+| `.30` NAS — NFS **server**, sees only its own daemon | fanotify (6 days) | **85,427** cache-file `DELETE`s, all `comm=nfsd` |
 
-**The capacity hypothesis is, if anything, strengthened.** nginx sizes its key zone at roughly
-128 bytes per key:
+`nfsd` is the kernel NFS *server* daemon. It unlinks only because a remote client asked it to,
+and the NAS-side watcher sits on the server end of the export, so **every** VM-initiated
+deletion — nginx's cache-manager included — is logged as `comm=nfsd` and never as `comm=nginx`.
+`nfsd` therefore names the **transport, not the actor**. The client-side bpftrace names the
+actor. The two are the same operations seen from opposite ends, and the counts match.
+
+**Two later retractions were wrong and are withdrawn.**
+
+1. A draft read the `comm=nfsd` attribution as proof nginx never evicted. That conflated
+   transport with actor.
+2. A second draft, correcting the first, over-corrected to "the cause was never established" —
+   while the bpftrace result identifying nginx sat in §1 of the spec being edited.
+
+**Evidence-preservation caveat (stated so it is not rediscovered as a contradiction).** The raw
+bpftrace output lived on the `.40` VM and was **not copied off before decommissioning**. The
+surviving primary artifact is the contemporaneous written record made during the incident with
+the VM live (spec §1, committed 2026-08-05), corroborated by the NAS-side fanotify counts. Do
+not treat the absence of the raw trace as absence of the finding — but do preserve raw evidence
+off-host next time.
+
+**Capacity arithmetic.** nginx sizes its key zone at roughly 128 bytes per key:
 
 | | keys_zone | capacity | objects | utilisation |
 |---|---|---|---|---|
-| VM, at incident | 4000m | ~32.8 M keys | ~30.7 M | **~94%** |
-| NAS host, now | 10000m | ~81.9 M keys | ~34.4 M | ~42% |
+| VM, at incident | 4000m | ~32.8 M keys | ~30.7 M | **~94 %** |
+| NAS host, now | 10000m | ~81.9 M keys | ~34.4 M | ~42 % |
 
-At ~94% the zone was effectively full — precisely the condition under which nginx's
-cache-manager evicts to reclaim keys. And the post-cutover growth *past* the old ~30.7 M
-ceiling is exactly what a larger zone predicts. Note also that the post-cutover "zero nginx
-unlinks" observation cannot discriminate between the hypotheses, because the zone was enlarged
-at the same time NFS was removed — both changes landed together.
+At ~94 % the zone was effectively full — the condition under which the cache-manager evicts to
+reclaim keys — while 29 TB of disk sat free and `max_size`/`min_free`/`inactive` were all far
+from their limits. Post-cutover the cache grew *past* the old ~30.7 M ceiling with zero nginx
+unlinks, which is what a larger zone predicts. That post-cutover observation is **corroborating,
+not decisive** on its own: the zone enlargement and the NFS removal landed in the same change.
+The decisive evidence is the client-side trace.
 
 **Corrected acceptance criterion.** The plan's "zero `nfsd` chunk-deletions proves the index no
-longer evicts" is a non-sequitur regardless of cause: absence of `nfsd` deletions proves NFS is
-gone. The meaningful eviction check is **zero nginx `DELETE` (unlink) events**, which must be
-distinguished from `MOVED_FROM` — with `use_temp_path=off` nginx renames `<hash>.NNNN` into
-place when *writing*, so `MOVED_FROM` is write traffic. Conflating the two produced a false
-"cache eviction detected" alarm on 2026-08-09 during the recovery refill.
+longer evicts" is a non-sequitur regardless: absence of `nfsd` deletions proves NFS is gone. The
+meaningful eviction check is **zero nginx `DELETE` (unlink) events**, distinguished from
+`MOVED_FROM` — with `use_temp_path=off` nginx renames `<hash>.NNNN` into place when *writing*,
+so `MOVED_FROM` is write traffic. Conflating the two produced a false "cache eviction detected"
+alarm on 2026-08-09 during the recovery refill.
 
-**Operational consequence.** Because capacity remains a live hypothesis, the **key-budget alarm
-(D3 part 2) must be implemented**, not dropped. Alarm at ~80% of the key budget (~65 M objects).
+**Operational consequence.** Capacity is the live failure mode, so the **key-budget alarm (D3
+part 2) must be implemented**, not dropped. Alarm at ~80 % of the key budget (~65 M objects).
 
 ## Execution deviations (things the plan did not anticipate)
 
