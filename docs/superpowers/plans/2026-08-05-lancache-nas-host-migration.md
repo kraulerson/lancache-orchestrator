@@ -543,13 +543,51 @@ part 2) must be implemented**, not dropped. Alarm at ~80 % of the key budget (~6
    or another LAN host.
 5. **`--allow-unsafe` matters when regenerating lockfiles**, and `git checkout <file>` restores
    from the *index*, not from `origin/main`.
+6. **The Epic overlay never reached DNS — clients bypassed the cache entirely.** (Found
+   2026-08-12.) A7 adds `egs-cloudfront-chunks.epicgamescdn.com` to `./cachedomains/epicgames.txt`,
+   and A8 mounts that directory into **monolithic only**. `lancache-dns` runs `dnstool generate`,
+   which **re-clones** uklans/cache-domains into `/opt/cache-domains` at every start — so the
+   overlay domain was absent from DNS and resolved to the real CloudFront
+   (`2600:9000:2162:…`) while the control domain `epicgames-download1.akamaized.net` correctly
+   returned `192.168.1.40`. nginx would have cached the traffic; DNS never sent it there.
+   **The orchestrator's own Epic prefill kept working throughout** — it targets
+   `ORCH_LANCACHE_BASE_URL=http://192.168.1.40` by IP with a `Host:` header and never consults
+   DNS — which is exactly what hid the fault: prefill green, real Epic Launcher downloads
+   uncached. Fix: mount the shared `./cachedomains` into `lancache-dns` at `/opt/cache-domains`
+   **and** set `NOFETCH=true` so it stops re-cloning over it. Verified after the fix: the
+   overlay domain resolves to `192.168.1.40`, control domains unchanged, and non-cached
+   hostnames (e.g. `github.com`) still pass through to upstream.
+7. **The agent's healthcheck probed the wrong process, permanently.** (Found 2026-08-12.)
+   `orchestrator:dpa` carries the control brain's healthcheck
+   (`httpx.get('http://127.0.0.1:8765/api/v1/health')`). Deviation 1 overrides the *entrypoint*
+   to run the agent, which binds **:8780** and never :8765 — so every probe failed with
+   `ConnectError` and the container read `unhealthy` for 5 days while serving normally. This is
+   not cosmetic: a signal that is always red cannot report a real outage. A8 now carries an
+   explicit `healthcheck:` on :8780. **Rule: whenever you override `entrypoint:` on an inherited
+   image, re-check its `HEALTHCHECK` — it was written for the process you just replaced.**
+8. **SteamPrefill can finish and then hang forever.** (Found 2026-08-12.) A `--force` run started
+   2026-08-06 was still alive **5 d 18 h** later, having printed `Prefill complete! Prefilled
+   1132 apps totaling 10.83 TiB` and `Disconnecting` on 2026-08-08 — completed work, process
+   never exited. Consequences: (a) it was reaped only incidentally, by the agent-container
+   recreate; (b) it invalidates a bare `flock -n` schedule, because one hung holder silently
+   skips every subsequent tick. See "Prefill scheduling" below.
+9. **The eviction monitor watched too wide an area and cried wolf.** (Found 2026-08-12.) The
+   guard marks the whole filesystem, so GOG's `gogrepoc.py` deleting its own
+   `gog-manifest.dat.bak` files tripped the ≥10-deletes/60 s threshold and **emailed a false
+   "cache eviction detected" alert on 2026-08-10 20:23**. Over the guard's whole life there have
+   been **zero** lancache evictions; all 37 recorded `DELETE`s were GOG's own housekeeping. Fix
+   in "D3 as-built" below.
 
 ## Outcome
 
-- **Recovery complete:** Epic **654** `up_to_date`, Steam **1137** `up_to_date` (from 450
-  partial + 177 failed at the worst point). Residual: 15 dead/delisted Epic apps (404,
-  blocked), 3 intentionally-excluded Steam tools, a few sweep-settled partials.
-- **Cache:** ~34.4 M objects, zero real eviction, local ext4, no NFS.
+- **Recovery complete:** Epic **654** `up_to_date`, Steam **1138** `up_to_date` (from 450
+  partial + 177 failed at the worst point). Residual at 2026-08-12: 15 dead/delisted Epic apps
+  (404, blocked); 4 Steam `failed` + 3 `validation_failed` — of which `RPG Maker VX Ace`,
+  `RPG Maker XP`, `Half-Life 2: Lost Coast` and `Lossless Scaling` are the known
+  no-downloadable-content tools. (Steam also shows ~1363 `not_downloaded`: the library outside
+  the prefill selection list, not a regression.)
+- **Cache:** ~34.4 M objects / 26 TB of 55 TB, **zero real eviction across the guard's entire
+  life** — all 37 recorded `DELETE`s were GOG's own housekeeping (deviation 9). Local ext4, no NFS.
 - **D1** done. **D2** — see the corrected D2 entries above: BOTH halves of the prefill split were off until 2026-08-10 (the host cron was never installed AND `ORCH_SCHEDULED_PREFILL_ENABLED` was false). Steam + Epic now live; GOG blocked (issue #267). **D3** part 1 done; parts 2 and 3 still required. **D4** still gated.
 
 ## D3 as-built — the standing monitor (and its C5 durability fix)
@@ -574,5 +612,42 @@ is a **compose service** (`restart: unless-stopped`) covered by the `lancache-st
 guard. Drilled: `docker rm -f` + recreate → guard auto-started, test email delivered;
 `docker restart` → guard auto-started; chmod-000 probe → alert fired + email sent.
 
+### D3 corrections applied 2026-08-12
+
+Three defects in the guard, all found by reading its own output rather than by an alert:
+
+1. **Scope.** `FAN_MARK_FILESYSTEM` watches all of `/volume1`, so *any* deletion counted as
+   eviction — which is how GOG's manifest churn emailed a false alarm (deviation 9). The
+   eviction counter now counts only real cache objects: under `levels=2:2` an nginx cache file
+   is named by its full md5, i.e. `^[0-9a-f]{32}$`. Non-matching deletes are still logged, as
+   `DEL-ignored (not a cache object)`, so nothing becomes invisible.
+   **The mode-000 detector is deliberately NOT scoped this way** — the incident it exists for
+   was a `chmod 000` on the *directory* `/volume1/cache/cache`, whose name is not an md5.
+   Verified against the real names that caused the false alarm: `gog-manifest.dat.bak`,
+   `gog-resume-manifest.dat.bak`, `fallout_london` → ignored; `162bf4a3…5109` → counted;
+   `162bf4a3…5109.0001482060` (write-temp) → ignored; `cache` (the directory) → still watched
+   by the ATTRIB path. Positive-controlled live.
+2. **Log volume.** Every cache *write* (`MOVED_FROM`, the `use_temp_path=off` rename) was logged
+   verbatim into **both** `/log/deletions.log` **and** stdout→`/log/guard.out` — the same content
+   twice, 795 MB + 212 MB and growing, plus 583 MB of a retired watcher's output. Writes are now
+   aggregated to one `WRITES n in 300s` line; `DELETE`/`ATTRIB` stay verbatim; the entrypoint no
+   longer duplicates stdout into a file (docker's json-file driver already caps it at 50m×5).
+   1.5 GB reclaimed.
+3. **No rotation.** `deletions.log` now rotates at 64 MiB keeping one generation.
+
+The guard also gained a one-shot `--send-alert "<subject>" "<body>"` mode, so other jobs reuse
+its configured SMTP path instead of copying the credential handling. Nothing else changed in
+the mail path.
+
+### Prefill scheduling as-built (supersedes the v3 crontab)
+
+Deviation 8 (SteamPrefill hangs after completing) makes a bare `flock -n` unsafe: one hung
+holder skips every later tick **in silence**, which is the original outage. `run-steam-prefill.sh`
+keeps the lock, counts consecutive skips, and **emails after 3 in a row (~18 h)**; it also bounds
+the run with `timeout` and alerts separately on that. Staged as `prefill-cron-v4`. Both alert
+paths were drilled end-to-end (test mail delivered; lock held artificially → 3 skips → alert
+mail delivered).
+
 **Still open before D4:** a NAS reboot drill (needs Karl), the firmware-case rebuild-from-backup
-drill, and the off-host backup itself.
+drill, the off-host backup itself, and installing `prefill-cron-v4` (needs the operator:
+`sudo crontab -u karl /home/karl/lancache-host/prefill-cron-v4`).
