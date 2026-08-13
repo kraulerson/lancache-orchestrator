@@ -146,6 +146,15 @@ class TestErrors:
         assert r.status_code == 404
         assert "not found" in r.json()["detail"]
 
+    async def test_id_above_int64_returns_400_not_500(self, client):
+        # Issue #263: an unbounded game_id reached SQLite binding and raised
+        # OverflowError -> unhandled 500. Must be a validation rejection.
+        r = await client.post(
+            f"/api/v1/games/{2**63}/validate",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+
     async def test_unsupported_platform_returns_400(self, unit_app):
         """A platform outside steam/epic is rejected (defensive; the games CHECK
         constrains to steam/epic, so this uses a mock pool to reach the branch)."""

@@ -231,6 +231,136 @@ class TestParseFilters:
 
 
 # ---------------------------------------------------------------------------
+# issue #264: `contains` substring operator
+# ---------------------------------------------------------------------------
+
+
+def _title_allow_list():
+    from orchestrator.api._query_helpers import FilterAllowList, FilterFieldSpec
+
+    return FilterAllowList({"title": FilterFieldSpec(ops={"contains"}, value_type=str)})
+
+
+class TestContainsOperator:
+    """`contains` renders as `LIKE ? ESCAPE '\\'` with a %-wrapped, escaped value.
+
+    The wrapping happens in build_where_clause, NOT parse_filters, so
+    meta.applied_filters echoes what the operator actually asked for rather
+    than the SQL pattern the server derived from it.
+    """
+
+    def test_suffix_parses_to_contains_op(self):
+        from orchestrator.api._query_helpers import parse_filters
+
+        result = parse_filters(QueryParams("title_contains=Fort"), allow_list=_title_allow_list())
+        assert result == {"title": {"contains": "Fort"}}
+
+    def test_parse_does_not_wrap_the_value(self):
+        """The parsed value is the raw substring — no % padding, no escaping.
+        This is what the router echoes as meta.applied_filters."""
+        from orchestrator.api._query_helpers import parse_filters
+
+        result = parse_filters(QueryParams("title_contains=50%25"), allow_list=_title_allow_list())
+        assert result == {"title": {"contains": "50%"}}
+
+    def test_build_where_emits_like_with_escape_clause(self):
+        from orchestrator.api._query_helpers import build_where_clause
+
+        sql, params = build_where_clause(
+            {"title": {"contains": "Fort"}}, allow_list=_title_allow_list()
+        )
+        assert sql == "WHERE title LIKE ? ESCAPE '\\'"
+        assert params == ["%Fort%"]
+
+    def test_percent_in_value_is_escaped_not_a_wildcard(self):
+        from orchestrator.api._query_helpers import build_where_clause
+
+        _sql, params = build_where_clause(
+            {"title": {"contains": "50% off"}}, allow_list=_title_allow_list()
+        )
+        assert params == ["%50\\% off%"]
+
+    def test_underscore_in_value_is_escaped_not_a_wildcard(self):
+        from orchestrator.api._query_helpers import build_where_clause
+
+        _sql, params = build_where_clause(
+            {"title": {"contains": "D_ta"}}, allow_list=_title_allow_list()
+        )
+        assert params == ["%D\\_ta%"]
+
+    def test_backslash_in_value_is_escaped_first(self):
+        """The escape character itself must be escaped, and before the
+        metacharacters — otherwise the backslashes this function *adds* get
+        doubled on a second pass and `\\%` degrades back into a wildcard."""
+        from orchestrator.api._query_helpers import build_where_clause
+
+        _sql, params = build_where_clause(
+            {"title": {"contains": "back\\slash"}}, allow_list=_title_allow_list()
+        )
+        assert params == ["%back\\\\slash%"]
+
+    def test_value_at_length_cap_accepted(self):
+        from orchestrator.api._query_helpers import MAX_CONTAINS_LENGTH, parse_filters
+
+        value = "a" * MAX_CONTAINS_LENGTH
+        result = parse_filters(
+            QueryParams(f"title_contains={value}"), allow_list=_title_allow_list()
+        )
+        assert result == {"title": {"contains": value}}
+
+    def test_value_over_length_cap_raises(self):
+        """An unbounded LIKE pattern is an unbounded scan; cap it at the parse
+        boundary so it is a 400, not a slow query."""
+        from orchestrator.api._query_helpers import (
+            MAX_CONTAINS_LENGTH,
+            QueryParamError,
+            parse_filters,
+        )
+
+        value = "a" * (MAX_CONTAINS_LENGTH + 1)
+        with pytest.raises(QueryParamError, match="too long"):
+            parse_filters(QueryParams(f"title_contains={value}"), allow_list=_title_allow_list())
+
+    # The three rejection tests below match on the SPECIFIC message. A loose
+    # match="contains" passes today for the wrong reason — before the operator
+    # exists, `FilterAllowList` rejects it as an unknown op and `parse_filters`
+    # reads `platform_contains` as an unknown *field*, and both messages happen
+    # to contain the word.
+
+    def test_contains_on_int_field_rejected_at_construction(self):
+        """LIKE against an integer column would silently coerce; forbid the
+        combination where the allow-list is declared, not at request time."""
+        from orchestrator.api._query_helpers import FilterAllowList, FilterFieldSpec
+
+        with pytest.raises(ValueError, match="requires a str-typed field"):
+            FilterAllowList({"size_bytes": FilterFieldSpec(ops={"contains"}, value_type=int)})
+
+    def test_contains_on_timestamp_field_rejected_at_construction(self):
+        """`timestamp` is a typed-string sentinel, not a free-text column."""
+        from orchestrator.api._query_helpers import FilterAllowList, FilterFieldSpec
+
+        with pytest.raises(ValueError, match="requires a str-typed field"):
+            FilterAllowList(
+                {"last_prefilled_at": FilterFieldSpec(ops={"contains"}, value_type="timestamp")}
+            )
+
+    def test_contains_not_allowed_for_field_raises(self):
+        """`platform` is a real field that simply does not permit `contains` —
+        so this must be an operator rejection, not an unknown-field rejection."""
+        from orchestrator.api._query_helpers import QueryParamError, parse_filters
+
+        with pytest.raises(QueryParamError, match="'contains' not allowed for field 'platform'"):
+            parse_filters(QueryParams("platform_contains=ste"), allow_list=_games_allow_list())
+
+    def test_field_without_contains_still_parses_its_own_ops(self):
+        """Adding the suffix must not shadow existing fields/ops."""
+        from orchestrator.api._query_helpers import parse_filters
+
+        result = parse_filters(QueryParams("platform=steam"), allow_list=_games_allow_list())
+        assert result == {"platform": {"eq": "steam"}}
+
+
+# ---------------------------------------------------------------------------
 # parse_sort
 # ---------------------------------------------------------------------------
 
@@ -548,6 +678,72 @@ class TestSqlInjectionResistance:
         # Specifically, the injection payload must never appear in SQL
         assert "DROP TABLE" not in sql
         assert "';" not in sql
+
+    @given(
+        title=st.text(
+            alphabet=st.characters(min_codepoint=1, max_codepoint=0x2FFF),
+            min_size=1,
+            max_size=64,
+        )
+    )
+    def test_contains_value_never_reaches_sql_text(self, title):
+        """Issue #264 property: `contains` rewrites the value into a LIKE
+        pattern, so unlike every other op it does not bind the user's string
+        verbatim. The rewrite must still happen entirely on the *params* side.
+
+        The invariant is asserted as exact SQL equality rather than
+        `title not in sql`: the SQL text is a fixed string, so a one-character
+        value like "E" is a substring of it by coincidence and would fail a
+        containment check while proving nothing. Byte-identical SQL for every
+        possible input is the stronger statement."""
+        from orchestrator.api._query_helpers import build_where_clause
+
+        sql, params = build_where_clause(
+            {"title": {"contains": title}}, allow_list=_title_allow_list()
+        )
+        assert sql == "WHERE title LIKE ? ESCAPE '\\'"
+        assert len(params) == 1
+        # The value survives inside the pattern (modulo LIKE escaping), so the
+        # rewrite is a pattern-builder and not a sanitiser that drops
+        # characters — dropping them would silently change what matches.
+        assert params[0].startswith("%") and params[0].endswith("%")
+
+    @given(
+        payload=st.sampled_from(
+            [
+                "'; DROP TABLE games; --",
+                "%",
+                "_",
+                "\\",
+                "100%_\\",
+                "' OR '1'='1",
+            ]
+        )
+    )
+    def test_contains_metacharacters_are_escaped_never_interpolated(self, payload):
+        """LIKE metacharacters and SQL-injection payloads alike stay out of the
+        SQL text; the metacharacters additionally lose their wildcard meaning."""
+        from orchestrator.api._query_helpers import build_where_clause
+
+        sql, params = build_where_clause(
+            {"title": {"contains": payload}}, allow_list=_title_allow_list()
+        )
+        assert sql == "WHERE title LIKE ? ESCAPE '\\'"
+        assert "DROP TABLE" not in sql
+        assert "';" not in sql
+        inner = params[0][1:-1]  # strip the wrapping %…%
+        # Every metacharacter left in the pattern must be escaped, i.e. preceded
+        # by an ODD number of backslashes. Checking only `inner[i-1] == "\\"`
+        # would pass for `\\%` — a literal backslash followed by a LIVE
+        # wildcard — which is exactly the bug that escaping order prevents.
+        for i, ch in enumerate(inner):
+            if ch in ("%", "_"):
+                backslashes = 0
+                j = i - 1
+                while j >= 0 and inner[j] == "\\":
+                    backslashes += 1
+                    j -= 1
+                assert backslashes % 2 == 1, f"unescaped {ch!r} at {i} in {inner!r}"
 
 
 # ---------------------------------------------------------------------------

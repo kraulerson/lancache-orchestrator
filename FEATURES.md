@@ -293,11 +293,24 @@ the security boundary AND the docs surface.
   - `src/orchestrator/api/routers/games.py` — `GameResponse`,
     `GameListResponse`, `GamesMeta`, `FilterCriterion`,
     `SortFieldResponse` Pydantic models; `list_games` handler
+  - `src/orchestrator/api/routers/_path_params.py` — `GameIdPath`, the
+    shared `Annotated[int, Path(ge=1, le=INT64_MAX)]` bound applied to
+    every route taking a game id (detail + prefill/validate/purge
+    triggers). An id outside SQLite's signed 64-bit range is a 400 at
+    the validation layer, not an `OverflowError` 500 at bind time
+    (#263). Id 0 and negatives are 400, not 404.
   - `src/orchestrator/api/_query_helpers.py` — `parse_pagination`,
     `parse_filters`, `parse_sort`, `build_where_clause`,
     `build_order_by_clause`; `FilterAllowList`, `SortAllowList`,
     `FilterFieldSpec`, `SortField`, `PaginationParams`,
     `QueryParamError`
+  - Filter ops: `eq`, `ne`, `in`, `gte`, `lte`, `gt`, `lt`, and (since
+    #264) `contains` — `?title_contains=fort`, a case-insensitive
+    substring compiled to `LIKE ? ESCAPE '\'` with `%`/`_`/`\` escaped
+    and the value bound, never interpolated. `str`-typed fields only,
+    enforced at `FilterAllowList` construction; capped at
+    `MAX_CONTAINS_LENGTH` (200) chars. `meta.applied_filters` echoes the
+    raw substring, not the derived `%…%` pattern.
   - Wired in `src/orchestrator/api/main.py` via
     `app.include_router(games_router)`
 **Locked decisions (D1-D12):** offset pagination · rich meta envelope ·
@@ -1161,7 +1174,13 @@ triggers, and inspection — plus two local in-process admin commands. Fills the
 
 **Key Interfaces:**
   - `src/orchestrator/cli/client.py` — `OrchClient` (sync httpx wrapper) +
-    `ApiUnreachableError`/`AuthError`/`ApiError` (carry exit codes 2/3/1)
+    `ApiUnreachableError`/`AuthError`/`ApiError` (carry exit codes 2/3/1);
+    `_error_detail()` renders the server's `detail` (string or the
+    validation handler's per-field list), treating `null`/whitespace as
+    absent. When it is absent the message falls back to static text plus
+    the request — `HTTP 404: no response body (GET /api/v1/games/7)` —
+    never `resp.reason_phrase`, which is server-controlled and could
+    carry ANSI escapes to the operator's terminal (#265).
   - `src/orchestrator/cli/output.py` — colorblind-safe `status_label`/`table`/
     `success`/`warn`/`error`
   - `src/orchestrator/cli/base.py` — `make_client`, `handles_api_errors`
@@ -1197,10 +1216,14 @@ ruff/mypy(strict)/gitleaks/semgrep clean. New deps: none.
 
 **Known Limitations:**
   - **No `--json`** (machine output deferred Post-MVP, OQ6).
-  - **`game list` shows at most 500 rows** and does not surface `meta.has_more`,
-    so a truncated table is indistinguishable from a complete one. (Id *lookup*
-    is no longer capped — `show`/`block`/`unblock` use `GET /games/{game_id}`
-    since #260 — but ids past the cap remain undiscoverable via `game list`.)
+  - `game list` is still capped at 500 rows per request by the server, but a
+    truncated table is no longer silent: since #264 it prints
+    `showing N of TOTAL — use --offset N for the next page` whenever
+    `meta.has_more` is set, and `--offset` reaches the rest. `--title`
+    (a case-insensitive substring, sent as the server's `title_contains`)
+    narrows the search instead of paging. Id *lookup* has been uncapped since
+    #260 (`show`/`block`/`unblock` use `GET /games/{game_id}`), so ids past the
+    cap are now both discoverable and usable.
 
 ---
 
