@@ -826,6 +826,44 @@ class TestGameDetail:
         )
         assert r.status_code == 400
 
+    # --- issue #263: ids outside SQLite's signed-64-bit range ---------------
+    # Unbounded `game_id: int` reached SQLite parameter binding and raised
+    # OverflowError. Pool.read_one wraps only aiosqlite.Error and the route
+    # catches only PoolError, so nothing converted it -> HTTP 500 plus an
+    # unhandled traceback in the logs (tripping 5xx alerting).
+
+    async def test_id_above_int64_returns_400_not_500(self, client, populated_pool):
+        r = await client.get(
+            f"/api/v1/games/{2**63}",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+
+    async def test_id_below_int64_returns_400_not_500(self, client, populated_pool):
+        # SQLite INTEGER is SIGNED 64-bit, so the negative end overflows too.
+        r = await client.get(
+            f"/api/v1/games/{-(2**63) - 1}",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+
+    async def test_max_valid_int64_id_still_returns_404(self, client, populated_pool):
+        # The boundary value is a legal binding — it must stay a clean 404,
+        # not get swept up by the new bound.
+        r = await client.get(
+            f"/api/v1/games/{2**63 - 1}",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 404
+
+    async def test_zero_id_returns_400(self, client, populated_pool):
+        # Rowids start at 1. Previously 404; now a validation rejection.
+        r = await client.get(
+            "/api/v1/games/0",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+
     async def test_no_token_returns_401(self, client, populated_pool):
         r = await client.get("/api/v1/games/1")
         assert r.status_code == 401
