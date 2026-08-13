@@ -304,6 +304,13 @@ the security boundary AND the docs surface.
     `build_order_by_clause`; `FilterAllowList`, `SortAllowList`,
     `FilterFieldSpec`, `SortField`, `PaginationParams`,
     `QueryParamError`
+  - Filter ops: `eq`, `ne`, `in`, `gte`, `lte`, `gt`, `lt`, and (since
+    #264) `contains` — `?title_contains=fort`, a case-insensitive
+    substring compiled to `LIKE ? ESCAPE '\'` with `%`/`_`/`\` escaped
+    and the value bound, never interpolated. `str`-typed fields only,
+    enforced at `FilterAllowList` construction; capped at
+    `MAX_CONTAINS_LENGTH` (200) chars. `meta.applied_filters` echoes the
+    raw substring, not the derived `%…%` pattern.
   - Wired in `src/orchestrator/api/main.py` via
     `app.include_router(games_router)`
 **Locked decisions (D1-D12):** offset pagination · rich meta envelope ·
@@ -1203,10 +1210,14 @@ ruff/mypy(strict)/gitleaks/semgrep clean. New deps: none.
 
 **Known Limitations:**
   - **No `--json`** (machine output deferred Post-MVP, OQ6).
-  - **`game list` shows at most 500 rows** and does not surface `meta.has_more`,
-    so a truncated table is indistinguishable from a complete one. (Id *lookup*
-    is no longer capped — `show`/`block`/`unblock` use `GET /games/{game_id}`
-    since #260 — but ids past the cap remain undiscoverable via `game list`.)
+  - `game list` is still capped at 500 rows per request by the server, but a
+    truncated table is no longer silent: since #264 it prints
+    `showing N of TOTAL — use --offset N for the next page` whenever
+    `meta.has_more` is set, and `--offset` reaches the rest. `--title`
+    (a case-insensitive substring, sent as the server's `title_contains`)
+    narrows the search instead of paging. Id *lookup* has been uncapped since
+    #260 (`show`/`block`/`unblock` use `GET /games/{game_id}`), so ids past the
+    cap are now both discoverable and usable.
 
 ---
 

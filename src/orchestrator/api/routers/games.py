@@ -46,6 +46,10 @@ GAMES_FILTER_ALLOW_LIST = FilterAllowList(
     {
         "platform": FilterFieldSpec(ops={"eq", "in"}, value_type=str),
         "status": FilterFieldSpec(ops={"eq", "in"}, value_type=str),
+        # Issue #264: substring search only. No `eq` — an operator looking for
+        # a game types a fragment, and an exact-match op on a free-text column
+        # would mostly return nothing while looking like it worked.
+        "title": FilterFieldSpec(ops={"contains"}, value_type=str),
         "owned": FilterFieldSpec(ops={"eq"}, value_type=int),
         "size_bytes": FilterFieldSpec(ops={"eq", "gte", "lte"}, value_type=int),
         # UAT-4 S3-a: timestamp value_type enforces ISO 8601 format on the value
