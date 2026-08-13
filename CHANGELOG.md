@@ -19,6 +19,15 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — bodiless HTTP errors rendered as a blank `HTTP 404:` — 2026-08-13
+
+`OrchClient._request` built its error as `f"HTTP {status}: {detail}"` from the JSON body, falling back to `resp.text[:200]`. A response with no body — common from a reverse proxy — left nothing after the colon. This was worst in exactly the case it matters most: a wrong `--url`/`ORCH_API_URL` pointed at a host that does not serve the route. (#265)
+
+- **Fixed:** a shared `_error_detail()` helper tests the **raw** value before any `str()` coercion, so the two cases that bypass a naive fix are handled: `{"detail": null}` coerces to the truthy literal `"None"` (rendering `HTTP 404: None`), and a whitespace-only value stays truthy while displaying as nothing. Both now report empty. A structured `detail` is still rendered — the API's own validation handler returns it as a **list** of per-field errors (as the #263 out-of-range 400 does), and treating a non-string as empty would hide the real failure.
+- **Fixed:** the empty case falls back to static text plus the request the client made — `HTTP 404: no response body (GET /api/v1/games/7)`. Two phrases, chosen on whether a body arrived at all: nothing at all points at a misrouted `--url` or a proxy answering for a route the orchestrator never saw, while a body carrying no `detail` means the API answered but explained nothing.
+- **Security:** the fallback deliberately does **not** use `resp.reason_phrase`. It is server-controlled — httpx decodes it as ASCII with `errors="ignore"` and h11 accepts any non-CRLF bytes — so ANSI escape sequences could be emitted into the operator's terminal. An earlier attempt in #261 used it and was reverted for this; a test now pins that it cannot come back. The synthesized text lives only in the human-facing message: `ApiError` carries no structured detail field, so nothing can branch on a string the server did not send.
+- **Fixed:** the `401` branch coerced identically and had the same defect — a 401 carrying `{"detail": null}` raised `AuthError("None")`. It now shares the helper and falls back to the existing `check ORCH_TOKEN` hint.
+
 ### Added — `contains` filter operator + `game list --title/--offset` with a truncation footer — 2026-08-13
 
 `orchestrator-cli game list` rendered only `data["games"]` and never read the `meta` envelope. The server caps `limit` at 500, so against a ~3,177-game library an operator saw exactly 500 rows with **no truncation indicator** and read that table as the complete set. Worse, `game list` is the only way to *discover* an id: #260 fixed `game block <id>` for any id, but ids past the cap remained unreachable because nothing could surface them. (#264)

@@ -1174,7 +1174,13 @@ triggers, and inspection — plus two local in-process admin commands. Fills the
 
 **Key Interfaces:**
   - `src/orchestrator/cli/client.py` — `OrchClient` (sync httpx wrapper) +
-    `ApiUnreachableError`/`AuthError`/`ApiError` (carry exit codes 2/3/1)
+    `ApiUnreachableError`/`AuthError`/`ApiError` (carry exit codes 2/3/1);
+    `_error_detail()` renders the server's `detail` (string or the
+    validation handler's per-field list), treating `null`/whitespace as
+    absent. When it is absent the message falls back to static text plus
+    the request — `HTTP 404: no response body (GET /api/v1/games/7)` —
+    never `resp.reason_phrase`, which is server-controlled and could
+    carry ANSI escapes to the operator's terminal (#265).
   - `src/orchestrator/cli/output.py` — colorblind-safe `status_label`/`table`/
     `success`/`warn`/`error`
   - `src/orchestrator/cli/base.py` — `make_client`, `handles_api_errors`
