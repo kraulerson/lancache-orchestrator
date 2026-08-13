@@ -293,6 +293,12 @@ the security boundary AND the docs surface.
   - `src/orchestrator/api/routers/games.py` — `GameResponse`,
     `GameListResponse`, `GamesMeta`, `FilterCriterion`,
     `SortFieldResponse` Pydantic models; `list_games` handler
+  - `src/orchestrator/api/routers/_path_params.py` — `GameIdPath`, the
+    shared `Annotated[int, Path(ge=1, le=INT64_MAX)]` bound applied to
+    every route taking a game id (detail + prefill/validate/purge
+    triggers). An id outside SQLite's signed 64-bit range is a 400 at
+    the validation layer, not an `OverflowError` 500 at bind time
+    (#263). Id 0 and negatives are 400, not 404.
   - `src/orchestrator/api/_query_helpers.py` — `parse_pagination`,
     `parse_filters`, `parse_sort`, `build_where_clause`,
     `build_order_by_clause`; `FilterAllowList`, `SortAllowList`,

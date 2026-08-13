@@ -19,6 +19,15 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — an out-of-range `game_id` returned HTTP 500 instead of a validation error — 2026-08-13
+
+`GET /api/v1/games/{game_id}` and the `prefill` / `validate` / `purge` triggers all typed the path parameter as a bare `int`, which in Python is unbounded. An id outside SQLite's signed 64-bit INTEGER range reached aiosqlite parameter binding and raised `OverflowError`. `Pool.read_one` wraps only `aiosqlite.Error` and the routes catch only `PoolError`, so nothing converted it: the request returned HTTP 500 plus an unhandled traceback — 5xx alerting tripped by trivially-reachable input. (#263)
+
+- **Fixed:** a single shared `GameIdPath = Annotated[int, Path(ge=1, le=INT64_MAX)]` (new `src/orchestrator/api/routers/_path_params.py`) bounds the id on all four routes, so an out-of-range value is rejected at the validation layer before it can reach the DB. One alias rather than four inline literals, so the read path and the three trigger paths cannot drift apart.
+- **Changed (contract):** id `0` and negative ids now answer **400** where they previously answered 404. The lower bound is not cosmetic — SQLite's INTEGER range is *signed*, so the negative end overflowed exactly like the positive end. Rowids start at 1, so no reachable row changes behavior.
+- The status is **400**, not the 422 the issue text suggested: this app maps `RequestValidationError` to 400 globally (`api/main.py`), as the pre-existing `test_non_integer_id_returns_400` already asserted. `2**63-1` remains a legal id and still answers a clean 404.
+- The four importing routers carry `# noqa: TC001`. Ruff sees an annotation-only use and offers to move the import into a `TYPE_CHECKING` block; that would break route registration, because FastAPI resolves the annotation at runtime and this module uses `from __future__ import annotations`.
+
 ### Security — pin transitive `h2` to 4.4.1 (GHSA-6hr6-w5qg-qmwg) — 2026-08-09
 
 The CI dependency audit began failing on `h2==4.3.0`: **GHSA-6hr6-w5qg-qmwg** (medium) — *"duplicate Host header could facilitate request smuggling"*, vulnerable `<= 4.4.0`, fixed in `4.4.1`. `h2` is transitive via `httpx[http2]` (the orchestrator uses httpx as a client for Epic CDN pulls and agent RPC). Newly disclosed rather than a regression: main last ran green on 2026-07-22 and would fail this audit today.
