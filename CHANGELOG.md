@@ -19,6 +19,17 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Epic prefill fired on an interval anchored to container start, so its offset from the Steam cron drifted — 2026-08-14
+
+The scheduled prefill driver (Epic-only; Steam is prefilled by the host SteamPrefill cron) used an `IntervalTrigger` of `library_sync_interval_sec`. APScheduler counts an interval from process start, so the gap between the host Steam cron and the orchestrator's Epic prefill was whatever the container's last restart happened to make it — observed at +1h58m — and moved silently on every restart. Nothing was broken by this, but the separation that keeps the two off each other's WAN was accidental rather than configured.
+
+- **Fixed:** the job now uses `CronTrigger.from_crontab(..., timezone="UTC")`, so the slot is wall-clock and survives restarts.
+- **Added:** `ORCH_SCHEDULED_PREFILL_CRON` (`scheduled_prefill_cron`), defaulting to `45 3,9,15,21 * * *`, validated fail-fast at settings construction like `validation_sweep_cron`.
+- **Why that slot:** a fixed **+3h45m** after the host Steam cron. The NAS runs MDT and prefills at 00/06/12/18 local; because the UTC offset and the cadence are both 6h, that is also 00/06/12/18 UTC. The `:45` is not cosmetic — the validation sweep starts on the hour at those same hours and runs ~39 min, and it is platform-agnostic, so an Epic game validated while its prefill is still writing reports as a false partial. Starting at :45 lets the sweep drain first.
+- **Documentation:** the `validation_sweep_cron` comment claimed the sweep was offset from an `epic 1/7/13/19` host cron. There is no Epic host cron — Epic has been orchestrator-owned since Piece 2, and the crontab on the NAS documents that it is deliberately absent to avoid double-prefill. Corrected to describe the real schedule.
+
+Note for operators: the cross-launcher dedup this schedule feeds already exists and is unchanged — Game_shelf pushes the "already covered on a higher-priority launcher" set to `PUT /api/v1/prefill-exclusions/gameshelf/epic` daily (115 Epic games at time of writing), and `enqueue_scheduled_prefill` skips them.
+
 ### Fixed — bodiless HTTP errors rendered as a blank `HTTP 404:` — 2026-08-13
 
 `OrchClient._request` built its error as `f"HTTP {status}: {detail}"` from the JSON body, falling back to `resp.text[:200]`. A response with no body — common from a reverse proxy — left nothing after the colon. This was worst in exactly the case it matters most: a wrong `--url`/`ORCH_API_URL` pointed at a host that does not serve the route. (#265)

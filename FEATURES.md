@@ -1246,8 +1246,18 @@ shipped in `0001_initial.sql`.
     /api/v1/block-list` (paginated F9 envelope; idempotent POST 201/200,
     pre-block OK; idempotent DELETE `{removed}`)
   - `src/orchestrator/scheduler/jobs.py::enqueue_scheduled_prefill` — the
-    version-diff `INSERT...SELECT` (registered on the library-sync interval via
-    `scheduler/manager.py`; `settings.scheduled_prefill_enabled`)
+    Epic-only `INSERT...SELECT` (Steam is prefilled by the host SteamPrefill
+    cron). Registered via `scheduler/manager.py` on a **wall-clock cron**,
+    `settings.scheduled_prefill_cron` (`ORCH_SCHEDULED_PREFILL_CRON`),
+    default `45 3,9,15,21 * * *` = a fixed +3h45m after the host Steam cron
+    (00/06/12/18 UTC), starting 45 min past the hour so the ~39-min
+    validation sweep at those same hours has drained. An interval trigger
+    was wrong here: it anchors to process start, so the offset drifted on
+    every container restart. Gated by
+    `settings.scheduled_prefill_enabled`. Cross-launcher dedup comes from
+    `prefill_exclusions` (Game_shelf pushes the "covered on a
+    higher-priority launcher" set), so an Epic copy of a game already on
+    Steam is never prefilled.
   - `src/orchestrator/platform/steam/enumerate.py::_app_version_token` — Steam
     version token (buildid → depot-gid composite)
   - `src/orchestrator/jobs/handlers/{library_sync,prefill}.py` — write

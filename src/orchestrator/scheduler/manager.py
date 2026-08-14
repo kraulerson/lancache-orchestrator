@@ -68,6 +68,7 @@ class SchedulerManager:
         validation_sweep_enabled: bool = True,
         validation_sweep_cron: str = "0 3,9,15,21 * * *",
         scheduled_prefill_enabled: bool = True,
+        scheduled_prefill_cron: str = "45 3,9,15,21 * * *",
         auto_classify_block_enabled: bool = True,
         fetch_manifests_enabled: bool = True,
         fetch_manifests_cron: str = "0 5 * * 1",
@@ -80,6 +81,7 @@ class SchedulerManager:
         self._validation_sweep_enabled = validation_sweep_enabled
         self._validation_sweep_cron = validation_sweep_cron
         self._scheduled_prefill_enabled = scheduled_prefill_enabled
+        self._scheduled_prefill_cron = scheduled_prefill_cron
         self._auto_classify_block_enabled = auto_classify_block_enabled
         self._fetch_manifests_enabled = fetch_manifests_enabled
         self._fetch_manifests_cron = fetch_manifests_cron
@@ -160,16 +162,26 @@ class SchedulerManager:
                 )
 
             if self._scheduled_prefill_enabled:
-                # F8: same cadence as library sync, independent of it (no
-                # completion-chaining) — eventually consistent: a fresh patch is
-                # enqueued once both the next sync (refreshing current_version)
-                # and the next prefill diff have run.
+                # F8: independent of library sync (no completion-chaining) —
+                # eventually consistent: a fresh patch is enqueued once both the
+                # next sync (refreshing current_version) and the next prefill
+                # pass have run.
+                #
+                # Wall-clock cron, NOT an interval. An IntervalTrigger counts
+                # from process start, so the gap between the host Steam cron and
+                # this Epic prefill was set by whenever the container last
+                # restarted and moved silently on every restart. The slot has to
+                # stay fixed: it sits +3h45m after the Steam cron so the two do
+                # not compete for WAN, and 45 min past the hour so the ~39-min
+                # validation sweep at 03/09/15/21 has drained first — the sweep
+                # is platform-agnostic, and validating an Epic game while its
+                # prefill is still writing reports it as a false partial.
                 scheduler.add_job(
                     enqueue_scheduled_prefill,
-                    trigger=IntervalTrigger(seconds=self._library_sync_interval_sec),
+                    trigger=CronTrigger.from_crontab(self._scheduled_prefill_cron, timezone="UTC"),
                     args=(self._pool,),
                     id=SCHEDULED_PREFILL_JOB_ID,
-                    name="Enqueue scheduled prefill (version-diff)",
+                    name="Enqueue scheduled prefill (Epic)",
                     replace_existing=True,
                 )
 

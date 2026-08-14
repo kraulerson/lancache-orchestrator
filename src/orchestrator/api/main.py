@@ -227,6 +227,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         validation_sweep_enabled=settings.validation_sweep_enabled,
         validation_sweep_cron=settings.validation_sweep_cron,
         scheduled_prefill_enabled=settings.scheduled_prefill_enabled,
+        scheduled_prefill_cron=settings.scheduled_prefill_cron,
         auto_classify_block_enabled=settings.auto_classify_block_enabled,
         fetch_manifests_enabled=settings.fetch_manifests_enabled,
         fetch_manifests_cron=settings.fetch_manifests_cron,
