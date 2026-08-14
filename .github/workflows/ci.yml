@@ -264,6 +264,15 @@ jobs:
         run: bash scripts/check-changelog.sh 2>/dev/null || true
 
       - name: Session state check
+        # Defaults (5 commits / 24h) fire on any actively-developed repo — a
+        # normal day of work re-triggers the warning regardless of whether
+        # CLAUDE.md actually drifted, which trains everyone to ignore it.
+        # Raised so the signal means real staleness. Warning-only either way:
+        # the script exits 0 unless SOIF_STRICT_SESSION=true, and `|| true`
+        # keeps it non-blocking.
+        env:
+          SOIF_SESSION_COMMIT_THRESHOLD: 50
+          SOIF_SESSION_TIME_THRESHOLD: 604800 # 7 days
         run: bash scripts/check-session-state.sh 2>/dev/null || true
 
   # ── Publish: tag-triggered push to GHCR ──────────────────────
