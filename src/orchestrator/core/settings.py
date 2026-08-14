@@ -223,12 +223,26 @@ class Settings(BaseSettings):
     scheduler_library_sync_interval_sec: int = Field(default=21600, ge=60, le=86400)
     # F13 — scheduled validation sweep.
     validation_sweep_enabled: bool = True
-    # Every 6h at 03/09/15/21 UTC — offset from the host prefill crons
-    # (steam 0/6/12/18, epic 1/7/13/19, gog 4/16) so a sweep never overlaps a
-    # prefill burst. 5-field cron (min hour dom mon dow), UTC.
+    # Every 6h at 03/09/15/21 UTC — offset from the prefill schedules so a
+    # sweep never overlaps a prefill burst: host steam cron 0/6/12/18 UTC, gog
+    # 4/16, and the orchestrator's own Epic prefill at :45 past these same
+    # hours (it starts once this ~39-min sweep has drained). 5-field cron
+    # (min hour dom mon dow), UTC.
     validation_sweep_cron: str = "0 3,9,15,21 * * *"
-    # F8: the scheduled prefill driver runs on the library-sync interval.
+    # F8: the scheduled prefill driver (Epic-only — Steam is prefilled by the
+    # host SteamPrefill cron). Wall-clock cron, NOT an interval: an interval
+    # counts from process start, so the gap between the host Steam cron and
+    # this job was whatever the container's last restart made it, and changed
+    # silently on every restart.
+    #
+    # 45 min past 03/09/15/21 UTC = a fixed +3h45m after the host Steam cron
+    # (00/06/12/18 UTC — the NAS runs MDT at 00/06/12/18 local, and the 6h
+    # offset and 6h cadence coincide). The :45 clears the validation sweep,
+    # which starts on the hour at those same hours and runs ~39 min: the sweep
+    # is platform-agnostic, so validating an Epic game while its prefill is
+    # still writing reports it as a false partial.
     scheduled_prefill_enabled: bool = True
+    scheduled_prefill_cron: str = "45 3,9,15,21 * * *"
     # #225: after a game is prefilled, auto-exclude classifier-flagged non-games
     # (soundtracks/tools/servers/demos) from FUTURE prefill. Runs on the same
     # interval as the scheduled prefill; download-once-then-block.
@@ -393,6 +407,16 @@ class Settings(BaseSettings):
             CronTrigger.from_crontab(v)
         except Exception as e:  # apscheduler raises ValueError on bad expressions
             raise ValueError(f"invalid validation_sweep_cron {v!r}: {e}") from e
+        return v
+
+    @field_validator("scheduled_prefill_cron", mode="after")
+    @classmethod
+    def _validate_scheduled_prefill_cron(cls, v: str) -> str:
+        """Fail-fast on a malformed cron by constructing the trigger now."""
+        try:
+            CronTrigger.from_crontab(v)
+        except Exception as e:  # apscheduler raises ValueError on bad expressions
+            raise ValueError(f"invalid scheduled_prefill_cron {v!r}: {e}") from e
         return v
 
     @field_validator("fetch_manifests_cron", mode="after")
