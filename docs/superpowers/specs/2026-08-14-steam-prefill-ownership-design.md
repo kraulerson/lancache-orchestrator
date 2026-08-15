@@ -99,6 +99,17 @@ Extend `enqueue_scheduled_prefill` to cover Steam, or add a sibling `enqueue_sch
 
 Schedule: wall-clock `CronTrigger`, following the pattern merged in PR #273. Slot must avoid the Steam-heavy windows already in play — proposal `15 1,7,13,19 * * *` UTC, i.e. 1h15m after the current cron slots and well clear of both the validation sweep (`0 3,9,15,21`) and Epic prefill (`45 3,9,15,21`).
 
+Per OQ1, **two** scheduled Steam shapes are needed, and they are not the same job:
+
+- **selection prefill** — the 6h tick above, targeting the selection list.
+- **recent-purchase prefill** — `--recently-purchased`, which needs to run only about daily
+  (a new purchase is not urgent, and #250 fixed the *visibility* half within one 6h sweep).
+  Proposal: once daily at `15 1 * * *` UTC, i.e. reuse the first selection slot rather than adding
+  a fifth window. Whether it runs as a separate job or as a flag on the first daily tick is an
+  implementation detail for the plan.
+
+Neither scheduled shape passes `--force` (OQ4).
+
 ### Phase 4 — retire the host cron
 
 Only after Phases 1–3 run green live for a full week. Remove the `0 */6` line from `prefill-cron-v4` **and** the live spool file (note: `crontab <file>` cannot install on this NAS — the spool dir is root-owned; write the spool file directly, as of 2026-08-14). Keep `run-steam-prefill.sh` on disk one release cycle as the rollback path.
@@ -118,10 +129,43 @@ Only after Phases 1–3 run green live for a full week. Remove the `0 */6` line 
 
 ## 7. Open questions
 
-- **OQ1 — new-purchase discovery.** Restore `--recently-purchased` (as an orchestrator-driven mode on the driver), or formally accept the current mechanism (selection list + organic lancache caching + sweep validating `unknown`) and correct the stale comments? *Recommendation: restore it as an explicit driver mode; it is the only mechanism that is deliberate rather than incidental.*
-- **OQ2 — alert channel.** Reuse `cache-catcher`'s SMTP via `docker exec`, or give the orchestrator a first-class notifier? The former is expedient and already configured; the latter removes a cross-container dependency from the alert path.
-- **OQ3 — one job or two.** Confirmed above as two (Steam's candidate set differs fundamentally from Epic's). Recorded here for explicit sign-off.
-- **OQ4 — `--force` scheduling.** The 5d18h hang was a `--force` run. Should scheduled Steam prefill ever pass `--force`, or remain operator-only? *Recommendation: operator-only.*
+### DECIDED 2026-08-15
+
+- **OQ1 — new-purchase discovery. DECIDED: restore `--recently-purchased` as a driver mode.**
+  `SteamPrefillDriver` gains a `prefill_recent()` (or a `recently_purchased: bool` on
+  `prefill_apps`) that runs `SteamPrefill prefill --recently-purchased --no-ansi`. Unlike the
+  app-id path this does **not** write `selectedAppsToPrefill.json` — SteamPrefill derives the set
+  itself — so it sidesteps the save/restore dance entirely. #250 Piece 3 already persists what a
+  recent-purchase run downloads back into the selection, so discovery becomes deliberate again
+  rather than incidental. Scheduling for this mode is settled in Phase 3.
+- **OQ4 — `--force` scheduling. DECIDED: operator-only.**
+  Scheduled Steam prefill never passes `--force`. It stays reachable via the CLI
+  (`game prefill --force`) and the Game_shelf Repair button. Rationale: the 5d18h hang was a
+  `--force` run, and force re-requests every chunk, so an unattended force is both the longest
+  and the riskiest run shape. Phase 1's timeout applies to it regardless.
+
+### OPEN
+
+- **OQ2 — alert channel.** *Framing corrected 2026-08-15:* the original option "reuse
+  cache-catcher's SMTP via `docker exec`" **is not available to the orchestrator or the agent.**
+  Verified live: the agent has no `docker.sock` mount, cache-catcher publishes no ports
+  (`ports={}`, bridge `172.17.0.2`), and the orchestrator runs on a different host entirely.
+  Only a process on the NAS host with docker access can reach that path — which is exactly what
+  `run-steam-prefill.sh` is. Separately, the orchestrator has **no notification capability of any
+  kind today** (no SMTP, no webhook), so this is really "does the orchestrator get alerting for
+  the first time?" Options in §7.1.
+- **OQ3 — one job or two.** Recommended above as two. Recorded here for explicit sign-off.
+
+### 7.1 OQ2 options
+
+| Option | Mechanism | Pro | Con |
+|---|---|---|---|
+| **A. Orchestrator notifier** | SMTP client + credential on the LXC | Self-contained; true single ownership; alerts fire from the system that detects the fault | A second copy of the Gmail app password to manage; first secret of its kind on the LXC |
+| **B. NAS-side watchdog** (recommended) | Small NAS cron polls the orchestrator API for stalled/failed prefill jobs, emails via the existing cache-catcher path | No new credential; reuses the proven alert path; read-only and tiny | Leaves a host-side component, which slightly softens Phase 4's "one writer" goal; alert latency bounded by poll interval |
+| **C. Docker socket into the agent** | Mount `/var/run/docker.sock` so the agent can `docker exec` cache-catcher | Reuses the existing path with no new credential | **Not recommended.** Mounting the docker socket into a network-exposed container is effectively host root; disproportionate to sending an email |
+
+Note that B keeps a NAS cron alive, but a *fundamentally different* one from the cron Phase 4
+retires: read-only, no lock, no long-running child, no ability to corrupt SteamPrefill state.
 
 ## 8. Go / no-go gate before Phase 4
 
