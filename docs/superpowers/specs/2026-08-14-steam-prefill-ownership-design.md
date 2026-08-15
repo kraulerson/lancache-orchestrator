@@ -1,7 +1,7 @@
 # Design — orchestrator ownership of scheduled Steam prefill
 
 **Date:** 2026-08-14
-**Status:** Draft (design) — awaiting Orchestrator approval
+**Status:** Design agreed (2026-08-15) — all open questions resolved; ready for an implementation plan
 **Repo:** lancache_orchestrator. **Branch:** `feat/steam-prefill-ownership` (not yet created)
 **Parent:** re-arch ① (`docs/superpowers/specs/2026-06-19-steam-via-prefill-design.md`), which delegated Steam *execution* to SteamPrefill. This spec proposes moving Steam *scheduling* from the host cron to the orchestrator.
 
@@ -89,7 +89,7 @@ Everything `run-steam-prefill.sh` does, expressed in orchestrator terms:
 | `flock -n` skip | Phase 1 single-flight → job row `state='queued'` deduped onto the in-flight run |
 | skip counter + email at 3 | a `steam_prefill_stall` check: a `prefill` job `running` beyond `steam_prefill_timeout_sec`, or N consecutive dedup-skips, raises an alert |
 | `RUN_MAX` timeout alert | Phase 1 timeout → job `state='failed'`, `error='timeout after Ns'` |
-| email via cache-catcher | **OQ2** — reuse the cache-catcher SMTP path, or add a first-class orchestrator alert channel |
+| email via cache-catcher | the orchestrator's own notifier (§7.1), with a per-condition cooldown so a persistent stall does not email every tick |
 
 A job row with `started_at` set and `finished_at` NULL past the timeout is directly queryable — strictly more observable than a skip counter in a file. The existing startup job reaper (ID6) already handles orphaned `running` rows across restarts.
 
@@ -144,28 +144,67 @@ Only after Phases 1–3 run green live for a full week. Remove the `0 */6` line 
   `--force` run, and force re-requests every chunk, so an unattended force is both the longest
   and the riskiest run shape. Phase 1's timeout applies to it regardless.
 
-### OPEN
+- **OQ2 — alert channel. DECIDED: Option A, a first-class orchestrator notifier.**
+  Chosen for self-containment: the alert fires from the system that detects the fault, with no
+  host-side dependency, which is the point of the migration. The Orchestrator provisions a second
+  Gmail app password. Design in §7.1.
 
-- **OQ2 — alert channel.** *Framing corrected 2026-08-15:* the original option "reuse
+  *Framing corrected 2026-08-15 before the decision:* the originally-offered "reuse
   cache-catcher's SMTP via `docker exec`" **is not available to the orchestrator or the agent.**
-  Verified live: the agent has no `docker.sock` mount, cache-catcher publishes no ports
-  (`ports={}`, bridge `172.17.0.2`), and the orchestrator runs on a different host entirely.
-  Only a process on the NAS host with docker access can reach that path — which is exactly what
-  `run-steam-prefill.sh` is. Separately, the orchestrator has **no notification capability of any
-  kind today** (no SMTP, no webhook), so this is really "does the orchestrator get alerting for
-  the first time?" Options in §7.1.
-- **OQ3 — one job or two.** Recommended above as two. Recorded here for explicit sign-off.
+  Verified live — the agent has no `docker.sock` mount, cache-catcher publishes no ports
+  (`ports={}`, bridge `172.17.0.2`), and the orchestrator runs on a different host. Only a
+  NAS-host process with docker access can reach that path, which is exactly what
+  `run-steam-prefill.sh` is. Recorded so the option is not re-proposed.
 
-### 7.1 OQ2 options
+- **OQ3 — one job or two. DECIDED: sibling job.**
+  A separate `enqueue_scheduled_steam_prefill` with its own candidate SQL, cron setting, and
+  enable flag. Sharing Epic's predicate (`status <> 'up_to_date'`) would enqueue all 1,363
+  Steam `not_downloaded` rows — games deliberately outside the selection. Separate jobs also mean
+  either platform can be disabled without touching the other.
 
-| Option | Mechanism | Pro | Con |
-|---|---|---|---|
-| **A. Orchestrator notifier** | SMTP client + credential on the LXC | Self-contained; true single ownership; alerts fire from the system that detects the fault | A second copy of the Gmail app password to manage; first secret of its kind on the LXC |
-| **B. NAS-side watchdog** (recommended) | Small NAS cron polls the orchestrator API for stalled/failed prefill jobs, emails via the existing cache-catcher path | No new credential; reuses the proven alert path; read-only and tiny | Leaves a host-side component, which slightly softens Phase 4's "one writer" goal; alert latency bounded by poll interval |
-| **C. Docker socket into the agent** | Mount `/var/run/docker.sock` so the agent can `docker exec` cache-catcher | Reuses the existing path with no new credential | **Not recommended.** Mounting the docker socket into a network-exposed container is effectively host root; disproportionate to sending an email |
+**No open questions remain.** Ready for an implementation plan.
 
-Note that B keeps a NAS cron alive, but a *fundamentally different* one from the cron Phase 4
-retires: read-only, no lock, no long-running child, no ability to corrupt SteamPrefill state.
+### 7.1 Notifier design (OQ2 Option A)
+
+A small `orchestrator/core/notify.py` — the orchestrator's first outbound-notification capability.
+
+**Settings** (following the existing `orchestrator_token` convention: `SecretStr` +
+`secrets_dir="/run/secrets"`, so the password can arrive as a mounted file or an env var):
+
+| Setting | Default | Note |
+|---|---|---|
+| `alerts_enabled` | `False` | Opt-in. Default off so CI, dev, and any un-provisioned deploy never attempt SMTP |
+| `alert_smtp_host` | `smtp.gmail.com` | |
+| `alert_smtp_port` | `587` | STARTTLS |
+| `alert_smtp_username` | — | |
+| `alert_smtp_password` | — | `SecretStr`; `/run/secrets/alert_smtp_password` or `ORCH_ALERT_SMTP_PASSWORD` |
+| `alert_to` | — | recipient |
+| `alert_from` | falls back to username | |
+
+**Boot validation.** If `alerts_enabled=True` and any of username/password/recipient is missing,
+fail fast at settings construction — same fail-closed posture as the LAN-bind source-IP guard.
+Silently-disabled alerting is the failure mode this whole phase exists to remove.
+
+**Send semantics.**
+- A send failure must **never** fail the calling job. Log `alert.send_failed` and continue —
+  mirroring `run-steam-prefill.sh`'s `|| say "ALERT-SEND-FAILED"`.
+- **Per-condition cooldown.** Alerts carry a key (e.g. `steam_prefill_stall`); the same key does
+  not re-send within `alert_cooldown_sec` (default 6h). Equivalent in intent to the cron
+  resetting its skip counter after alerting so the next alert is `MAX_SKIPS` away — without it,
+  a persistent stall emails on every tick and gets filtered as noise.
+- Sending is off the request path (scheduler/job context only), so a slow SMTP server cannot
+  affect API latency.
+
+**Security.**
+- The credential is a send-only Gmail app password, never the account password.
+- `_SENSITIVE_KEY_RE` in `core/logging.py` already matches `password`, so `alert_smtp_password`
+  is redacted by the existing processor. A test asserts this rather than assuming it.
+- No credential literal in the repo; provisioning is deployment config only, keeping the
+  gitleaks/Secrets CI job clean.
+
+**Testing.** An injectable SMTP transport seam (the same shape as `_transport` in
+`cli/client.py`) so tests assert message construction, cooldown suppression, and
+failure-is-swallowed without touching the network.
 
 ## 8. Go / no-go gate before Phase 4
 
