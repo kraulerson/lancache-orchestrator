@@ -1,3 +1,4 @@
+import asyncio
 import json
 import stat
 from pathlib import Path
@@ -10,6 +11,23 @@ from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
 def _fake_binary(tmp_path, stdout="Done.", code=0):
     p = tmp_path / "FakeSteamPrefill"
     p.write_text(f"#!/bin/sh\ncat <<EOF\n{stdout}\nEOF\nexit {code}\n")
+    p.chmod(p.stat().st_mode | stat.S_IEXEC)
+    return p
+
+
+def _hanging_binary(tmp_path):
+    """Mimics the 2026-08-12 incident: prints success, then never exits."""
+    p = tmp_path / "HangingSteamPrefill"
+    p.write_text("#!/bin/sh\necho 'Prefill complete!'\nsleep 300\n")
+    p.chmod(p.stat().st_mode | stat.S_IEXEC)
+    return p
+
+
+def _group_spawning_binary(tmp_path, marker):
+    """Spawns a background child that outlives its parent unless the whole
+    process GROUP is killed. The child writes `marker` after a delay."""
+    p = tmp_path / "GroupSteamPrefill"
+    p.write_text(f"#!/bin/sh\n(sleep 5; echo pwned > {marker}) &\nsleep 300\n")
     p.chmod(p.stat().st_mode | stat.S_IEXEC)
     return p
 
@@ -122,3 +140,41 @@ def test_auth_status_present_ok(tmp_path):
     (cfg / "account.config").write_bytes(b"\x0a\x05hello")
     d = SteamPrefillDriver(binary=tmp_path / "x", config_dir=cfg)
     assert d.auth_status().ok is True
+
+
+@pytest.mark.asyncio
+async def test_prefill_apps_times_out_instead_of_hanging(tmp_path):
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    d = SteamPrefillDriver(binary=_hanging_binary(tmp_path), config_dir=cfg, timeout_sec=1.0)
+    res = await d.prefill_apps([730])
+    assert res.ok is False
+    assert "timeout" in res.raw.lower()
+
+
+@pytest.mark.asyncio
+async def test_prefill_apps_restores_selection_even_on_timeout(tmp_path):
+    """The operator's selection must survive the timeout path, or a timed-out
+    run leaves the orchestrator's temporary app list as the cron's input."""
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "selectedAppsToPrefill.json").write_text("[111, 222]")
+    d = SteamPrefillDriver(binary=_hanging_binary(tmp_path), config_dir=cfg, timeout_sec=1.0)
+    await d.prefill_apps([730])
+    assert json.loads((cfg / "selectedAppsToPrefill.json").read_text()) == [111, 222]
+
+
+@pytest.mark.asyncio
+async def test_timeout_kills_the_whole_process_group(tmp_path):
+    """Killing only the direct child leaves grandchildren alive — exactly the
+    cron's known weakness, where `timeout` kills the docker exec client while
+    the in-container SteamPrefill runs on."""
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    marker = tmp_path / "child-survived.txt"
+    d = SteamPrefillDriver(
+        binary=_group_spawning_binary(tmp_path, marker), config_dir=cfg, timeout_sec=1.0
+    )
+    await d.prefill_apps([730])
+    await asyncio.sleep(7)  # past the child's 5s delay
+    assert not marker.exists(), "background child survived the group kill"

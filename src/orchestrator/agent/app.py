@@ -67,6 +67,7 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
                 # cache is steam_prefill_live_cache_dir (the dir the capture reads),
                 # by construction — not by relying on the deploy env (UAT-13 F2).
                 home=Path(settings.steam_prefill_live_cache_dir).parent.parent,
+                timeout_sec=settings.steam_prefill_timeout_sec,
             )
         if not hasattr(app.state, "manifest_fetcher"):
             app.state.manifest_fetcher = DepotDownloaderManifestFetcher(

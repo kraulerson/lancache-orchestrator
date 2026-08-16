@@ -7,8 +7,10 @@ account.config bytes or any token/identifier."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,7 +28,14 @@ class SteamAuthStatus:
 
 
 class SteamPrefillDriver:
-    def __init__(self, *, binary: Path, config_dir: Path, home: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        binary: Path,
+        config_dir: Path,
+        home: Path | None = None,
+        timeout_sec: float = 36000.0,
+    ) -> None:
         self._binary = Path(binary)
         self._config_dir = Path(config_dir)
         # SteamPrefill writes its manifest cache to ``$HOME/.cache/SteamPrefill``.
@@ -36,10 +45,33 @@ class SteamPrefillDriver:
         # omits ``-e HOME=/tmp`` silently strands manifests and re-introduces the
         # false-Partial bug (UAT-13 F2 / #211). None preserves prior env-inherit.
         self._home = None if home is None else Path(home)
+        self._timeout_sec = float(timeout_sec)
 
     @property
     def _selection_path(self) -> Path:
         return self._config_dir / "selectedAppsToPrefill.json"
+
+    async def _kill_process_group(self, proc: asyncio.subprocess.Process) -> None:
+        """SIGTERM the process GROUP, escalating to SIGKILL after 60s.
+
+        The group, not the process: SteamPrefill may have spawned children, and
+        killing only the direct child is the host cron's known weakness — its
+        `timeout` kills the docker exec client while the in-container process
+        runs on (its own alert text admits this).
+        """
+        try:
+            pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=60)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pgid, signal.SIGKILL)
+            with contextlib.suppress(Exception):
+                await proc.wait()
 
     async def prefill_apps(self, app_ids: list[int], *, force: bool = False) -> PrefillResult:
         """Write our app selection, run SteamPrefill, then restore the operator's
@@ -60,8 +92,16 @@ class SteamPrefillDriver:
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
             )
-            out, _ = await proc.communicate()
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=self._timeout_sec)
+            except TimeoutError:
+                await self._kill_process_group(proc)
+                return PrefillResult(
+                    ok=False,
+                    raw=f"timeout: SteamPrefill exceeded {self._timeout_sec:.0f}s and was killed",
+                )
             raw = out.decode("utf-8", "replace")
             return PrefillResult(ok=(proc.returncode == 0), raw=raw[-4000:])
         finally:
