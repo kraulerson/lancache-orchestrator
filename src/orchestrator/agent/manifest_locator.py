@@ -1,10 +1,12 @@
 """Locate an app's current manifest files in the Steam manifest cache.
 
-Two manifest formats live side by side under <cache_root>/v1/, both named
-{app}_{app}_{depot}_{gid}.<ext>:
-  * .bin   — SteamPrefill's protobuf manifest (what SteamPrefill prefilled).
-  * .shas  — sidecar chunk list (one lowercase 40-hex SHA1 per line) written by
-             the independent fetcher, covering apps SteamPrefill never cached.
+Two manifest formats live side by side under <cache_root>/v1/:
+  * .shas is always named {app}_{app}_{depot}_{gid}.shas (fixed, written only
+    by this project's own fetcher — see manifest_fetcher.py).
+  * .bin is SteamPrefill's own naming, which repeats the app id only for a
+    game's primary depot ({app}_{app}_{depot}_{gid}.bin); a secondary depot is
+    {app}_{depotGroupId}_{depot}_{gid}.bin, where depotGroupId is frequently a
+    DIFFERENT number. Both shapes are exactly 4 underscore-separated segments.
 For an app we take the NEWEST file (by mtime) per depot regardless of extension
 — the most recently fetched manifest, which tracks what is currently prefilled
 into lancache. A .bin and a .shas for the same depot de-dupe to whichever is
