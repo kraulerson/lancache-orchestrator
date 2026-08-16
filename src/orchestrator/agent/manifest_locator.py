@@ -66,7 +66,17 @@ def locate_manifest_bins(
         if not v1.is_dir():
             continue
         for ext in _MANIFEST_EXTS:
-            for path in v1.glob(f"{app_id}_{app_id}_*.{ext}"):
+            # SteamPrefill's OWN naming only repeats app_id for a game's primary
+            # depot: {app}_{app}_{depot}_{gid}.bin. A secondary depot is
+            # {app}_{depotGroupId}_{depot}_{gid}.bin, where depotGroupId is
+            # frequently a DIFFERENT number -- a Steam-internal grouping, not
+            # the app id. Widening only .bin to match the app id once (not
+            # twice) picks up every depot; .shas keeps the narrow pattern
+            # because that extension is written exclusively by this project's
+            # own fetcher (manifest_fetcher.py), whose naming is fixed and
+            # already correct.
+            pattern = f"{app_id}_*.{ext}" if ext == "bin" else f"{app_id}_{app_id}_*.{ext}"
+            for path in v1.glob(pattern):
                 parts = path.stem.split("_")
                 if len(parts) != 4:
                     continue
