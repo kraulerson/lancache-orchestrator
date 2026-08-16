@@ -68,6 +68,50 @@ def test_validate_all_cached(tmp_path):
     assert body["outcome"] == "cached"
 
 
+def test_validate_includes_a_second_depot_with_differing_group_id(tmp_path):
+    """A second .bin under a differing-group-id name (real Grim Dawn shape)
+    must be found and counted -- proving the widened glob end-to-end through
+    the actual endpoint, not just the locator in isolation."""
+    mcache = tmp_path / "spcache"
+    (mcache / "v1").mkdir(parents=True)
+    (mcache / "v1" / f"{APP}_{APP}_{DEPOT}_{GID}.bin").write_bytes(FIXTURE.read_bytes())
+    depot2, group2, gid2 = 483840, 483840, 999
+    (mcache / "v1" / f"{APP}_{group2}_{depot2}_{gid2}.bin").write_bytes(FIXTURE.read_bytes())
+
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "successfullyDownloadedDepots.json").write_text(json.dumps({str(APP): [GID]}))
+
+    cache_root = tmp_path / "lancache"
+    levels, ident, slice_sz = "2:2", "steam", 10_485_760
+    slice_range = slice_range_zero(slice_sz)
+    for depot_id in (DEPOT, depot2):
+        for sha in parse_chunk_shas(FIXTURE.read_bytes()):
+            h = cache_key(ident, steam_chunk_uri(depot_id, sha), slice_range)
+            p = cache_path(cache_root, h, levels)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"data")
+
+    settings = Settings(
+        orchestrator_token=TOKEN,
+        lancache_nginx_cache_path=cache_root,
+        cache_levels=levels,
+        steam_cache_identifier=ident,
+        cache_slice_size_bytes=slice_sz,
+        steam_manifest_cache_dir=mcache,
+        steam_prefill_config_dir=cfg,
+    )
+    client = TestClient(create_agent_app(settings=settings))
+    client.headers.update({"Authorization": f"Bearer {TOKEN}"})
+
+    body = client.post("/v1/steam/validate", json={"app_id": APP}).json()
+    # FIXTURE has 60 chunks; two depots fully cached -> 120 total, 120 cached.
+    # Before the fix, the second depot was invisible and this would read 60/60.
+    assert body["chunks_total"] == 120
+    assert body["chunks_cached"] == 120
+    assert body["outcome"] == "cached"
+
+
 def test_validate_all_missing(tmp_path):
     client = _build(tmp_path, cache_all=False)
     body = client.post("/v1/steam/validate", json={"app_id": APP}).json()
