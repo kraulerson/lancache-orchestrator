@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 from fastapi.testclient import TestClient
@@ -19,11 +20,25 @@ class _FakeDriver:
         self.calls.append((app_ids, force))
         return PrefillResult(ok=True, raw="OK done")
 
+    async def prefill_recent(self):
+        self.calls.append("recent")
+        return PrefillResult(ok=True, raw="OK recent")
+
     def downloaded_state(self):
         return {440: [111, 222]}
 
     def auth_status(self):
         return SteamAuthStatus(ok=True)
+
+
+class _SlowDriver(_FakeDriver):
+    """Sleeps before returning, so a second request arrives while the first
+    is still in flight — the window the single-flight guard must catch."""
+
+    async def prefill_apps(self, app_ids, *, force=False):
+        self.calls.append((app_ids, force))
+        await asyncio.sleep(0.3)
+        return PrefillResult(ok=True, raw="OK done")
 
 
 def _client(driver) -> TestClient:
@@ -337,3 +352,75 @@ def test_prune_selection_missing_file(tmp_path):
     resp = client.post("/v1/steam/prune-selection", json={"exclude_app_ids": [1]})
     assert resp.status_code == 200
     assert resp.json()["removed"] == 0
+
+
+def _wait_for_done(client, job_id, *, tries=50):
+    snap = None
+    for _ in range(tries):
+        snap = client.get(f"/v1/steam/prefill/{job_id}").json()
+        if snap["state"] == "done":
+            return snap
+        time.sleep(0.02)
+    return snap
+
+
+def test_second_prefill_returns_the_in_flight_job_id():
+    """Two concurrent SteamPrefill processes corrupt the shared auth/cache, so
+    the second request must dedup onto the running job, not start a rival.
+
+    Uses `with _client(...) as client:` (a PERSISTENT portal) rather than the
+    bare `_client(...)` most tests in this file use. Starlette's TestClient
+    only keeps one event loop alive across calls when used as a context
+    manager; without it, each request gets its own ephemeral loop and a
+    background task with a real `await asyncio.sleep(...)` is silently
+    orphaned when that loop tears down — which would make the "still running"
+    window this test depends on impossible to observe.
+    """
+    driver = _SlowDriver()
+    with _client(driver) as client:
+        first = client.post("/v1/steam/prefill", json={"app_ids": [730]})
+        second = client.post("/v1/steam/prefill", json={"app_ids": [440]})
+        assert first.status_code == 202
+        assert second.status_code == 202
+        assert second.json()["job_id"] == first.json()["job_id"]
+        snap = _wait_for_done(client, first.json()["job_id"])
+        assert snap["state"] == "done"
+        # only ONE SteamPrefill invocation actually happened
+        assert driver.calls == [([730], False)]
+
+
+def test_a_new_prefill_can_start_once_the_prior_one_is_done():
+    driver = _SlowDriver()
+    with _client(driver) as client:
+        first = client.post("/v1/steam/prefill", json={"app_ids": [730]})
+        job_id = first.json()["job_id"]
+        assert _wait_for_done(client, job_id)["state"] == "done"
+        second = client.post("/v1/steam/prefill", json={"app_ids": [440]})
+        assert second.json()["job_id"] != job_id
+        assert _wait_for_done(client, second.json()["job_id"])["state"] == "done"
+        assert driver.calls == [([730], False), ([440], False)]
+
+
+def test_prefill_recent_endpoint_starts_a_job():
+    driver = _FakeDriver()
+    with _client(driver) as client:
+        resp = client.post("/v1/steam/prefill-recent")
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        snap = _wait_for_done(client, job_id)
+        assert snap["state"] == "done"
+        assert snap["result"] == {"ok": True, "raw": "OK recent"}
+        assert driver.calls == ["recent"]
+
+
+def test_prefill_recent_shares_the_single_flight_gate_with_prefill_apps():
+    """A recent-purchase pass and a selection pass are both SteamPrefill
+    invocations sharing one auth/cache and must not overlap."""
+    driver = _SlowDriver()
+    with _client(driver) as client:
+        first = client.post("/v1/steam/prefill", json={"app_ids": [730]})
+        second = client.post("/v1/steam/prefill-recent")
+        assert second.json()["job_id"] == first.json()["job_id"]
+        snap = _wait_for_done(client, first.json()["job_id"])
+        assert snap["state"] == "done"
+        assert driver.calls == [([730], False)]
