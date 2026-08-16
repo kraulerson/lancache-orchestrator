@@ -1,13 +1,15 @@
 # Design — fix the manifest locator's per-depot .bin discovery glob
 
 **Date:** 2026-08-16
-**Status:** Revised after adversarial review round 2 (2026-08-16) — see §9 and §10. Core fix (§3) unchanged since round 1.
-**Repo:** lancache_orchestrator. **Branch:** `fix/steam-manifest-locator-depot-glob` (PR #276)
+**Status:** Revised after adversarial review round 3 (2026-08-16) — see §9, §10, §11. Core fix (§3) unchanged since round 1.
+**Repo:** lancache_orchestrator. **Branch:** `fix/steam-manifest-locator-depot-glob-clean` (PR #277 — replaces #276, closed; see §11 finding 5 for why)
 **Found during:** live investigation of why Grim Dawn, STAR WARS Jedi: Survivor, and Battlefield 2042 remained stuck at `validation_failed` (96–99.9% cached) despite the host Steam prefill cron running every 6h. Unrelated to the Steam-prefill-ownership work in progress (`docs/superpowers/specs/2026-08-14-steam-prefill-ownership-design.md`) — this is a pre-existing defect in the read-only validate path, filed as its own change.
 
-**Round-1 verdict: REQUEST CHANGES** — the original §6 "Rollout" understated blast radius and never mentioned `/v1/steam/purge` shares the same widened lookup. Addressed in the round-1 revision; see §9.
+**Round-1 verdict: REQUEST CHANGES** — the original §6 "Rollout" understated blast radius and never mentioned `/v1/steam/purge` shares the same widened lookup. Addressed; see §9.
 
-**Round-2 verdict: REQUEST CHANGES** — the round-1 revision itself contained a factual error (§4/§9 claimed `tests/agent/test_steam_purge.py` didn't exist; it does, with 6 tests including near-duplicate shared-redist coverage), and its two new mitigations (§6, §7) described intent without defining a real decision rule or examining operational cost. Both reviewers independently verified every claim against the live source before accepting it; both flagged real issues. §10 records round 2's findings and how each was resolved in this version.
+**Round-2 verdict: REQUEST CHANGES** — the round-1 revision contained a factual error (§4/§9 claimed `tests/agent/test_steam_purge.py` didn't exist; it does, with 6 tests including near-duplicate shared-redist coverage), and its two new mitigations (§6, §7) described intent without a real decision rule or examined operational cost. Addressed; see §10.
+
+**Round-3 verdict: REQUEST CHANGES** — a genuinely new gap (a deploy landing mid-sweep), an unspecified snapshot mechanism (replaced by reusing the sweep's own existing `evicted`/`recovered` metrics rather than inventing a new one), an under-justified threshold, a trivial citation slip, and a real process issue (this PR's branch was accidentally built on top of a separate, unmerged PR). Addressed; see §11. Three independent reviewers have now each verified every claim against the live source rather than trusting the document — all three found real issues, all three sets are now resolved below.
 
 ---
 
@@ -121,19 +123,40 @@ For the vast majority of the library this changes nothing: a single-depot game, 
 
 **Given that, this needs visibility, not a silent change left to be noticed by accident. Round-2 finding: the round-1 revision's proposed mitigation — force-triggering `orchestrator-cli cache validate-all` (`{"full": true}`) immediately post-deploy — was itself examined and rejected. `_CANDIDATE_SQL_FULL` (`sweep.py:39`) is `SELECT id, status FROM games ORDER BY id` with no `WHERE` clause at all: it validates every row in `games`, every platform, every status, unconditionally, with no cap on candidate count (`sweep_batch_size` defaults to 10 concurrent, `settings.py:256`, but nothing bounds the total). `validate_game` (`disk_stat.py:340-346`) special-cases only `platform == "epic"`; every other row — including the manually-covered GOG/Amazon/Humble/Itch games this project tracks separately — falls through to a Steam-manifest lookup that can never match, which is harmless (returns `outcome="error"`, non-clobbering) but is pure wasted load on a NAS this project's own history already documents as CPU-steal-bound. Forcing that tool immediately post-deploy is a bigger, less-targeted hammer than the problem calls for.**
 
-**Resolution: do not force anything. The existing gated sweep already covers exactly the population that needs re-checking**, on its existing schedule, with no new trigger or CLI surface needed:
+**Resolution: do not force anything, and do not hand-roll a snapshot/diff. The sweep already computes and logs exactly the signal needed** — round-3 finding: the prior wording of this section specified no concrete mechanism for "snapshot every owned Steam game's status," which is a real gap for a document about to feed an implementation plan. `sweep_handler` (`sweep.py:76-115`) already tracks per-game status transitions during every run and logs them in its own `sweep.completed` event (`sweep.py:105-115`):
 
-1. **Before deploying**, snapshot every owned Steam game's `status` from the database.
+```python
+if prior == "up_to_date" and result.outcome in ("partial", "missing"):
+    evicted += 1
+elif prior == "validation_failed" and result.outcome == "cached":
+    recovered += 1
+...
+_log.info("sweep.completed", job_id=job_id, total=len(rows), ...,
+          evicted=evicted, recovered=recovered, errors=errors)
+```
+
+`evicted` is precisely the `up_to_date → validation_failed` count this rollout needs to watch (built for LRU-eviction drift detection generally, per the module's own docstring — this deploy's newly-revealed undercounting is simply a second cause of the same observable transition), and `recovered` is precisely `validation_failed → up_to_date`. No manual DB query needed; read this one structured log line.
+
+**Deploy-race guard (round-3 finding, genuinely new — not raised in rounds 1–2).** The gated sweep takes on the order of tens of minutes to run (batched at `sweep_batch_size`, default 10 concurrent, `settings.py:256`). If a deploy lands while a sweep is already `state='running'`, the in-flight sweep is validating with the OLD code (pre-fix), and depending on exact timing across a redeploy the job can end up killed mid-run rather than reaching its own `sweep.completed` line at all — an orphaned `running` row is reaped to `failed` at the next boot (`jobs/reaper.py:31-40`), not silently retried. **Before deploying, confirm no sweep is in flight:**
+
+```sql
+SELECT id FROM jobs WHERE kind='sweep' AND state='running';
+```
+
+If that returns a row, wait for it to clear (or for the reaper to mark it `failed` on the deploy's own restart, which is a normal, already-handled outcome — just don't treat *that* sweep's results, from before the deploy, as validation of the fix).
+
+1. Confirm no sweep is `running` (above).
 2. Deploy the fix.
-3. Let the next scheduled gated sweep run naturally (`0 3,9,15,21 * * *` — within 6h; `_CANDIDATE_SQL` already selects `status IN ('unknown','up_to_date','validation_failed') AND owned = 1` across all platforms, `sweep.py:30-34` — this is exactly the population affected by the fix, no broader). After it completes, snapshot again and diff.
-4. **Decision rule (round-2 finding: the original wording had none).** Steam coverage was independently verified at ~3 total partials library-wide before this investigation began. If more than **20** owned Steam games flip `up_to_date → validation_failed` in this one sweep, treat that as suspicious rather than confirmatory — a change of that magnitude is more consistent with a bug in the widened glob itself (e.g. the unchanged `len(parts) != 4` filter silently mishandling some real filename shape not seen in this investigation's sample) than with genuinely-hidden incompleteness at that scale. In that case: **halt before letting any downstream automation (F8 scheduled prefill, etc.) act on the new statuses**, and manually inspect a sample of the flipped games' on-disk manifests against the locator's actual output before trusting the result. Below that threshold, the flips are the expected, intended outcome described above.
-5. `validation_failed → up_to_date` flips (Grim Dawn, Jedi Survivor, plus any others the old glob was undercounting favorably) confirm the fix positively; no threshold applies to that direction.
+3. Let the next scheduled gated sweep run naturally (`0 3,9,15,21 * * *` — within 6h; `_CANDIDATE_SQL` already selects `status IN ('unknown','up_to_date','validation_failed') AND owned = 1` across all platforms, `sweep.py:30-34` — exactly the population affected by the fix, no broader).
+4. Read that run's `sweep.completed` log line.
+5. **Decision rule (round-2 finding: the original wording had none; round-3 finding: the threshold needed grounding, not just a number).** Steam coverage was independently verified at ~3 total partials library-wide before this investigation began — i.e. `evicted` on a normal sweep is ordinarily near zero. This document sets **20** as a working threshold: roughly an order of magnitude above that established near-zero baseline, chosen as a judgment call rather than derived from a formula, and adjustable if the Orchestrator has a better basis for it. If `evicted` exceeds 20 on this one sweep, treat it as suspicious rather than confirmatory — a change of that magnitude is more consistent with a bug in the widened glob itself (e.g. the unchanged `len(parts) != 4` filter silently mishandling some real filename shape not seen in this investigation's sample) than with genuinely-hidden incompleteness at that scale. In that case: **halt before letting any downstream automation (F8 scheduled prefill, etc.) act on the new statuses**, and manually inspect a sample of the flipped games' on-disk manifests against the locator's actual output before trusting the result. Below that threshold, the flips are the expected, intended outcome described above.
+6. `recovered` (Grim Dawn, Jedi Survivor, plus any others the old glob was undercounting favorably) confirms the fix positively; no threshold applies to that direction.
 
 ## 7. `/v1/steam/purge` shares the exact same widened lookup (round-1 finding)
 
 `_steam_chunk_paths` (`agent/routers/steam.py:329-404`) is the single shared source of manifest→cache-path enumeration for **both** `/v1/steam/validate` and `/v1/steam/purge` (stated in its own docstring, line 333-335) — it calls `locate_manifest_bins` directly, so §3's fix applies to both callers identically, with no code change needed in either router.
 
-`steam_purge` (`agent/routers/steam.py:501-528`) applies no depot-level scoping of its own: "every enumerated chunk across all depots (no depot-scoping — purge_chunks no-ops on paths that aren't present)" (line 516-518 comment, verified verbatim in source). After this fix, purging any Steam game with a secondary depot under a differing group ID will delete that depot's chunk files too — files the old narrow glob never even enumerated, so purge silently left them behind before. This is the same correctness direction as the validate fix (purge should act on everything a game actually owns, not on whatever a buggy glob happened to see) and is not a new category of behavior, but it was entirely unexamined and untested in the original draft.
+`steam_purge` (`agent/routers/steam.py:501-528`) applies no depot-level scoping of its own: "every enumerated chunk across all depots (no depot-scoping — purge_chunks no-ops on paths that aren't present)" (line 516-517 comment, verified verbatim in source; round-3 finding — off by one line in an earlier revision). After this fix, purging any Steam game with a secondary depot under a differing group ID will delete that depot's chunk files too — files the old narrow glob never even enumerated, so purge silently left them behind before. This is the same correctness direction as the validate fix (purge should act on everything a game actually owns, not on whatever a buggy glob happened to see) and is not a new category of behavior, but it was entirely unexamined and untested in the original draft.
 
 **Checked and confirmed safe against the one sharper risk this could imply — cross-game deletion via a shared depot:** the Steamworks Common Redistributables exclusion (`settings.steam_shared_redist_depots`, PR #245) is applied *inside* `_steam_chunk_paths` itself (`agent/routers/steam.py:380-387`), keyed by `depot_id`, before any path is added to what either validate or purge sees. It is unconditional on which glob found the file. Widening the `.bin` glob does not bypass or weaken this exclusion in any way — a depot that's supposed to be protected from purge stays protected. This was verified by reading the exclusion's exact position in the shared function, not assumed from the original PR's intent.
 
@@ -141,7 +164,7 @@ Test coverage for this is in §4 (corrected in round 2 — see §10).
 
 ## 8. Rollout
 
-No migration, no schema change, no settings change, no new CLI surface. Order per §6: snapshot Steam game statuses, *then* deploy, then let the next scheduled gated sweep run within its normal 6h cadence — no forced trigger — then snapshot again and apply §6's decision rule. Grim Dawn and Jedi Survivor are expected to flip to `up_to_date` in that pass. Battlefield 2042 will remain `validation_failed` regardless of this fix until separately re-added to the selection (§5) — nothing is prefilling it.
+No migration, no schema change, no settings change, no new CLI surface, no manual snapshot query. Order per §6: confirm no sweep is `running`, deploy, let the next scheduled gated sweep run within its normal 6h cadence (no forced trigger), read that sweep's own `sweep.completed` log line, apply §6's decision rule against its `evicted`/`recovered` fields. Grim Dawn and Jedi Survivor are expected to register in `recovered`. Battlefield 2042 will remain `validation_failed` regardless of this fix until separately re-added to the selection (§5) — nothing is prefilling it.
 
 ## 9. Adversarial review round 1 (2026-08-16)
 
@@ -166,12 +189,26 @@ A second, independent reviewer (fresh context, no knowledge of round 1's report)
 | 1 | **Factually false claim:** §4/§9 stated `tests/agent/test_steam_purge.py` was "previously entirely absent." It already existed (6 tests, predates this branch), including `test_steam_purge_skips_shared_redist_depot` — near-duplicate of proposed "new" coverage. Directly checkable (`ls`) and wasn't checked. | §4 corrected: only the differing-group-id purge test is genuinely new; the existing shared-redist test may be extended for the new naming shape but is not duplicated |
 | 2 | §6's before/after diff was a report with no decision rule — no threshold distinguishing "expected magnitude" from "something is wrong," no defined action either way | §6 now states an explicit threshold (20 games) and a halt-and-manually-inspect action if exceeded, grounded in this investigation's own baseline (~3 total partials library-wide before the fix) |
 | 3 | The proposed rollout mitigation (force-triggering `cache validate-all`, i.e. `{"full": true}`) is a bigger, costlier tool than examined: `_CANDIDATE_SQL_FULL` has no `WHERE` clause (all games, all platforms, all statuses), no cap on total candidate count, and every non-Steam/non-Epic game wastes a guaranteed-`error` Steam lookup — unexamined cost on a NAS this project's own history documents as CPU-steal-bound | §6 rewritten: no forced trigger at all. The existing gated sweep (already scheduled every 6h) already selects exactly the affected population (`status IN (...) AND owned=1`, all platforms) — observe its next natural run instead of manufacturing a bigger one |
-| 4 | Finding #3's (round-1) "same category, not new" framing for the stale-removed-depot risk undercounted the actual change: exposure goes from 1 depot per game (old glob) to up to N depots (Grim Dawn: 9) — a real multiplier, not just an unchanged category | §9 finding 3 annotation above updated to point here. Quantified explicitly: this is a real, roughly N-fold increase in per-game exposure for an N-depot game, not merely a relabeled identical risk. Still no code mitigation added — this is presented to the Orchestrator as a quantified, explicit decision (§11), not resolved unilaterally |
+| 4 | Finding #3's (round-1) "same category, not new" framing for the stale-removed-depot risk undercounted the actual change: exposure goes from 1 depot per game (old glob) to up to N depots (Grim Dawn: 9) — a real multiplier, not just an unchanged category | §9 finding 3 annotation above updated to point here. Quantified explicitly: this is a real, roughly N-fold increase in per-game exposure for an N-depot game, not merely a relabeled identical risk. Still no code mitigation added — this is presented to the Orchestrator as a quantified, explicit decision (§12), not resolved unilaterally |
 
-Round-2 verdict: REQUEST CHANGES. This revision addresses every item above.
+Round-2 verdict: REQUEST CHANGES.
 
-## 11. Open questions
+## 11. Adversarial review round 3 (2026-08-16)
 
-None block sending this back for a third review round. One item is explicitly the Orchestrator's call rather than a default I've picked:
+A third, independent reviewer (fresh context, no knowledge of rounds 1–2) re-verified every citation in the document, including all round-1 and round-2 material, against the live source — all held up. It found one genuinely new issue not raised in either prior round, one real specification gap, one under-justified number, one trivial citation slip, and one process issue outside the document's own content:
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | **Genuinely new:** §6's "let the next scheduled gated sweep run naturally, then diff" doesn't account for a deploy landing while a sweep is already `state='running'` (~tens of minutes per run). The in-flight sweep would validate with the OLD code; depending on exact timing it can be killed mid-run by the deploy and reaped to `failed` (`jobs/reaper.py:31-40`) rather than reaching its own summary log — undermining the "after it completes" assumption the decision rule depends on | §6: added a pre-deploy guard (`SELECT id FROM jobs WHERE kind='sweep' AND state='running'`; wait if non-empty) |
+| 2 | The "snapshot every owned Steam game's status" instruction had no concrete mechanism — no SQL, no script, hand-waved for a document about to feed an implementation plan | §6 replaced the hand-rolled snapshot/diff entirely: `sweep_handler` (`sweep.py:76-115`) already computes and logs exactly this signal every run, as `evicted`/`recovered` in its `sweep.completed` event — reusing existing, already-tested code instead of specifying a new one |
+| 3 | The "20 games" threshold was asserted, not derived — plausible-sounding but not rigorously justified | §6: reframed explicitly as a judgment call (~an order of magnitude above the near-zero baseline established by this investigation), not a formula, and stated as adjustable |
+| 4 | §7's citation for the "no depot-scoping" purge comment was off by one line (`516-518` vs. actual `516-517`) | Fixed |
+| 5 | **Process issue, not a content defect:** the PR this document lives in was not actually "one file, no code" as claimed — the branch was accidentally created from the tip of the still-open, unmerged #275 rather than from `main`, so the PR's diff against `main` included four unrelated code commits from that separate branch | Verified independently (`git merge-base` against `main`) before acting: confirmed. #276 closed with an explanation; content moved via cherry-pick (identical tree, verified) to a new branch created correctly from `main`'s current tip, opened as #277. #275 unaffected. This is documented here because it affects what "this PR" means, not because it changes anything in the design itself |
+
+Round-3 verdict: REQUEST CHANGES. This revision addresses every item above.
+
+## 12. Open questions
+
+None block sending this back for a fourth review round. One item is explicitly the Orchestrator's call rather than a default I've picked:
 
 - **Finding #3/§10-4 (stale-removed-depot exposure multiplier):** no code mitigation is proposed. Options if the Orchestrator wants one: (a) accept as-is, matching this document's current default; (b) log when a selected manifest's mtime is old relative to the game's other depots, as a cheap detection signal without changing behavior; (c) something more involved (e.g. cross-checking depot IDs against a live Steam API) — not recommended, disproportionate to a rare edge case. No action needed to proceed with (a); flagging so the choice is deliberate, not silent.
