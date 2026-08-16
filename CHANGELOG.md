@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Steam validation and purge silently ignored most of a multi-depot game's secondary depots — 2026-08-16
+
+`locate_manifest_bins` globbed `.bin` manifests as `{app_id}_{app_id}_*` — true only for a game's primary depot. SteamPrefill names secondary depots `{app_id}_{depotGroupId}_{depot}_{gid}.bin` with a differing group id, so the old glob silently excluded them as candidates. Live investigation found Grim Dawn's 9 real depots: only 1 matched the old pattern; the locator fell back to a 51-day-old `.shas` sidecar for 5 more and found nothing at all for the remaining 3 — explaining why Grim Dawn, STAR WARS Jedi: Survivor, and Battlefield 2042 stayed `validation_failed` despite the host Steam prefill cron completing successfully every 6h. Design: `docs/superpowers/specs/2026-08-16-manifest-locator-depot-glob-design.md` (5 rounds of independent adversarial review).
+
+- **Fixed:** the `.bin` glob widens to match the app id once instead of twice; `.shas` is unchanged (its naming is fixed, written only by this project's own fetcher).
+- **Also affects `/v1/steam/purge`:** it shares the same lookup (`_steam_chunk_paths`), so purging a multi-depot game now deletes every depot's chunks, not just the ones the old glob happened to see. The shared-redist cross-game-deletion protection (`steam_shared_redist_depots`, #245) is keyed by depot id inside that shared function, independent of which glob found the file, so it is unaffected.
+- **Deploy note:** every currently-`up_to_date` owned Steam game is re-validated on the next scheduled sweep tick (its candidate query already includes `up_to_date`, not just `validation_failed`) — see the design spec §6/§8 for the rollout runbook and decision rule.
+
 ### Fixed — Epic prefill fired on an interval anchored to container start, so its offset from the Steam cron drifted — 2026-08-14
 
 The scheduled prefill driver (Epic-only; Steam is prefilled by the host SteamPrefill cron) used an `IntervalTrigger` of `library_sync_interval_sec`. APScheduler counts an interval from process start, so the gap between the host Steam cron and the orchestrator's Epic prefill was whatever the container's last restart happened to make it — observed at +1h58m — and moved silently on every restart. Nothing was broken by this, but the separation that keeps the two off each other's WAN was accidental rather than configured.
