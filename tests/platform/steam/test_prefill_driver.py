@@ -178,3 +178,35 @@ async def test_timeout_kills_the_whole_process_group(tmp_path):
     await d.prefill_apps([730])
     await asyncio.sleep(7)  # past the child's 5s delay
     assert not marker.exists(), "background child survived the group kill"
+
+
+@pytest.mark.asyncio
+async def test_prefill_recent_passes_the_flag(tmp_path):
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    argv = tmp_path / "argv.txt"
+    p = tmp_path / "ArgvSteamPrefill"
+    p.write_text(f'#!/bin/sh\necho "$@" > {argv}\nexit 0\n')
+    p.chmod(p.stat().st_mode | stat.S_IEXEC)
+    d = SteamPrefillDriver(binary=p, config_dir=cfg)
+    res = await d.prefill_recent()
+    assert res.ok is True
+    recorded = argv.read_text()
+    assert "--recently-purchased" in recorded
+    assert "--no-ansi" in recorded
+    assert "--force" not in recorded  # scheduled prefill is never force (spec OQ4)
+
+
+@pytest.mark.asyncio
+async def test_prefill_recent_does_not_touch_the_selection_file(tmp_path):
+    """SteamPrefill derives the recent set itself, so the operator's selection
+    must be left completely alone — not rewritten and restored."""
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    sel = cfg / "selectedAppsToPrefill.json"
+    sel.write_text("[111, 222]")
+    before = sel.stat().st_mtime_ns
+    d = SteamPrefillDriver(binary=_fake_binary(tmp_path), config_dir=cfg)
+    await d.prefill_recent()
+    assert json.loads(sel.read_text()) == [111, 222]
+    assert sel.stat().st_mtime_ns == before, "selection file was rewritten"
