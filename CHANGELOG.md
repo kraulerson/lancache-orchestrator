@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — SteamPrefill could hang for days and the agent had no defense against overlapping runs — 2026-08-15
+
+Phase 1 of the Steam-prefill-ownership plan (`docs/superpowers/specs/2026-08-14-steam-prefill-ownership-design.md`). Investigation for that plan found the orchestrator's Steam prefill path was strictly *less* safe than the host cron it may eventually replace: `SteamPrefillDriver.prefill_apps` awaited `communicate()` with no timeout, and the agent's `POST /v1/steam/prefill` spawned its background runner with no mutual exclusion. On 2026-08-12 a `SteamPrefill --force` run was found alive 5 days 18 hours after already logging `Prefill complete!` and never exiting — the host cron's `flock` + `timeout -k 60 10h` exist specifically because of that incident, and neither had an orchestrator-side equivalent.
+
+- **Fixed:** `SteamPrefillDriver` gains `timeout_sec` (default 36000s, matching the cron's `RUN_MAX`). A run exceeding it is terminated by killing the whole **process group** (`start_new_session=True` + `SIGTERM` escalating to `SIGKILL` after 60s) rather than just the direct child — the cron's own alert text admits its `timeout` only kills the `docker exec` client while the in-container SteamPrefill runs on. New setting `steam_prefill_timeout_sec`.
+- **Added:** `SteamPrefillDriver.prefill_recent()` — a `--recently-purchased` mode (spec OQ1). It deliberately does not touch `selectedAppsToPrefill.json`, since SteamPrefill derives that set itself; the app-id path's save/restore dance doesn't apply. `prefill_apps` and `prefill_recent` now share a `_run()` helper so the timeout and kill logic cannot drift between modes.
+- **Fixed:** the agent's `POST /v1/steam/prefill` and new `POST /v1/steam/prefill-recent` now share a single-flight gate on `app.state`. A second request while one SteamPrefill invocation is running returns the in-flight `job_id` instead of starting a rival process against the same auth/cache — which re-arch ① §6 states corrupts shared state.
+
 ### Fixed — Epic prefill fired on an interval anchored to container start, so its offset from the Steam cron drifted — 2026-08-14
 
 The scheduled prefill driver (Epic-only; Steam is prefilled by the host SteamPrefill cron) used an `IntervalTrigger` of `library_sync_interval_sec`. APScheduler counts an interval from process start, so the gap between the host Steam cron and the orchestrator's Epic prefill was whatever the container's last restart happened to make it — observed at +1h58m — and moved silently on every restart. Nothing was broken by this, but the separation that keeps the two off each other's WAN was accidental rather than configured.
