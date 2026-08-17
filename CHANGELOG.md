@@ -19,6 +19,16 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — the manifest archive sync watched the wrong directory, so newly-prefilled games stayed invisible — 2026-08-17
+
+The agent's lifespan started `manifest_archive_sync_loop` with `steam_manifest_cache_dir` (`/steamprefill-cache`) as its source. That is one of the roots `GET /v1/steam/prefilled-apps` already enumerates, and it is static — so the loop copied **0 files every cycle for a week**, and because its success log is guarded by `if copied:` it did so in complete silence.
+
+Meanwhile the host prefill cron runs SteamPrefill with `HOME=/tmp`, so real manifests land in `steam_prefill_live_cache_dir` (`/tmp/.cache/SteamPrefill`) — a directory nothing synced, and which is lost when the agent container restarts.
+
+- **Live impact:** 11 newly-purchased Steam games (Abyssus, Astroloot, Bloody Spell, Riftstorm, Swordcery + 6 Ghost Recon titles) were fully downloaded into lancache yet never appeared in the orchestrator, because their manifests never reached a root `prefilled-apps` enumerates. Confirmed on the live agent: 62 `.bin` files were pending in the live cache with 0 of them archived; the newest archived `.bin` predated them by a week.
+- **Fixed:** the loop now watches `steam_prefill_live_cache_dir`. Regression test asserts the source *and* destination the lifespan wires up — the previous tests only asserted that a task existed, which is why the wrong directory went unnoticed.
+- **Related:** the post-prefill capture (`_capture_prefill_manifests`) already used the live dir correctly, but only fires for agent-initiated prefills; host-cron prefills bypass it entirely, leaving this loop as their only path to the archive.
+
 ### Infrastructure — ruff 0.16.2; Markdown excluded from the formatter — 2026-08-16
 
 ruff 0.16 began formatting Python code blocks embedded in Markdown, which expanded the formatter's file set from 250 to 427 and would have failed CI's Lint job on 37 documentation files. Excluding `*.md` (the opt-out Astral's formatter docs prescribe) restores the previous file set exactly.
