@@ -10,6 +10,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict
 
+from orchestrator.agent.background import track_background_task
 from orchestrator.agent.puller import ChunkSpec, pull_chunks
 
 _log = structlog.get_logger(__name__)
@@ -95,8 +96,7 @@ async def start_pull(body: PullRequest, request: Request) -> dict[str, str]:
     # (mirrors db/pool.py's background-task set + discard-on-done pattern).
     bg_tasks = request.app.state.agent_bg_tasks
     task = asyncio.create_task(_run())
-    bg_tasks.add(task)
-    task.add_done_callback(bg_tasks.discard)
+    track_background_task(task, bg_tasks)
     return {"job_id": job_id}
 
 

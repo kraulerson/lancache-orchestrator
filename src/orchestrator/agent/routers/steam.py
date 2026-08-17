@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.agent._paths import under_cache_root
+from orchestrator.agent.background import track_background_task
 from orchestrator.agent.manifest_archive import sync_manifests_to_archive
 from orchestrator.agent.manifest_locator import list_prefilled_app_ids, locate_manifest_bins
 from orchestrator.agent.manifest_parser import parse_chunk_shas, parse_shas
@@ -150,8 +151,7 @@ async def start_prefill(body: SteamPrefillRequest, request: Request) -> dict[str
     # (mirrors the /v1/pull background-task set + discard-on-done pattern).
     bg_tasks = request.app.state.agent_bg_tasks
     task = asyncio.create_task(_run())
-    bg_tasks.add(task)
-    task.add_done_callback(bg_tasks.discard)
+    track_background_task(task, bg_tasks)
     return {"job_id": job_id}
 
 
@@ -249,8 +249,7 @@ async def start_fetch_manifests(request: Request) -> dict[str, str]:
 
     bg_tasks = request.app.state.agent_bg_tasks
     task = asyncio.create_task(_run())
-    bg_tasks.add(task)
-    task.add_done_callback(bg_tasks.discard)
+    track_background_task(task, bg_tasks)
     return {"job_id": job_id}
 
 
