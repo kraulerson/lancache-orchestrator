@@ -44,6 +44,15 @@ ruff 0.16 began formatting Python code blocks embedded in Markdown, which expand
 - **Not merely cosmetic:** the reformat rewraps `hashlib.md5(cache_key.encode())  # nosemgrep: insecure-hash-algorithms` in `docs/reference/security-scan-guide.md` across three lines, moving the suppression comment off the line it suppresses — a documented example that would have silently stopped being valid.
 - Verified with the bump applied: `ruff check` clean, `ruff format --check` 250 files, `mypy` strict clean, full suite 1649 passed.
 
+### Documentation — ADR-0016: ownership as an explicit input (Proposed) — 2026-08-16
+
+Records the diagnosis behind 11 owned Steam games being permanently invisible to the orchestrator, and lays out the options for fixing it structurally. `library_sync` enumerates the Steam library from apps SteamPrefill has **already prefilled**, so ownership is inferred from cache contents — a game the cache has never held is indistinguishable from one that does not exist. Epic is unaffected (`library_enumerate()` is a real ownership API; counts agree exactly across both systems), which makes the asymmetry the defect rather than the architecture.
+
+- **Establishes the invariant:** ownership is an explicit input, never inferred from cache contents.
+- **Four options weighed:** host `--recently-purchased` (applied as an operational stopgap; does not satisfy the invariant), a direct Steam Web API ownership client, a Game_shelf ownership push, and a hybrid. Recommends the hybrid, with push-only direction, per-launcher freshness metadata that fails loud, and reconcile-then-prune for the 1363 licence-residue rows.
+- **Status is Proposed** — the decision is not yet made. Four open questions are recorded (Steam credential, F2P inclusion, authority on conflict, residue disposal).
+- **Also documents** that `scheduler/jobs.py:288` asserts a `--recently-purchased` host cron that has never existed; correcting that comment is owed by the implementing change.
+
 ### Fixed — Steam validation and purge silently ignored most of a multi-depot game's secondary depots — 2026-08-16
 
 `locate_manifest_bins` globbed `.bin` manifests as `{app_id}_{app_id}_*` — true only for a game's primary depot. SteamPrefill names secondary depots `{app_id}_{depotGroupId}_{depot}_{gid}.bin` with a differing group id, so the old glob silently excluded them as candidates. Live investigation found Grim Dawn's 9 real depots: only 1 matched the old pattern; the locator fell back to a 51-day-old `.shas` sidecar for 5 more and found nothing at all for the remaining 3 — explaining why Grim Dawn, STAR WARS Jedi: Survivor, and Battlefield 2042 stayed `validation_failed` despite the host Steam prefill cron completing successfully every 6h. Design: `docs/superpowers/specs/2026-08-16-manifest-locator-depot-glob-design.md` (5 rounds of independent adversarial review).
