@@ -29,6 +29,98 @@ def test_game_list_sends_limit_not_per_page(mock):
     assert mock(["game", "list", "--limit", "10"], handler).exit_code == 0
 
 
+# --- issue #264: truncation footer, --offset, --title ----------------------
+#
+# The server caps `limit` at 500. `game list` rendered only data["games"] and
+# ignored the meta envelope entirely, so a truncated table was indistinguishable
+# from a complete one — and since `game list` is the only way to *discover* an
+# id, ids past the cap were unreachable even after #260 fixed id lookup.
+
+
+def _truncated(total: int = 3177, has_more: bool = True, offset: int = 0):
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "games": _GAMES["games"],
+                "meta": {"total": total, "has_more": has_more, "limit": 500, "offset": offset},
+            },
+        )
+
+    return handler
+
+
+def test_game_list_prints_truncation_footer_when_more_rows_exist(mock):
+    r = mock(["game", "list"], _truncated())
+    assert r.exit_code == 0
+    assert "3177" in r.output  # the real total, not the rendered row count
+    assert "--offset" in r.output  # tells the operator how to reach the rest
+
+
+def test_game_list_footer_advertises_the_next_offset(mock):
+    """The suggested offset must be offset+rendered, so following it pages
+    forward rather than repeating the same window."""
+    r = mock(["game", "list"], _truncated(offset=500))
+    assert "502" in r.output  # 500 already skipped + 2 rendered here
+
+
+def test_game_list_prints_no_footer_when_not_truncated(mock):
+    r = mock(["game", "list"], _truncated(total=2, has_more=False))
+    assert r.exit_code == 0
+    assert "--offset" not in r.output
+
+
+def test_game_list_tolerates_missing_meta(mock):
+    """A response without meta (older server, or a proxy stripping it) must
+    still render the table instead of raising KeyError."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"games": _GAMES["games"]})
+
+    r = mock(["game", "list"], handler)
+    assert r.exit_code == 0
+    assert "CS2" in r.output
+
+
+def test_game_list_offset_is_sent_to_the_server(mock):
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert dict(req.url.params)["offset"] == "500"
+        return httpx.Response(200, json=_GAMES)
+
+    assert mock(["game", "list", "--offset", "500"], handler).exit_code == 0
+
+
+def test_game_list_omits_offset_when_not_requested(mock):
+    """Default offset must not be sent as a param the server has to parse."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert "offset" not in dict(req.url.params)
+        return httpx.Response(200, json=_GAMES)
+
+    assert mock(["game", "list"], handler).exit_code == 0
+
+
+def test_game_list_title_sends_contains_filter(mock):
+    """--title is a substring search: it must go out as the server's
+    `title_contains` op, not as an exact-match `title=` (which the games
+    allow-list rejects with a 400)."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        params = dict(req.url.params)
+        assert params["title_contains"] == "fort"
+        assert "title" not in params
+        return httpx.Response(200, json=_GAMES)
+
+    assert mock(["game", "list", "--title", "fort"], handler).exit_code == 0
+
+
+def test_game_list_negative_offset_rejected_before_the_request(mock):
+    def handler(req: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        raise AssertionError("a negative --offset must not reach the server")
+
+    assert mock(["game", "list", "--offset", "-1"], handler).exit_code != 0
+
+
 def _detail(req: httpx.Request) -> httpx.Response:
     """Serve GET /api/v1/games/{id} from _GAMES, 404 when the id is unknown.
 

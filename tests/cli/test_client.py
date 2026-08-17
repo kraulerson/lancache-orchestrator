@@ -140,3 +140,115 @@ def test_401_without_detail_falls_back_to_token_hint():
 
     with pytest.raises(AuthError, match="ORCH_TOKEN"):
         _client(handler).get("/api/v1/games")
+
+
+# --- issue #265: bodiless / detail-less error responses --------------------
+#
+# `f"HTTP {status}: {detail}"` rendered a blank "HTTP 404: " when the body was
+# empty — common from a reverse proxy, and worst in exactly the case it matters
+# most: a wrong --url/ORCH_API_URL pointed at a host that does not serve the
+# route. Two variants bypass a naive fix: `{"detail": null}` coerces to the
+# truthy literal "None", and a whitespace-only body stays truthy.
+
+
+def _raises_api_error(handler, path="/api/v1/games/7") -> str:
+    with pytest.raises(ApiError) as exc:
+        _client(handler).get(path)
+    return str(exc.value)
+
+
+def test_bodiless_error_names_the_request_instead_of_trailing_a_colon():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    msg = _raises_api_error(handler)
+    assert "GET /api/v1/games/7" in msg
+    assert not msg.rstrip().endswith(":")
+
+
+def test_null_detail_does_not_render_the_literal_none():
+    """`str(None)` is the truthy literal "None" — the raw value has to be
+    tested before coercion, or the operator is told the error was "None"."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": None})
+
+    msg = _raises_api_error(handler)
+    assert "None" not in msg
+    assert "GET /api/v1/games/7" in msg
+
+
+def test_whitespace_only_detail_is_treated_as_empty():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "   \n\t "})
+
+    msg = _raises_api_error(handler)
+    assert "GET /api/v1/games/7" in msg
+    assert "HTTP 404:  " not in msg
+
+
+def test_whitespace_only_body_is_treated_as_empty():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, content=b"   \n  ")
+
+    msg = _raises_api_error(handler)
+    assert "GET /api/v1/games/7" in msg
+
+
+def test_reason_phrase_is_never_used_as_the_fallback():
+    """reason_phrase is server-controlled: httpx decodes it as ASCII with
+    errors="ignore" and h11 accepts any non-CRLF bytes, so ANSI escapes could
+    reach the operator's terminal. An earlier attempt at this fix used it and
+    was reverted; this test is why it must not come back."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, extensions={"reason_phrase": b"\x1b[31mPWNED\x1b[0m Not Found"})
+
+    msg = _raises_api_error(handler)
+    assert "PWNED" not in msg
+    assert "\x1b" not in msg
+
+
+def test_method_is_reflected_for_non_get():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(502)
+
+    with pytest.raises(ApiError, match=r"POST /api/v1/games/7/prefill"):
+        _client(handler).post("/api/v1/games/7/prefill")
+
+
+def test_real_detail_still_wins_over_the_fallback():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "game not found"})
+
+    msg = _raises_api_error(handler)
+    assert "game not found" in msg
+    assert "no response body" not in msg
+
+
+def test_structured_detail_is_still_rendered():
+    """The API's own RequestValidationError handler returns `detail` as a LIST
+    of per-field errors (e.g. the #263 out-of-range game_id 400). Treating a
+    non-string detail as empty would hide the actual validation failure."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"detail": [{"type": "less_than_equal", "loc": ["path", "game_id"], "msg": "x"}]},
+        )
+
+    msg = _raises_api_error(handler)
+    assert "less_than_equal" in msg
+    assert "no response body" not in msg
+
+
+def test_401_with_null_detail_falls_back_to_token_hint_not_none():
+    """The 401 branch coerces the same way and had the same defect."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": None})
+
+    with pytest.raises(AuthError) as exc:
+        _client(handler).get("/api/v1/games")
+    assert "None" not in str(exc.value)
+    assert "ORCH_TOKEN" in str(exc.value)

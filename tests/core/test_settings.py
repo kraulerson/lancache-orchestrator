@@ -337,6 +337,19 @@ class TestFieldValidators:
         with pytest.raises(ValidationError):
             Settings(validation_sweep_cron="not a cron")
 
+    def test_scheduled_prefill_cron_default(self):
+        """+3h45m from the host Steam cron (00/06/12/18 UTC), and 45 min past
+        the hour so the ~39-min validation sweep at 03/09/15/21 has drained —
+        validating an Epic game while its prefill writes reports a false
+        partial."""
+        s = Settings(orchestrator_token=VALID_TOKEN)
+        assert s.scheduled_prefill_cron == "45 3,9,15,21 * * *"
+
+    def test_invalid_scheduled_prefill_cron_fails_fast(self, monkeypatch):
+        monkeypatch.setenv("ORCH_TOKEN", VALID_TOKEN)
+        with pytest.raises(ValidationError):
+            Settings(scheduled_prefill_cron="not a cron")
+
     def test_sweep_batch_size_must_be_ge_1(self):
         with pytest.raises(ValidationError):
             Settings(orchestrator_token=VALID_TOKEN, sweep_batch_size=0)

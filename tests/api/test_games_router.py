@@ -314,6 +314,100 @@ class TestGamesFilterTimeRange:
 
 
 # ---------------------------------------------------------------------------
+# Filter: title substring (issue #264)
+# ---------------------------------------------------------------------------
+#
+# populated_pool seeds: Counter-Strike, Team Fortress 2, Dota 2, Fortnite,
+# Rocket League.
+
+
+class TestGamesFilterTitleContains:
+    async def test_substring_matches_across_word_boundaries(self, client, populated_pool):
+        r = await client.get(
+            "/api/v1/games?title_contains=ort",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 200
+        titles = {g["title"] for g in r.json()["games"]}
+        assert titles == {"Team Fortress 2", "Fortnite"}
+
+    async def test_match_is_case_insensitive(self, client, populated_pool):
+        """SQLite LIKE folds ASCII case. Operators search by memory, not by
+        exact capitalisation, so this is the wanted behavior — pinned here so a
+        future switch to GLOB or a collation change cannot silently break it."""
+        r = await client.get(
+            "/api/v1/games?title_contains=dota",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        titles = {g["title"] for g in r.json()["games"]}
+        assert titles == {"Dota 2"}
+
+    async def test_percent_is_a_literal_not_a_wildcard(self, client, populated_pool):
+        """Unescaped, this pattern would be `%%%` and match every row. No seeded
+        title contains a literal '%', so the correct answer is zero rows."""
+        r = await client.get(
+            "/api/v1/games?title_contains=%25",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 200
+        assert r.json()["games"] == []
+        assert r.json()["meta"]["total"] == 0
+
+    async def test_underscore_is_a_literal_not_a_single_char_wildcard(self, client, populated_pool):
+        """Unescaped, `D_ta` would match "Dota 2" via the single-char wildcard."""
+        r = await client.get(
+            "/api/v1/games?title_contains=D_ta",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.json()["games"] == []
+
+    async def test_applied_filters_echoes_the_raw_value_not_the_pattern(
+        self, client, populated_pool
+    ):
+        """The %-wrapping is a server-side SQL detail. Echoing `%Fort%` would
+        tell the operator they asked for something they did not."""
+        r = await client.get(
+            "/api/v1/games?title_contains=Fort",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.json()["meta"]["applied_filters"] == {"title": {"contains": "Fort"}}
+
+    async def test_no_match_returns_empty_not_error(self, client, populated_pool):
+        r = await client.get(
+            "/api/v1/games?title_contains=zzzznotagame",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 200
+        assert r.json()["games"] == []
+
+    async def test_title_eq_is_rejected(self, client, populated_pool):
+        """`title` is declared contains-only; an exact-match op must 400 rather
+        than silently return nothing."""
+        r = await client.get(
+            "/api/v1/games?title=Dota%202",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+
+    async def test_over_long_value_returns_400(self, client, populated_pool):
+        from orchestrator.api._query_helpers import MAX_CONTAINS_LENGTH
+
+        r = await client.get(
+            f"/api/v1/games?title_contains={'a' * (MAX_CONTAINS_LENGTH + 1)}",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+
+    async def test_combines_with_other_filters(self, client, populated_pool):
+        r = await client.get(
+            "/api/v1/games?title_contains=ort&platform=steam",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        titles = {g["title"] for g in r.json()["games"]}
+        assert titles == {"Team Fortress 2"}  # Fortnite is epic
+
+
+# ---------------------------------------------------------------------------
 # Sort
 # ---------------------------------------------------------------------------
 
@@ -822,6 +916,44 @@ class TestGameDetail:
         # validation failures to 400 (not FastAPI's default 422).
         r = await client.get(
             "/api/v1/games/not-a-number",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+
+    # --- issue #263: ids outside SQLite's signed-64-bit range ---------------
+    # Unbounded `game_id: int` reached SQLite parameter binding and raised
+    # OverflowError. Pool.read_one wraps only aiosqlite.Error and the route
+    # catches only PoolError, so nothing converted it -> HTTP 500 plus an
+    # unhandled traceback in the logs (tripping 5xx alerting).
+
+    async def test_id_above_int64_returns_400_not_500(self, client, populated_pool):
+        r = await client.get(
+            f"/api/v1/games/{2**63}",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+
+    async def test_id_below_int64_returns_400_not_500(self, client, populated_pool):
+        # SQLite INTEGER is SIGNED 64-bit, so the negative end overflows too.
+        r = await client.get(
+            f"/api/v1/games/{-(2**63) - 1}",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+
+    async def test_max_valid_int64_id_still_returns_404(self, client, populated_pool):
+        # The boundary value is a legal binding — it must stay a clean 404,
+        # not get swept up by the new bound.
+        r = await client.get(
+            f"/api/v1/games/{2**63 - 1}",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 404
+
+    async def test_zero_id_returns_400(self, client, populated_pool):
+        # Rowids start at 1. Previously 404; now a validation rejection.
+        r = await client.get(
+            "/api/v1/games/0",
             headers={"Authorization": f"Bearer {VALID_TOKEN}"},
         )
         assert r.status_code == 400

@@ -12,7 +12,8 @@ and revised in UAT-4 (2026-05-20):
 
 - Offset-based pagination (limit/offset query params)
 - Operator-suffix filter syntax: field, field_in, field_gte, field_lte,
-  field_gt, field_lt, field_ne (per-endpoint allow-list narrows to subset)
+  field_gt, field_lt, field_ne, field_contains (per-endpoint allow-list
+  narrows to subset; `contains` is str-typed fields only — issue #264)
 - Multi-field sort: ?sort=a:desc,b:asc; empty entries are skipped and if
   the user-sort ends up empty the default applies (UAT-4 S2-B fix).
 - Server-appended tie-breaker (with de-dup if user already sorted by it)
@@ -51,6 +52,11 @@ if TYPE_CHECKING:
 
 # Module constants
 MAX_IN_VALUES = 100  # UAT-4 S2-C
+# Issue #264: cap on a `contains` substring. A LIKE pattern is an unindexed
+# scan whose cost grows with the pattern, and no real search term is this long
+# — 200 chars is far past the longest title in the library, so no legitimate
+# search is refused.
+MAX_CONTAINS_LENGTH = 200
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
 # Issue #86.D4: canonical name for the per-row error-truncation cap shared
@@ -203,6 +209,34 @@ _OP_SQL = {
     "lt": "{field} < ?",
 }
 
+# Issue #264: `contains` is deliberately NOT in _OP_SQL. Every op there binds
+# the parsed value verbatim; `contains` binds a LIKE *pattern* derived from it
+# (see _like_pattern), so build_where_clause handles it on its own branch. An
+# explicit ESCAPE clause is required: without it SQLite has no escape character
+# at all, and a literal % or _ in a title could not be searched for.
+_CONTAINS_SQL = "{field} LIKE ? ESCAPE '\\'"
+_LIKE_ESCAPE_CHAR = "\\"
+
+
+def _like_pattern(value: str) -> str:
+    """Escape LIKE metacharacters in `value`, then wrap it as `%value%`.
+
+    Order matters: the escape character itself is escaped FIRST. Doing it last
+    would re-escape the backslashes this function just added, turning `\\%`
+    (a literal percent) back into `\\\\%` — a literal backslash followed by a
+    live wildcard.
+
+    Called from build_where_clause rather than parse_filters on purpose: the
+    parsed value is what `meta.applied_filters` echoes back, and it must show
+    what the operator asked for, not the SQL pattern derived from it.
+    """
+    escaped = (
+        value.replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR * 2)
+        .replace("%", f"{_LIKE_ESCAPE_CHAR}%")
+        .replace("_", f"{_LIKE_ESCAPE_CHAR}_")
+    )
+    return f"%{escaped}%"
+
 
 # Acceptable value_type specifiers: real Python types OR the string
 # "timestamp" (extensible at the validator dispatch layer).
@@ -214,7 +248,7 @@ class FilterFieldSpec:
     """Declarative spec for one filter field: allowed ops + Python type
     (or sentinel string for typed-string variants like "timestamp")."""
 
-    ops: set[str]  # subset of {"eq", "in", "gte", "lte", "gt", "lt", "ne"}
+    ops: set[str]  # subset of {"eq", "in", "gte", "lte", "gt", "lt", "ne", "contains"}
     value_type: ValueTypeSpec  # str, int, float, bool, or "timestamp"
 
 
@@ -232,12 +266,23 @@ class FilterAllowList:
     def __init__(self, by_field: dict[str, FilterFieldSpec]) -> None:
         for name in by_field:
             _validate_identifier(name, kind="filter field")
-        # Validate ops against known _OP_SQL keys (+ "in")
-        known_ops = set(_OP_SQL.keys()) | {"in"}
+        # Validate ops against known _OP_SQL keys (+ "in", "contains")
+        known_ops = set(_OP_SQL.keys()) | {"in", "contains"}
         for name, spec in by_field.items():
             unknown = spec.ops - known_ops
             if unknown:
                 raise ValueError(f"filter field {name!r}: unknown operators {unknown!r}")
+            # Issue #264: `contains` compiles to LIKE, which is only meaningful
+            # against free text. Rejecting the combination here — where the
+            # endpoint declares its allow-list — makes it a startup failure
+            # rather than a per-request surprise. `is not str` also excludes the
+            # typed-string sentinels ("timestamp"): those are structured values
+            # with their own format validator, not free text to search.
+            if "contains" in spec.ops and spec.value_type is not str:
+                raise ValueError(
+                    f"filter field {name!r}: operator 'contains' requires a str-typed "
+                    f"field (got value_type={spec.value_type!r})"
+                )
         # frozen dataclass with non-default __init__ — use object.__setattr__
         object.__setattr__(self, "by_field", dict(by_field))
 
@@ -319,7 +364,7 @@ def parse_filters(
         field_name = key
         op = "eq"
         if "_" in key:
-            for candidate_op in ("gte", "lte", "gt", "lt", "ne", "in", "eq"):
+            for candidate_op in ("contains", "gte", "lte", "gt", "lt", "ne", "in", "eq"):
                 suffix = f"_{candidate_op}"
                 if key.endswith(suffix):
                     field_name = key[: -len(suffix)]
@@ -343,6 +388,14 @@ def parse_filters(
             result.setdefault(field_name, {})["in"] = values
         else:
             value = _coerce_value(raw_value, spec.value_type, field_name, op)
+            # Issue #264: cap the substring here, at the parse boundary, so an
+            # oversized pattern is a 400 rather than a slow scan. The value is
+            # stored unwrapped — build_where_clause derives the LIKE pattern.
+            if op == "contains" and len(value) > MAX_CONTAINS_LENGTH:
+                raise QueryParamError(
+                    f"value for {field_name}_contains is too long: "
+                    f"{len(value)} chars (cap: {MAX_CONTAINS_LENGTH})"
+                )
             result.setdefault(field_name, {})[op] = value
 
     return result
@@ -379,6 +432,11 @@ def build_where_clause(
                 placeholders = ", ".join("?" for _ in value)
                 fragments.append(f"{field_name} IN ({placeholders})")
                 params.extend(value)
+            elif op == "contains":
+                # The value becomes a bound LIKE pattern, never SQL text — the
+                # emitted fragment is byte-identical whatever the value holds.
+                fragments.append(_CONTAINS_SQL.format(field=field_name))
+                params.append(_like_pattern(value))
             elif op in _OP_SQL:
                 fragments.append(_OP_SQL[op].format(field=field_name))
                 params.append(value)
