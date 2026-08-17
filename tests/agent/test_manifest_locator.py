@@ -171,3 +171,89 @@ def test_shas_only_app_in_list_prefilled_app_ids(tmp_path):
     _write(tmp_path, "440_440_440_111.bin", 1000)  # .bin app
     _write(tmp_path, "900_900_901_777.shas", 1000)  # .shas-only app
     assert list_prefilled_app_ids(cache_roots=[tmp_path]) == [440, 900]
+
+
+# --- Differing-group-id .bin naming (real SteamPrefill secondary-depot shape) ---
+#
+# SteamPrefill names a game's PRIMARY depot {app}_{app}_{depot}_{gid}.bin, but a
+# secondary depot is {app}_{depotGroupId}_{depot}_{gid}.bin where depotGroupId is
+# frequently a DIFFERENT number from app_id (a Steam-internal grouping, not the
+# app id). The old glob only matched the first shape.
+
+
+def test_locates_bin_with_differing_group_id_segment(tmp_path):
+    # depot 229003's "group id" (228980) differs from the app id (219990) --
+    # this exact shape was found live on Grim Dawn.
+    _write(tmp_path, "219990_228980_229003_8740933542064151477.bin", 1000)
+    found = [p.name for p in locate_manifest_bins(219990, cache_roots=[tmp_path])]
+    assert found == ["219990_228980_229003_8740933542064151477.bin"]
+
+
+def test_mix_of_matching_and_differing_group_id_depots(tmp_path):
+    # One depot matches the old app_id-repeated pattern, one doesn't -- both
+    # must be found, matching the real Grim Dawn shape (1 of 9 depots matched
+    # the old glob; the other 8 didn't).
+    _write(tmp_path, "219990_219990_219991_111.bin", 1000)  # matches old pattern
+    _write(tmp_path, "219990_483840_483840_222.bin", 1000)  # differing group id
+    found = sorted(p.name for p in locate_manifest_bins(219990, cache_roots=[tmp_path]))
+    assert found == [
+        "219990_219990_219991_111.bin",
+        "219990_483840_483840_222.bin",
+    ]
+
+
+def test_realistic_nine_depot_shape(tmp_path):
+    # Reproduces Grim Dawn's real depot layout: 9 depots, only 1 whose group id
+    # equals the app id. A minimal 2-depot test could miss an ordering or
+    # dedup bug that only shows up at real scale.
+    depots = [
+        ("219990", "219991", "1"),  # matches old pattern (group id == app id)
+        ("228980", "229003", "2"),  # differs
+        ("483840", "483840", "3"),
+        ("642280", "642280", "4"),
+        ("642280", "642281", "5"),
+        ("897670", "897670", "6"),
+        ("897670", "897671", "7"),
+        ("2699230", "2699230", "8"),
+        ("2699230", "2699231", "9"),
+    ]
+    expected_depots = set()
+    for group, depot, gid in depots:
+        _write(tmp_path, f"219990_{group}_{depot}_{gid}.bin", 1000)
+        expected_depots.add(depot)
+    found = locate_manifest_bins(219990, cache_roots=[tmp_path])
+    found_depots = {p.stem.split("_")[2] for p in found}
+    assert found_depots == expected_depots
+    assert len(found_depots) == 9
+
+
+def test_shas_glob_stays_narrow_for_differing_group_id_name(tmp_path):
+    # The .shas extension must NOT widen -- the fetcher never actually writes
+    # this shape (it always repeats app_id), but if a file like this existed
+    # it must still be excluded, proving the two extensions are scoped
+    # independently rather than sharing one widened pattern.
+    _write(tmp_path, "219990_228980_229003_111.shas", 1000)
+    assert locate_manifest_bins(219990, cache_roots=[tmp_path]) == []
+
+
+# --- Cross-app-ID collision safety (the load-bearing safety argument for the
+#     whole fix gets its own explicit regression test, not just informal
+#     verification in the design doc) ---
+
+
+def test_widened_glob_does_not_collide_short_app_id_is_prefix_of_long(tmp_path):
+    # App 44's widened glob ("44_*") must not match app 440's files -- the
+    # character immediately after "44" in "440_..." is "0", not "_".
+    _write(tmp_path, "44_44_45_111.bin", 1000)
+    _write(tmp_path, "440_440_441_222.bin", 1000)
+    found = [p.name for p in locate_manifest_bins(44, cache_roots=[tmp_path])]
+    assert found == ["44_44_45_111.bin"]
+
+
+def test_widened_glob_does_not_collide_long_app_id_is_prefix_of_short(tmp_path):
+    # The reverse direction: app 4400's glob ("4400_*") must not match a file
+    # for app 44 whose second segment happens to start with "400".
+    _write(tmp_path, "44_400_401_111.bin", 1000)
+    _write(tmp_path, "4400_4400_4401_222.bin", 1000)
+    found = [p.name for p in locate_manifest_bins(4400, cache_roots=[tmp_path])]
+    assert found == ["4400_4400_4401_222.bin"]

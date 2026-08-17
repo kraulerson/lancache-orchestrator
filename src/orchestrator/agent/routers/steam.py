@@ -341,8 +341,10 @@ def _steam_chunk_paths(
 
     A corrupt/foreign manifest (non-numeric depot field, unreadable file) is
     skipped, never fatal (COR-1). ``.shas`` is the fetcher's sidecar (one SHA per
-    line); ``.bin`` is SteamPrefill's protobuf — same
-    ``{app}_{app}_{depot}_{gid}`` filename layout.
+    line), always ``{app}_{app}_{depot}_{gid}.shas``. ``.bin`` is SteamPrefill's
+    protobuf; only a game's PRIMARY depot repeats the app id in that shape — a
+    secondary depot is ``{app}_{depotGroupId}_{depot}_{gid}.bin`` with a
+    differing group id. See ``manifest_locator.py`` module docstring.
     """
     cache_root = Path(settings.lancache_nginx_cache_path)
     roots = [Path(settings.steam_manifest_cache_dir), Path(settings.steam_manifest_archive_dir)]

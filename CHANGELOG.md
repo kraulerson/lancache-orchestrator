@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Steam validation and purge silently ignored most of a multi-depot game's secondary depots — 2026-08-16
+
+`locate_manifest_bins` globbed `.bin` manifests as `{app_id}_{app_id}_*` — true only for a game's primary depot. SteamPrefill names secondary depots `{app_id}_{depotGroupId}_{depot}_{gid}.bin` with a differing group id, so the old glob silently excluded them as candidates. Live investigation found Grim Dawn's 9 real depots: only 1 matched the old pattern; the locator fell back to a 51-day-old `.shas` sidecar for 5 more and found nothing at all for the remaining 3 — explaining why Grim Dawn, STAR WARS Jedi: Survivor, and Battlefield 2042 stayed `validation_failed` despite the host Steam prefill cron completing successfully every 6h. Design: `docs/superpowers/specs/2026-08-16-manifest-locator-depot-glob-design.md` (5 rounds of independent adversarial review).
+
+- **Fixed:** the `.bin` glob widens to match the app id once instead of twice; `.shas` is unchanged (its naming is fixed, written only by this project's own fetcher).
+- **Also affects `/v1/steam/purge`:** it shares the same lookup (`_steam_chunk_paths`), so purging a multi-depot game now deletes every depot's chunks, not just the ones the old glob happened to see. The shared-redist cross-game-deletion protection (`steam_shared_redist_depots`, #245) is keyed by depot id inside that shared function, independent of which glob found the file, so it is unaffected.
+- **Deploy note:** every currently-`up_to_date` owned Steam game is re-validated on the next scheduled sweep tick (its candidate query already includes `up_to_date`, not just `validation_failed`) — see the design spec §6/§8 for the rollout runbook and decision rule.
+
 ### Fixed — SteamPrefill could hang for days and the agent had no defense against overlapping runs — 2026-08-15
 
 Phase 1 of the Steam-prefill-ownership plan (`docs/superpowers/specs/2026-08-14-steam-prefill-ownership-design.md`). Investigation for that plan found the orchestrator's Steam prefill path was strictly *less* safe than the host cron it may eventually replace: `SteamPrefillDriver.prefill_apps` awaited `communicate()` with no timeout, and the agent's `POST /v1/steam/prefill` spawned its background runner with no mutual exclusion. On 2026-08-12 a `SteamPrefill --force` run was found alive 5 days 18 hours after already logging `Prefill complete!` and never exiting — the host cron's `flock` + `timeout -k 60 10h` exist specifically because of that incident, and neither had an orchestrator-side equivalent.
