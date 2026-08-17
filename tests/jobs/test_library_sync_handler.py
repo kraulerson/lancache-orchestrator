@@ -189,3 +189,82 @@ class TestEnumerateViaPrefill:
         row = await pool.read_one("SELECT title, owned FROM games WHERE app_id='440'")
         assert row["title"] == "Team Fortress 2"  # overwritten with the store name
         assert row["owned"] == 1
+
+
+class TestPrefilledResurrectsNotDownloaded:
+    """A game recorded `not_downloaded` that IS present in the agent's prefilled
+    manifest cache must be reset to 'unknown' so the gated sweep validates it.
+
+    Found live 2026-08-16: 8 owned Steam games (incl. Half-Life: Alyx, Killing
+    Floor 2, Total War: PHARAOH DYNASTIES) were fully cached yet stuck at
+    `not_downloaded` forever. The sweep's candidate SQL covers only
+    ('unknown','up_to_date','validation_failed'), so a `not_downloaded` row is
+    never validated and can never flip — even with the cache evidence sitting
+    right there in prefilled_apps(). Resetting to 'unknown' here (rather than
+    widening the sweep to all 1363 `not_downloaded` rows) keeps the fix targeted
+    to games with actual cache evidence and adds no sweep churn.
+    """
+
+    def _patch_settings(self, monkeypatch, *, budget=150, delay=0.0):
+        from orchestrator.core import settings as settings_mod
+
+        monkeypatch.setattr(
+            "orchestrator.jobs.handlers.library_sync.get_settings",
+            lambda: settings_mod.Settings(
+                orchestrator_token="a" * 32,
+                steam_store_fetch_budget=budget,
+                steam_store_fetch_delay_sec=delay,
+            ),
+        )
+
+    async def _run(self, pool, monkeypatch, app_ids):
+        async def fake_fetch(app_id: int):
+            return {
+                "type": "game",
+                "name": "Killing Floor 2",
+                "has_single_player": 1,
+                "has_multiplayer": 1,
+            }
+
+        monkeypatch.setattr("orchestrator.jobs.handlers.library_sync.fetch_app_info", fake_fetch)
+        await library_sync_handler(_job(), Deps(pool=pool, agent_client=_StubAgent(app_ids)))
+
+    async def test_prefilled_not_downloaded_is_reset_to_unknown(self, pool, monkeypatch):
+        self._patch_settings(monkeypatch)
+        await pool.execute_write(
+            "INSERT INTO games (platform, app_id, title, owned, status) "
+            "VALUES ('steam','232090','Killing Floor 2',1,'not_downloaded')"
+        )
+
+        await self._run(pool, monkeypatch, [232090])
+
+        row = await pool.read_one("SELECT status FROM games WHERE app_id='232090'")
+        assert row["status"] == "unknown"
+
+    async def test_already_swept_statuses_are_left_alone(self, pool, monkeypatch):
+        # up_to_date / validation_failed are already sweep candidates; resetting
+        # them would discard a real validation result and cause needless churn.
+        self._patch_settings(monkeypatch)
+        await pool.execute_write(
+            "INSERT INTO games (platform, app_id, title, owned, status) "
+            "VALUES ('steam','232090','Killing Floor 2',1,'up_to_date')"
+        )
+
+        await self._run(pool, monkeypatch, [232090])
+
+        row = await pool.read_one("SELECT status FROM games WHERE app_id='232090'")
+        assert row["status"] == "up_to_date"
+
+    async def test_not_downloaded_but_unprefilled_is_left_alone(self, pool, monkeypatch):
+        # No cache evidence -> no reason to spend a sweep slot on it. This is the
+        # 1355-row majority; resetting them would be the churn we are avoiding.
+        self._patch_settings(monkeypatch)
+        await pool.execute_write(
+            "INSERT INTO games (platform, app_id, title, owned, status) "
+            "VALUES ('steam','999999','Never Cached',1,'not_downloaded')"
+        )
+
+        await self._run(pool, monkeypatch, [232090])
+
+        row = await pool.read_one("SELECT status FROM games WHERE app_id='999999'")
+        assert row["status"] == "not_downloaded"

@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — a cached Steam game stuck at `not_downloaded` could never correct itself — 2026-08-16
+
+Found during a live investigation into games showing no cache status. The gated sweep's candidate SQL (`jobs/handlers/sweep.py`) selects only `('unknown','up_to_date','validation_failed')`, and `library_sync`'s upsert deliberately preserved `status` — so a game recorded `not_downloaded` was never validated and had no path back, even when it was fully present in the cache. Live impact: 8 owned Steam games, including **Half-Life: Alyx**, **Killing Floor 2** and **Total War: PHARAOH DYNASTIES**, were prefilled and sitting in lancache while the orchestrator reported them as not downloaded. #250 had added `'unknown'` to the sweep for newly-*inserted* games; legacy `not_downloaded` rows from the pre-re-arch-③ ownership sync were not covered.
+
+- **Fixed:** `library_sync`'s Steam upsert now resets `not_downloaded` → `unknown` when the app is present in the agent's prefilled manifest cache — direct evidence the game IS cached. The existing gated sweep then validates it and resolves the real status. Self-healing on the next 6-hourly sync; no data migration required.
+- **Deliberately not** widening the sweep to all `not_downloaded` rows: 1355 of the 1363 have no cache evidence, so that would add ~1363 wasted validations per tick on a CPU-constrained host to catch 8 games. Only rows with cache evidence are reconsidered, so sweep churn is unchanged.
+- **Scope:** only `not_downloaded` is reset; `up_to_date` and `validation_failed` are untouched (they are already sweep candidates, and resetting them would discard a real validation result). Covered by three tests including both negative guards.
+
 ### Fixed — Steam validation and purge silently ignored most of a multi-depot game's secondary depots — 2026-08-16
 
 `locate_manifest_bins` globbed `.bin` manifests as `{app_id}_{app_id}_*` — true only for a game's primary depot. SteamPrefill names secondary depots `{app_id}_{depotGroupId}_{depot}_{gid}.bin` with a differing group id, so the old glob silently excluded them as candidates. Live investigation found Grim Dawn's 9 real depots: only 1 matched the old pattern; the locator fell back to a 51-day-old `.shas` sidecar for 5 more and found nothing at all for the remaining 3 — explaining why Grim Dawn, STAR WARS Jedi: Survivor, and Battlefield 2042 stayed `validation_failed` despite the host Steam prefill cron completing successfully every 6h. Design: `docs/superpowers/specs/2026-08-16-manifest-locator-depot-glob-design.md` (5 rounds of independent adversarial review).
