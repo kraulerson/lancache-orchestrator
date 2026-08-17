@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from orchestrator.agent.app import create_agent_app
+from orchestrator.agent.manifest_parser import parse_chunk_shas
 from orchestrator.core.settings import Settings
 from orchestrator.validator.cache_key import (
     cache_key,
@@ -15,14 +16,12 @@ from orchestrator.validator.cache_key import (
     steam_chunk_uri,
 )
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 TOKEN = "a" * 32
 APP, DEPOT, GID = 700330, 700331, 8123456789012345678
 CHUNKS = [f"{i:040x}" for i in range(1, 6)]  # 5 distinct 40-hex SHAs
 LEVELS, IDENT, SLICE = "2:2", "steam", 10_485_760
 CHUNK_BODY = b"chunkdata"  # 9 bytes
+FIXTURE = Path(__file__).parent / "fixtures" / "sample_manifest.bin"
 
 
 def _seed(tmp_path: Path) -> tuple[TestClient, list[Path], Path]:
@@ -160,3 +159,59 @@ def test_steam_purge_skips_shared_redist_depot(tmp_path):
     assert body["deleted"] == len(CHUNKS)  # only the game's own depot
     assert all(not p.exists() for p in own_files)
     assert all(p.exists() for p in redist_files)  # shared redist preserved
+
+
+def test_steam_purge_deletes_a_second_depot_with_differing_group_id(tmp_path):
+    """A differing-group-id secondary depot (real Grim Dawn shape) was
+    previously invisible to purge -- the old glob never enumerated it, so
+    purge silently left its chunks behind. After the fix, purge must delete
+    them too.
+
+    Depot 2 must be a .bin file, not .shas: the fix widens ONLY the .bin
+    glob (by design -- .shas is written exclusively by this project's own
+    fetcher, whose naming is fixed and already correct), so a .shas file
+    under the differing-group-id shape would never be found either before
+    or after the fix and wouldn't exercise anything. Reuses the same real
+    parseable protobuf fixture test_steam_validate.py uses, under a second
+    filename -- the code trusts the FILENAME's depot id, not the manifest's
+    internal content, so the same bytes work for a different depot.
+    """
+    depot2, group2, gid2 = 483840, 483840, 999999
+    chunks2 = list(parse_chunk_shas(FIXTURE.read_bytes()))
+
+    mcache = tmp_path / "spcache"
+    (mcache / "v1").mkdir(parents=True)
+    (mcache / "v1" / f"{APP}_{APP}_{DEPOT}_{GID}.shas").write_text("\n".join(CHUNKS) + "\n")
+    (mcache / "v1" / f"{APP}_{group2}_{depot2}_{gid2}.bin").write_bytes(FIXTURE.read_bytes())
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "successfullyDownloadedDepots.json").write_text("{}")
+
+    cache_root = tmp_path / "lancache"
+    slice_range = slice_range_zero(SLICE)
+    all_files = []
+    for depot_id, shas in ((DEPOT, CHUNKS), (depot2, chunks2)):
+        for sha in shas:
+            p = cache_path(
+                cache_root, cache_key(IDENT, steam_chunk_uri(depot_id, sha), slice_range), LEVELS
+            )
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(CHUNK_BODY)
+            all_files.append(p)
+
+    settings = Settings(
+        orchestrator_token=TOKEN,
+        lancache_nginx_cache_path=cache_root,
+        cache_levels=LEVELS,
+        steam_cache_identifier=IDENT,
+        cache_slice_size_bytes=SLICE,
+        steam_manifest_cache_dir=mcache,
+        steam_prefill_config_dir=cfg,
+    )
+    client = TestClient(create_agent_app(settings=settings))
+    client.headers.update({"Authorization": f"Bearer {TOKEN}"})
+
+    body = client.post("/v1/steam/purge", json={"app_id": APP}).json()
+
+    assert body["deleted"] == len(CHUNKS) + len(chunks2)
+    assert all(not p.exists() for p in all_files)

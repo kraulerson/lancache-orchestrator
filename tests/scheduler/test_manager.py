@@ -329,6 +329,84 @@ class TestScheduledPrefillRegistration:
         finally:
             await mgr.shutdown()
 
+    # --- Epic prefill must fire on a WALL-CLOCK schedule -------------------
+    #
+    # The job used an IntervalTrigger, which counts from process start, so the
+    # gap between the host Steam cron and the orchestrator's Epic prefill was
+    # whatever the container's last restart happened to make it — and changed
+    # silently on every restart. The Epic prefill has to sit a fixed distance
+    # after Steam (WAN contention) and after the validation sweep drains
+    # (validating a game mid-prefill reports it as a false partial).
+
+    async def test_scheduled_prefill_uses_cron_not_interval(self, pool):
+        """An IntervalTrigger anchors to process start; only a CronTrigger
+        pins the job to a wall-clock slot across restarts."""
+        from apscheduler.triggers.cron import CronTrigger
+
+        from orchestrator.scheduler.manager import SCHEDULED_PREFILL_JOB_ID
+
+        mgr = SchedulerManager(
+            pool=pool,
+            enabled=True,
+            library_sync_interval_sec=21600,
+            validation_sweep_enabled=False,
+            scheduled_prefill_enabled=True,
+        )
+        await mgr.start()
+        try:
+            job = mgr.get_job(SCHEDULED_PREFILL_JOB_ID)
+            assert job is not None
+            assert isinstance(job.trigger, CronTrigger), (
+                f"expected CronTrigger, got {type(job.trigger).__name__} — an interval "
+                f"trigger makes the offset from the Steam cron depend on restart time"
+            )
+        finally:
+            await mgr.shutdown()
+
+    async def test_scheduled_prefill_cron_is_passed_through(self, pool):
+        from orchestrator.scheduler.manager import SCHEDULED_PREFILL_JOB_ID
+
+        mgr = SchedulerManager(
+            pool=pool,
+            enabled=True,
+            library_sync_interval_sec=21600,
+            validation_sweep_enabled=False,
+            scheduled_prefill_enabled=True,
+            scheduled_prefill_cron="15 2 * * *",
+        )
+        await mgr.start()
+        try:
+            job = mgr.get_job(SCHEDULED_PREFILL_JOB_ID)
+            assert job is not None
+            fields = {f.name: str(f) for f in job.trigger.fields}
+            assert fields["hour"] == "2"
+            assert fields["minute"] == "15"
+        finally:
+            await mgr.shutdown()
+
+    async def test_scheduled_prefill_default_slot_clears_the_sweep(self, pool):
+        """Default must be 45 min past 03/09/15/21 UTC: a fixed +3h45m from the
+        host Steam cron (00/06/12/18 UTC), landing after the ~39-min validation
+        sweep that starts on the hour at those same hours."""
+        from orchestrator.scheduler.manager import SCHEDULED_PREFILL_JOB_ID
+
+        mgr = SchedulerManager(
+            pool=pool,
+            enabled=True,
+            library_sync_interval_sec=21600,
+            validation_sweep_enabled=False,
+            scheduled_prefill_enabled=True,
+        )
+        await mgr.start()
+        try:
+            job = mgr.get_job(SCHEDULED_PREFILL_JOB_ID)
+            assert job is not None
+            fields = {f.name: str(f) for f in job.trigger.fields}
+            assert fields["minute"] == "45"
+            assert fields["hour"] == "3,9,15,21"
+        finally:
+            await mgr.shutdown()
+
     async def test_scheduled_prefill_disabled_not_registered(self, pool):
         from orchestrator.scheduler.manager import SCHEDULED_PREFILL_JOB_ID
 

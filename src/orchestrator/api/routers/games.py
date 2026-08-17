@@ -29,6 +29,7 @@ from orchestrator.api._query_helpers import (
     SortField as _SortField,
 )
 from orchestrator.api.dependencies import get_pool_dep
+from orchestrator.api.routers._path_params import GameIdPath  # noqa: TC001  runtime-resolved
 from orchestrator.db.pool import PoolError
 
 if TYPE_CHECKING:
@@ -45,6 +46,10 @@ GAMES_FILTER_ALLOW_LIST = FilterAllowList(
     {
         "platform": FilterFieldSpec(ops={"eq", "in"}, value_type=str),
         "status": FilterFieldSpec(ops={"eq", "in"}, value_type=str),
+        # Issue #264: substring search only. No `eq` — an operator looking for
+        # a game types a fragment, and an exact-match op on a free-text column
+        # would mostly return nothing while looking like it worked.
+        "title": FilterFieldSpec(ops={"contains"}, value_type=str),
         "owned": FilterFieldSpec(ops={"eq"}, value_type=int),
         "size_bytes": FilterFieldSpec(ops={"eq", "gte", "lte"}, value_type=int),
         # UAT-4 S3-a: timestamp value_type enforces ISO 8601 format on the value
@@ -353,6 +358,7 @@ async def list_games(
     response_model=GameDetailResponse,
     responses={
         200: {"description": "Single game detail"},
+        400: {"description": "Malformed game id (non-integer, or outside 1..2**63-1)"},
         401: {"description": "Missing or invalid bearer token"},
         404: {"description": "No game with that id"},
         503: {"description": "Database pool unhealthy"},
@@ -366,7 +372,7 @@ async def list_games(
     ),
 )
 async def get_game(
-    game_id: int,
+    game_id: GameIdPath,
     pool: Pool = Depends(get_pool_dep),  # noqa: B008  FastAPI idiomatic
 ) -> JSONResponse:
     # game_id flows through a `?` placeholder; the only interpolated fragment is

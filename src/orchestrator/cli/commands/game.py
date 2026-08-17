@@ -37,18 +37,51 @@ def game() -> None:
     """Inspect and act on games."""
 
 
+def _non_negative_int(ctx: click.Context, param: click.Parameter, value: int) -> int:
+    """Reject a negative --offset locally; the server would 400 it anyway (#264)."""
+    if value < 0:
+        raise click.BadParameter("offset must be zero or greater")
+    return value
+
+
 @game.command("list")
 @click.option("--platform", type=click.Choice(["steam", "epic"]), default=None)
 @click.option("--status", "status_", type=click.Choice(_STATUSES), default=None)
+@click.option("--title", default=None, help="Case-insensitive substring of the title.")
 @click.option(
     "--limit", type=int, default=50, show_default=True, help="Max rows (server caps at 500)."
 )
+@click.option(
+    "--offset",
+    type=int,
+    default=0,
+    callback=_non_negative_int,
+    help="Skip this many rows — page through a result set larger than --limit.",
+)
 @click.pass_context
 @handles_api_errors
-def game_list(ctx: click.Context, platform: str | None, status_: str | None, limit: int) -> None:
+def game_list(
+    ctx: click.Context,
+    platform: str | None,
+    status_: str | None,
+    title: str | None,
+    limit: int,
+    offset: int,
+) -> None:
     """List games."""
     client = make_client(ctx)
-    data = client.get("/api/v1/games", platform=platform, status=status_, limit=limit)
+    data = client.get(
+        "/api/v1/games",
+        platform=platform,
+        status=status_,
+        # Substring search, so the server's `contains` op — a bare `title=` is
+        # an exact match, which the games allow-list rejects with a 400 (#264).
+        title_contains=title,
+        limit=limit,
+        # Send offset only when paging; 0 is the server default anyway.
+        offset=offset or None,
+    )
+    games = data["games"]
     rows = [
         [
             str(g["id"]),
@@ -58,9 +91,22 @@ def game_list(ctx: click.Context, platform: str | None, status_: str | None, lim
             output.status_label(g["status"]),
             "yes" if g.get("blocked") else "-",
         ]
-        for g in data["games"]
+        for g in games
     ]
     click.echo(output.table(["ID", "PLATFORM", "APP_ID", "TITLE", "STATUS", "BLOCKED"], rows))
+
+    # #264: without this footer a capped table is indistinguishable from a
+    # complete one, so an operator reads 500 rows as the whole library — and
+    # since `game list` is the only way to DISCOVER an id, ids past the cap
+    # were unreachable. `.get` throughout: a response without meta must still
+    # render its table rather than raise.
+    meta = data.get("meta") or {}
+    if meta.get("has_more"):
+        shown = meta.get("offset", offset) + len(games)
+        click.echo(
+            f"\nshowing {shown} of {meta.get('total', '?')} "
+            f"— use --offset {shown} for the next page"
+        )
 
 
 def _fetch_game(client: OrchClient, game_id: int) -> dict[str, Any]:

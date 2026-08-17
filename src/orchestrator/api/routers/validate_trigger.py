@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from orchestrator.api.dependencies import get_pool_dep
+from orchestrator.api.routers._path_params import GameIdPath  # noqa: TC001  runtime-resolved
 from orchestrator.db.pool import PoolError
 
 if TYPE_CHECKING:
@@ -29,14 +30,14 @@ router = APIRouter(prefix="/api/v1/games", tags=["validate"])
     "/{game_id}/validate",
     responses={
         202: {"description": "Validate job queued or existing in-flight job returned"},
-        400: {"description": "Game is on an unsupported platform (not steam/epic)"},
+        400: {"description": "Malformed game id, or unsupported platform (not steam/epic)"},
         401: {"description": "Missing/invalid bearer"},
         404: {"description": "Game not found"},
         503: {"description": "Database unavailable"},
     },
 )
 async def trigger_validate(
-    game_id: int,
+    game_id: GameIdPath,
     pool: Pool = Depends(get_pool_dep),  # noqa: B008
 ) -> JSONResponse:
     try:

@@ -85,6 +85,15 @@ class TestErrors:
         assert r.status_code == 404
         assert "not found" in r.json()["detail"]
 
+    async def test_id_above_int64_returns_400_not_500(self, client):
+        # Issue #263: an unbounded game_id reached SQLite binding and raised
+        # OverflowError -> unhandled 500. Must be a validation rejection.
+        r = await client.post(
+            f"/api/v1/games/{2**63}/prefill",
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+        assert r.status_code == 400
+
     async def test_epic_game_queues_epic_prefill_job(self, client, populated_pool):
         row = await populated_pool.read_one("SELECT id FROM games WHERE platform='epic' LIMIT 1")
         assert row is not None
