@@ -91,6 +91,12 @@ class Settings(BaseSettings):
     # selectedAppsToPrefill.json, successfullyDownloadedDepots.json.
     steam_prefill_binary: Path = Path("/SteamPrefill/SteamPrefill")
     steam_prefill_config_dir: Path = Path("/SteamPrefill/Config")
+    # Hard cap on a single SteamPrefill run. Matches the host cron's RUN_MAX=10h.
+    # On 2026-08-12 a --force run was alive 5d18h having already logged
+    # "Prefill complete!" and never exited. Without this the agent job would
+    # wait forever and the next scheduled tick would start a second concurrent
+    # run against the same shared auth/cache state.
+    steam_prefill_timeout_sec: float = Field(default=36000.0, gt=0)
 
     # --- Data-plane agent (re-architecture step 2) ------------------
     # The data plane (chunk-pull + cache disk-stat + SteamPrefill runner) runs

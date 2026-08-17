@@ -989,6 +989,30 @@ own state deems complete, so it would refill nothing). The trigger dedup-upgrade
 a still-queued non-force prefill to force; Steam only (Epic ignores it). No
 migration — reuses the existing `jobs.payload` column. See CHANGELOG (2026-06-29).
 
+**Enhancement — Hardened SteamPrefill runs (2026-08-17):** the agent-side path
+gained a timeout and mutual exclusion, which it previously lacked entirely —
+making it strictly *less* safe than the host cron it may eventually replace. On
+2026-08-12 a `SteamPrefill --force` run was found alive **5 days 18 hours** after
+logging `Prefill complete!` and never exiting.
+  - **Timeout + process-group kill.** New setting `steam_prefill_timeout_sec`
+    (default 36000s, matching the cron's `RUN_MAX`). A run past it is killed by
+    **process group** (`SIGTERM` → `SIGKILL` after 60s), not just the direct
+    child — the cron's own alert text admits its `timeout` kills only the `docker
+    exec` client. Cancellation (agent shutdown/redeploy) also kills the group, so
+    a restart cannot orphan a detached SteamPrefill.
+  - **Output preserved on timeout.** The killed run's last output is retained, so
+    "hung *after* finishing" is distinguishable from "hung mid-download".
+  - **Single-flight gate.** Concurrent SteamPrefill invocations corrupt the shared
+    auth/cache (re-arch ① §6). A second request for the *same* work deduplicates
+    onto the in-flight job; **different** work (other `app_ids`, or `force=true`
+    against a running non-force run) gets **409** rather than being silently
+    absorbed. `/v1/steam/fetch-manifests` is gated too, since a prefill
+    temporarily owns `selectedAppsToPrefill.json`. Scope: the gate covers
+    agent-initiated runs only — it is not an OS lock and does not exclude the
+    host cron.
+  - **Client poll ceiling** raised above the agent-side timeout so the agent's
+    timeout is the one that fires. See CHANGELOG (2026-08-17).
+
 **Key Interfaces:**
   - `src/orchestrator/prefill/downloader.py` — `prefill_chunks` (async httpx,
     bounded `Semaphore`, stream+discard, retry/backoff) + `PrefillResult`

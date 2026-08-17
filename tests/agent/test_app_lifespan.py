@@ -115,3 +115,27 @@ async def test_sync_task_uses_the_live_prefill_cache_as_source(monkeypatch):
 
     assert captured["live_root"] == settings.steam_prefill_live_cache_dir
     assert captured["archive_root"] == settings.steam_manifest_archive_dir
+
+
+async def test_steam_prefill_timeout_setting_actually_reaches_the_driver():
+    """ORCH_STEAM_PREFILL_TIMEOUT_SEC must not be inert.
+
+    `create_agent_app` attaches `prefill_driver` EAGERLY (so the POST and GET
+    share one instance), and the lifespan then guards its own construction with
+    `if not hasattr(app.state, "prefill_driver")` — which is therefore always
+    False. Passing timeout_sec only in the lifespan branch means the eager
+    driver, the one every request actually uses, silently keeps the 36000s
+    default. An operator lowering the timeout would get no effect and no
+    warning; the lifespan's hunk is dead code.
+
+    Asserted both before and after the lifespan runs, because the eager
+    instance must not be replaced either.
+    """
+    settings = Settings(orchestrator_token=TOKEN, steam_prefill_timeout_sec=12.0)
+    app = create_agent_app(settings=settings)
+
+    assert app.state.prefill_driver._timeout_sec == 12.0, "eager driver ignored the setting"
+    eager = app.state.prefill_driver
+    async with app.router.lifespan_context(app):
+        assert app.state.prefill_driver is eager, "lifespan replaced the shared driver"
+        assert app.state.prefill_driver._timeout_sec == 12.0

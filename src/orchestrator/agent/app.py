@@ -67,6 +67,7 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
                 # cache is steam_prefill_live_cache_dir (the dir the capture reads),
                 # by construction — not by relying on the deploy env (UAT-13 F2).
                 home=Path(settings.steam_prefill_live_cache_dir).parent.parent,
+                timeout_sec=settings.steam_prefill_timeout_sec,
             )
         if not hasattr(app.state, "manifest_fetcher"):
             app.state.manifest_fetcher = DepotDownloaderManifestFetcher(
@@ -124,6 +125,11 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
         binary=settings.steam_prefill_binary,
         config_dir=settings.steam_prefill_config_dir,
         home=Path(settings.steam_prefill_live_cache_dir).parent.parent,
+        # This eager instance is the one every request uses — the lifespan's
+        # construction below is guarded by `if not hasattr(...)` and therefore
+        # never runs. Omitting timeout_sec here made
+        # ORCH_STEAM_PREFILL_TIMEOUT_SEC completely inert.
+        timeout_sec=settings.steam_prefill_timeout_sec,
     )
     app.state.manifest_fetcher = DepotDownloaderManifestFetcher(
         binary=settings.depotdownloader_binary,

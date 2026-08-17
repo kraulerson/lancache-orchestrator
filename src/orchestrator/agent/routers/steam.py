@@ -40,57 +40,111 @@ def _validate_app_ids(app_ids: list[int]) -> None:
         raise HTTPException(status_code=422, detail="app_ids must be non-negative")
 
 
+def _prefill_gate(request: Request) -> dict[str, Any]:
+    """Single-flight state for SteamPrefill, held on app.state.
+
+    SteamPrefill is not built for concurrent invocations sharing one auth/cache
+    (re-arch ① §6), so the agent serialises the runs it starts itself.
+
+    SCOPE — this gate covers AGENT-INITIATED runs only. It is an in-process dict,
+    not an OS-level lock, and the driver does not take the host cron's
+    `steamprefill.lock`. A cron tick at 04:00 and an agent-initiated run at 03:59
+    can therefore still overlap; that window closes only when the host cron is
+    retired (Phase 4). An earlier version of this docstring claimed the cron's
+    flock protected us — it does not, since the two writers share no lock file.
+
+    Carries the request `signature` alongside the job id so an in-flight run can
+    only absorb a request that is genuinely the same work — see `start_prefill`.
+    """
+    state = request.app.state
+    if not hasattr(state, "steam_prefill_gate"):
+        state.steam_prefill_gate = {"job_id": None, "signature": None}
+    gate: dict[str, Any] = state.steam_prefill_gate
+    gate.setdefault("signature", None)  # tolerate a gate seeded without one
+    return gate
+
+
+def _in_flight(request: Request) -> tuple[str | None, Any]:
+    """Return ``(job_id, signature)`` for a genuinely-running prefill, else
+    ``(None, None)``, clearing the gate.
+
+    FAILS OPEN. A job id the store no longer knows about (``snap is None``) is
+    treated as stale and cleared, not as still-running. The previous version
+    inverted this: it returned the unknown id forever, so every subsequent
+    request 202'd with a dead job_id, the control plane polled a 404 and raised,
+    and Steam prefill was wedged until the agent process restarted. A missing
+    snapshot IS the stale case the function exists to clear.
+    """
+    gate = _prefill_gate(request)
+    job_id: str | None = gate["job_id"]
+    if job_id is None:
+        return None, None
+    store = request.app.state.agent_jobs
+    snap = store.get(job_id)
+    if snap is None or snap["state"] in ("done", "failed"):
+        gate["job_id"] = None
+        gate["signature"] = None
+        return None, None
+    return job_id, gate["signature"]
+
+
+def _prefill_signature(app_ids: list[int], force: bool) -> tuple[tuple[int, ...], bool]:
+    """Identity of a prefill request: which apps, and whether it forces.
+
+    Order-insensitive on app_ids — [730, 440] and [440, 730] are the same work.
+    """
+    return (tuple(sorted(app_ids)), force)
+
+
 @router.post("/v1/steam/prefill", status_code=status.HTTP_202_ACCEPTED)
 async def start_prefill(body: SteamPrefillRequest, request: Request) -> dict[str, str]:
     _validate_app_ids(body.app_ids)
+    signature = _prefill_signature(body.app_ids, body.force)
+    existing, existing_signature = _in_flight(request)
+    if existing is not None:
+        if existing_signature == signature:
+            # Genuinely the same work — absorbing it is correct.
+            _log.info("steam_prefill.dedup_hit", job_id=existing)
+            return {"job_id": existing}
+        # DIFFERENT work. Returning the in-flight id here would make the control
+        # plane record THIS request's games as prefilled when a different app was
+        # downloaded (and would silently downgrade a force refill to non-force).
+        # Refuse loudly instead: AgentClient turns non-2xx into AgentError, so the
+        # job fails honestly and can be retried once the current run finishes.
+        _log.warning(
+            "steam_prefill.conflict",
+            in_flight_job_id=existing,
+            requested_app_ids=body.app_ids,
+            requested_force=body.force,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"a different SteamPrefill run is already in flight as job {existing}; "
+                "retry once it completes"
+            ),
+        )
+
     driver = request.app.state.prefill_driver
     settings = request.app.state.settings
     store = request.app.state.agent_jobs
+    gate = _prefill_gate(request)
     job_id = store.create()
+    gate["job_id"] = job_id
+    gate["signature"] = signature
 
     async def _run() -> None:
         try:
             result = await driver.prefill_apps(body.app_ids, force=body.force)
             if result.ok:
-                # A successful prefill always writes its manifest(s) to the HOME
-                # cache, so a MISSING live cache dir means SteamPrefill's HOME and
-                # steam_prefill_live_cache_dir have drifted apart — the capture
-                # would silently no-op and false-Partial badges would silently
-                # return. Make that loud (UAT-13 F2b). (The driver pins HOME from
-                # this same setting, so this should never fire — it's the canary.)
-                live_v1 = Path(settings.steam_prefill_live_cache_dir) / "v1"
-                if not live_v1.is_dir():
-                    _log.warning(
-                        "steam_prefill.live_cache_missing",
-                        job_id=job_id,
-                        live_cache=str(live_v1),
-                        hint="HOME/.cache path mismatch; manifests NOT captured — check agent HOME",
-                    )
-                # Capture the manifest(s) SteamPrefill just wrote to its HOME
-                # cache (the agent runs it with HOME=/tmp) into the durable
-                # archive. The periodic archive-sync only reads the host cache, so
-                # without this an agent-driven (force-)prefill's manifest is never
-                # archived and validate falls back to a stale older manifest — the
-                # false-Partial root cause. The run is finished so settle_seconds=0.
-                # Synchronous: it's a bounded, fast copy of the few new .bin
-                # manifests this prefill produced (not the whole library), so it
-                # isn't worth offloading. A capture failure must never fail the job.
-                try:
-                    copied = sync_manifests_to_archive(
-                        Path(settings.steam_prefill_live_cache_dir),
-                        Path(settings.steam_manifest_archive_dir),
-                        settle_seconds=0.0,
-                    )
-                    _log.info("steam_prefill.manifests_captured", job_id=job_id, copied=copied)
-                except Exception as e:
-                    _log.warning(
-                        "steam_prefill.capture_failed",
-                        job_id=job_id,
-                        reason=f"{type(e).__name__}: {e}"[:200],
-                    )
+                _capture_prefill_manifests(job_id, settings)
             store.set_done(job_id, {"ok": result.ok, "raw": result.raw})
         except Exception as e:  # record, never crash the loop
             store.set_failed(job_id, f"{type(e).__name__}: {e}"[:200])
+        finally:
+            if gate["job_id"] == job_id:
+                gate["job_id"] = None
+                gate["signature"] = None
 
     # Hold a strong reference so the fire-and-forget task is not GC'd mid-flight
     # (mirrors the /v1/pull background-task set + discard-on-done pattern).
@@ -99,6 +153,45 @@ async def start_prefill(body: SteamPrefillRequest, request: Request) -> dict[str
     bg_tasks.add(task)
     task.add_done_callback(bg_tasks.discard)
     return {"job_id": job_id}
+
+
+def _capture_prefill_manifests(job_id: str, settings: Any) -> None:
+    """After a successful SteamPrefill run, capture the manifest(s) it just
+    wrote to its HOME cache into the durable archive.
+
+    Shared by every prefill mode: the periodic archive-sync only reads the
+    host cache, so without this an agent-driven run's manifest is never
+    archived and validate falls back to a stale older manifest — the
+    false-Partial root cause. settle_seconds=0.0 because the run just
+    finished. A capture failure must never fail the job.
+    """
+    # A successful prefill always writes its manifest(s) to the HOME cache, so
+    # a MISSING live cache dir means SteamPrefill's HOME and
+    # steam_prefill_live_cache_dir have drifted apart — the capture would
+    # silently no-op and false-Partial badges would silently return. Make that
+    # loud (UAT-13 F2b). (The driver pins HOME from this same setting, so this
+    # should never fire — it's the canary.)
+    live_v1 = Path(settings.steam_prefill_live_cache_dir) / "v1"
+    if not live_v1.is_dir():
+        _log.warning(
+            "steam_prefill.live_cache_missing",
+            job_id=job_id,
+            live_cache=str(live_v1),
+            hint="HOME/.cache path mismatch; manifests NOT captured — check agent HOME",
+        )
+    try:
+        copied = sync_manifests_to_archive(
+            Path(settings.steam_prefill_live_cache_dir),
+            Path(settings.steam_manifest_archive_dir),
+            settle_seconds=0.0,
+        )
+        _log.info("steam_prefill.manifests_captured", job_id=job_id, copied=copied)
+    except Exception as e:
+        _log.warning(
+            "steam_prefill.capture_failed",
+            job_id=job_id,
+            reason=f"{type(e).__name__}: {e}"[:200],
+        )
 
 
 @router.get("/v1/steam/prefill/{job_id}")
@@ -113,6 +206,24 @@ async def get_prefill(job_id: str, request: Request) -> dict[str, Any]:
 async def start_fetch_manifests(request: Request) -> dict[str, str]:
     fetcher = request.app.state.manifest_fetcher
     store = request.app.state.agent_jobs
+
+    # A prefill owns selectedAppsToPrefill.json for the duration of its run:
+    # `prefill_apps` overwrites it with a temporary one-app list and restores it
+    # afterwards. The fetcher's `_enumerate_app_ids` reads that same file, so an
+    # overlap enumerates ~1 app instead of the whole library — silently, with
+    # normal-looking fetched/skipped counts, quietly reopening the .shas coverage
+    # gap #213 exists to close.
+    prefill_job, _ = _in_flight(request)
+    if prefill_job is not None:
+        _log.warning("steam_fetch_manifests.conflict", in_flight_prefill_job_id=prefill_job)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"a SteamPrefill run is in flight as job {prefill_job} and owns the app "
+                "selection; retry once it completes"
+            ),
+        )
+
     inflight = getattr(request.app.state, "fetch_manifests_job", None)
     if inflight is not None:
         snap = store.get(inflight)

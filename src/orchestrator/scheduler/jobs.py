@@ -286,12 +286,21 @@ async def enqueue_auto_classify_block(pool: Pool, agent_client: AgentClient | No
             exclude_ids = [i for i in (as_int(r["app_id"]) for r in excl) if i is not None]
             restore_ids = [i for i in (as_int(r["app_id"]) for r in allow) if i is not None]
             # Also (re)add prefilled-but-not-excluded games to the selection so a
-            # game the host `--recently-purchased` cron downloaded (a `.bin` in the
-            # agent cache, outside the curated selection) persists in
-            # selectedAppsToPrefill.json — showing checked in `--select-apps` and
-            # staying in the durable prefill set. Same `.bin`-cache source as
-            # library_sync. Best-effort: a prefilled_apps() failure leaves the
-            # allow-only restore set.
+            # game downloaded outside the curated selection (a `.bin` in the agent
+            # cache) persists in selectedAppsToPrefill.json — showing checked in
+            # `--select-apps` and staying in the durable prefill set. Same
+            # `.bin`-cache source as library_sync. Best-effort: a prefilled_apps()
+            # failure leaves the allow-only restore set.
+            #
+            # CORRECTED 2026-08-17: this comment previously asserted that the host
+            # ran a `--recently-purchased` cron performing new-purchase discovery.
+            # It did not — `run-steam-prefill.sh` invoked a bare `SteamPrefill
+            # prefill` and no crontab entry mentioned the flag. This block only
+            # ever persisted games that were ALREADY prefilled; it discovered
+            # nothing. That false premise is why 11 owned games stayed invisible
+            # for days. The flag has since been added to the host cron, and
+            # ADR-0016 covers the structural fix (ownership as an explicit input,
+            # never inferred from cache contents).
             try:
                 prefilled = await agent_client.prefilled_apps()
             except Exception as e:  # best-effort — a failed enum must not crash the tick

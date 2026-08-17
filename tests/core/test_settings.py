@@ -226,6 +226,22 @@ class TestFieldValidators:
     def test_pool_busy_timeout_floor_accepts(self):
         Settings(orchestrator_token=VALID_TOKEN, pool_busy_timeout_ms=100)
 
+    def test_steam_prefill_timeout_zero_rejects(self):
+        """A non-positive timeout makes asyncio.wait_for fire immediately, so
+        every prefill would spawn SteamPrefill, instantly SIGTERM its process
+        group and return ok=False — a total prefill outage that looks like a
+        timeout. The `gt=0` bound shipped without a test; this is it."""
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, steam_prefill_timeout_sec=0)
+
+    def test_steam_prefill_timeout_negative_rejects(self):
+        with pytest.raises(ValidationError):
+            Settings(orchestrator_token=VALID_TOKEN, steam_prefill_timeout_sec=-1)
+
+    def test_steam_prefill_timeout_positive_accepts(self):
+        s = Settings(orchestrator_token=VALID_TOKEN, steam_prefill_timeout_sec=1.5)
+        assert s.steam_prefill_timeout_sec == 1.5
+
     def test_token_error_scrubbed_other_field_error_not(self):
         """SEV-4 (review 2026-06-02): the token-error scrub keys on the EXACT
         secret field name, not a `"token" in loc` substring. A token error
