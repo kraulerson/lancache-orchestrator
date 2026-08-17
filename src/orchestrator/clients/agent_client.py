@@ -17,6 +17,13 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
+# Poll ceiling for /v1/steam/prefill. Must stay ABOVE the agent's
+# `steam_prefill_timeout_sec` (default 36000s = 10h, matching the host cron's
+# RUN_MAX) so the AGENT's timeout is the one that fires. If the client gives up
+# first, the run is abandoned while SteamPrefill keeps going and the agent's
+# single-flight gate blocks every other prefill until it finally exits.
+_STEAM_PREFILL_POLL_TIMEOUT_SEC = 37800.0  # 10.5h — 30 min of headroom over 10h
+
 
 class AgentError(RuntimeError):
     """The agent was unreachable, returned an error, or its job failed."""
@@ -146,7 +153,22 @@ class AgentClient:
         return await self._post_then_poll("/v1/pull", payload)
 
     async def steam_prefill(self, app_ids: list[int], *, force: bool = False) -> dict[str, Any]:
-        return await self._post_then_poll("/v1/steam/prefill", {"app_ids": app_ids, "force": force})
+        """Prefill specific apps on the agent. POST + poll to done.
+
+        Uses a poll ceiling ABOVE the agent's own `steam_prefill_timeout_sec`
+        (default 36000s = 10h, matching the host cron's RUN_MAX). With the
+        default 2h ceiling the control plane always abandoned the job ~8 hours
+        early: it marked the game failed while SteamPrefill kept running, and the
+        agent's single-flight gate then refused every other prefill for the
+        remainder of those 8 hours. Letting the agent-side timeout be the one
+        that fires keeps a single authority over how long a run may take.
+        Same per-endpoint remedy as `fetch_manifests` below.
+        """
+        return await self._post_then_poll(
+            "/v1/steam/prefill",
+            {"app_ids": app_ids, "force": force},
+            poll_timeout=_STEAM_PREFILL_POLL_TIMEOUT_SEC,
+        )
 
     async def fetch_manifests(self) -> dict[str, Any]:
         """Trigger a manifest-only fetch run on the agent (it self-enumerates the

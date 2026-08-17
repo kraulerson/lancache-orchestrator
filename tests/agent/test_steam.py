@@ -20,10 +20,6 @@ class _FakeDriver:
         self.calls.append((app_ids, force))
         return PrefillResult(ok=True, raw="OK done")
 
-    async def prefill_recent(self):
-        self.calls.append("recent")
-        return PrefillResult(ok=True, raw="OK recent")
-
     def downloaded_state(self):
         return {440: [111, 222]}
 
@@ -379,13 +375,72 @@ def test_second_prefill_returns_the_in_flight_job_id():
     driver = _SlowDriver()
     with _client(driver) as client:
         first = client.post("/v1/steam/prefill", json={"app_ids": [730]})
-        second = client.post("/v1/steam/prefill", json={"app_ids": [440]})
+        second = client.post("/v1/steam/prefill", json={"app_ids": [730]})
         assert first.status_code == 202
         assert second.status_code == 202
         assert second.json()["job_id"] == first.json()["job_id"]
         snap = _wait_for_done(client, first.json()["job_id"])
         assert snap["state"] == "done"
         # only ONE SteamPrefill invocation actually happened
+        assert driver.calls == [([730], False)]
+
+
+def test_prefill_for_different_apps_conflicts_instead_of_deduping():
+    """Deduping a DIFFERENT app onto the in-flight job corrupts control-plane state.
+
+    The gate previously ignored `app_ids` entirely: a request for app 440 while
+    730 was running returned 730's job_id with 202. The control plane polls that
+    id, sees it finish, and writes `cached_version` + `last_prefilled_at` for
+    game 440 — which was never downloaded. Worse than the pre-gate behaviour,
+    which at least actually prefilled 440.
+
+    409 makes the refusal explicit: AgentClient turns non-2xx into AgentError, so
+    the job fails honestly and the control plane can retry it later.
+    """
+    driver = _SlowDriver()
+    with _client(driver) as client:
+        first = client.post("/v1/steam/prefill", json={"app_ids": [730]})
+        second = client.post("/v1/steam/prefill", json={"app_ids": [440]})
+        assert second.status_code == 409
+        # the in-flight id is surfaced so the caller can poll it if it wants to
+        assert first.json()["job_id"] in second.json()["detail"]
+        _wait_for_done(client, first.json()["job_id"])
+        assert driver.calls == [([730], False)], "a rival invocation was started"
+
+
+def test_force_prefill_does_not_dedup_onto_a_running_non_force_run():
+    """A force refill silently downgraded to a non-force run is a false success.
+
+    The Game_shelf Repair button (force=true, #203) exists to refetch chunks
+    lancache evicted. Deduping it onto an in-flight non-force run returns ok,
+    the control plane sets cached_version, the UI reports repaired — and
+    SteamPrefill skipped the app as already up to date, so nothing was refetched.
+    """
+    driver = _SlowDriver()
+    with _client(driver) as client:
+        first = client.post("/v1/steam/prefill", json={"app_ids": [730], "force": False})
+        second = client.post("/v1/steam/prefill", json={"app_ids": [730], "force": True})
+        assert second.status_code == 409
+        _wait_for_done(client, first.json()["job_id"])
+        assert driver.calls == [([730], False)]
+
+
+def test_gate_holding_an_unknown_job_id_does_not_wedge_prefill():
+    """A gate pointing at a job the store no longer knows must FAIL OPEN.
+
+    `_in_flight_job_id` treated a missing snapshot as still-in-flight, so a gate
+    left holding an evicted/unknown id returned that id forever: every request
+    202s with a dead job_id, the control plane polls a 404 and raises, and Steam
+    prefill is wedged until the process restarts. The docstring claims the
+    function clears stale gates — the None case IS the stale case.
+    """
+    driver = _FakeDriver()
+    with _client(driver) as client:
+        client.app.state.steam_prefill_gate = {"job_id": "not-a-real-job"}
+        resp = client.post("/v1/steam/prefill", json={"app_ids": [730]})
+        assert resp.status_code == 202
+        assert resp.json()["job_id"] != "not-a-real-job"
+        assert _wait_for_done(client, resp.json()["job_id"])["state"] == "done"
         assert driver.calls == [([730], False)]
 
 
@@ -401,26 +456,29 @@ def test_a_new_prefill_can_start_once_the_prior_one_is_done():
         assert driver.calls == [([730], False), ([440], False)]
 
 
-def test_prefill_recent_endpoint_starts_a_job():
-    driver = _FakeDriver()
-    with _client(driver) as client:
-        resp = client.post("/v1/steam/prefill-recent")
-        assert resp.status_code == 202
-        job_id = resp.json()["job_id"]
-        snap = _wait_for_done(client, job_id)
-        assert snap["state"] == "done"
-        assert snap["result"] == {"ok": True, "raw": "OK recent"}
-        assert driver.calls == ["recent"]
+def test_fetch_manifests_conflicts_while_a_prefill_is_running():
+    """fetch-manifests must not read the selection while a prefill owns it.
 
+    `prefill_apps` overwrites selectedAppsToPrefill.json with a temporary
+    one-app list for the duration of a run and restores it after. The fetcher's
+    `_enumerate_app_ids` reads that same file, so an overlap makes it enumerate
+    ~1 app instead of the full library — silently. It reports normal-looking
+    fetched/skipped counts, and the .shas coverage gap #213 exists to close
+    quietly reopens.
 
-def test_prefill_recent_shares_the_single_flight_gate_with_prefill_apps():
-    """A recent-purchase pass and a selection pass are both SteamPrefill
-    invocations sharing one auth/cache and must not overlap."""
+    `prefill_recent`'s own docstring called out this exact window as a hazard, so
+    it was a known risk that simply had no guard.
+    """
     driver = _SlowDriver()
     with _client(driver) as client:
+        client.app.state.manifest_fetcher = _FakeFetcher()
         first = client.post("/v1/steam/prefill", json={"app_ids": [730]})
-        second = client.post("/v1/steam/prefill-recent")
-        assert second.json()["job_id"] == first.json()["job_id"]
-        snap = _wait_for_done(client, first.json()["job_id"])
-        assert snap["state"] == "done"
-        assert driver.calls == [([730], False)]
+        assert first.status_code == 202
+
+        resp = client.post("/v1/steam/fetch-manifests")
+        assert resp.status_code == 409
+        assert first.json()["job_id"] in resp.json()["detail"]
+
+        _wait_for_done(client, first.json()["job_id"])
+        # once the prefill is done the selection is restored and fetching is safe
+        assert client.post("/v1/steam/fetch-manifests").status_code == 202

@@ -500,3 +500,43 @@ async def test_manual_downloads_encodes_launcher_and_include_files():
     await client.manual_downloads("Itch.io", include_files=True)
     assert captured["paths"][0] == "/v1/manual-downloads/Amazon%20Games"
     assert captured["paths"][1] == "/v1/manual-downloads/Itch.io?include_files=true"
+
+
+async def test_steam_prefill_poll_ceiling_exceeds_the_agent_side_timeout():
+    """The client must not abandon a prefill before the agent's own timeout fires.
+
+    The driver's `steam_prefill_timeout_sec` defaults to 36000s (10h, matching the
+    host cron's RUN_MAX). The client's default poll ceiling is 7200s, so the
+    control plane always gave up ~8 hours early: it marked the game failed while
+    SteamPrefill kept running, and — with the single-flight gate — the abandoned
+    job then blocked every subsequent prefill for the rest of those 8 hours.
+
+    Same remedy fetch_manifests already uses: a per-endpoint ceiling. Asserted
+    against the setting rather than a hard-coded number so the two cannot drift.
+    """
+    import inspect
+
+    from orchestrator.core.settings import Settings
+
+    src = inspect.getsource(AgentClient.steam_prefill)
+    assert "poll_timeout=" in src, "steam_prefill still uses the 2h instance default"
+
+    seen: dict[str, float] = {}
+    original = AgentClient._post_then_poll
+
+    async def _capture(self, path, payload, *, poll_timeout=None):
+        seen["poll_timeout"] = poll_timeout
+        return {}
+
+    AgentClient._post_then_poll = _capture
+    try:
+        await AgentClient(base_url="http://x", token="t" * 32).steam_prefill([730])
+    finally:
+        AgentClient._post_then_poll = original
+
+    driver_timeout = Settings(orchestrator_token="a" * 32).steam_prefill_timeout_sec
+    assert seen["poll_timeout"] is not None
+    assert seen["poll_timeout"] > driver_timeout, (
+        f"poll ceiling {seen['poll_timeout']}s must outlast the agent-side "
+        f"timeout {driver_timeout}s, or the agent's timeout can never fire"
+    )

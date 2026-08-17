@@ -14,6 +14,15 @@ import signal
 from dataclasses import dataclass
 from pathlib import Path
 
+import structlog
+
+_log = structlog.get_logger(__name__)
+
+# Upper bound on the retained stdout tail. A full-library prefill prints for
+# hours; only the end has diagnostic value, and an unbounded buffer would grow
+# with the run.
+_TAIL_BYTES = 65536
+
 
 @dataclass(frozen=True)
 class PrefillResult:
@@ -51,6 +60,30 @@ class SteamPrefillDriver:
     def _selection_path(self) -> Path:
         return self._config_dir / "selectedAppsToPrefill.json"
 
+    def _kill_process_group_now(self, proc: asyncio.subprocess.Process) -> None:
+        """SIGKILL the process GROUP synchronously — the cancellation path.
+
+        Deliberately not the graceful SIGTERM-then-wait of
+        ``_kill_process_group``: on cancellation the task is already being torn
+        down, so any ``await`` here is unreliable (it can be interrupted before
+        the kill lands). A missed kill is not a cosmetic problem — the child is
+        detached into its own session by ``start_new_session=True``, so a
+        group-wide kill of the agent no longer reaches it, and the router's
+        ``finally`` has already cleared the single-flight gate. The result is an
+        orphan nothing tracks, plus a restarted agent free to launch a rival
+        SteamPrefill against the same auth/cache.
+
+        SIGKILL rather than SIGTERM is the right trade here: a half-written
+        download is recoverable (lancache tolerates partials and the next
+        prefill resumes), a multi-day orphan is not.
+        """
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, OSError):
+            return
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.killpg(pgid, signal.SIGKILL)
+
     async def _kill_process_group(self, proc: asyncio.subprocess.Process) -> None:
         """SIGTERM the process GROUP, escalating to SIGKILL after 60s.
 
@@ -63,11 +96,17 @@ class SteamPrefillDriver:
             pgid = os.getpgid(proc.pid)
         except ProcessLookupError:
             return
+        _log.warning("steam_prefill.killing_process_group", pid=proc.pid, pgid=pgid, signal="TERM")
         with contextlib.suppress(ProcessLookupError):
             os.killpg(pgid, signal.SIGTERM)
         try:
             await asyncio.wait_for(proc.wait(), timeout=60)
         except TimeoutError:
+            # Escalation is worth its own line: a group that ignores SIGTERM for
+            # a full minute is the shape of the hang this driver exists to catch.
+            _log.warning(
+                "steam_prefill.process_group_escalated_to_sigkill", pid=proc.pid, pgid=pgid
+            )
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(pgid, signal.SIGKILL)
             with contextlib.suppress(Exception):
@@ -94,16 +133,64 @@ class SteamPrefillDriver:
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
         )
+        # Stream stdout into a bounded tail buffer rather than using
+        # communicate(). On timeout, wait_for cancels communicate() and its
+        # output is never bound — discarding exactly the diagnostic that matters,
+        # since the motivating incident printed "Prefill complete!" and THEN hung.
+        # Reading as we go means the tail survives the kill.
+        tail = bytearray()
+        drain = asyncio.create_task(self._drain(proc, tail))
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=self._timeout_sec)
+            await asyncio.wait_for(proc.wait(), timeout=self._timeout_sec)
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so `except Exception` never sees
+            # it — the same shape as the UAT-11 gevent.Timeout escape. The agent
+            # lifespan cancels every task in agent_bg_tasks on shutdown/redeploy,
+            # so without this the subprocess is simply orphaned.
+            drain.cancel()
+            self._kill_process_group_now(proc)
+            raise
         except TimeoutError:
+            drain.cancel()
             await self._kill_process_group(proc)
+            _log.warning(
+                "steam_prefill.timeout_killed",
+                timeout_sec=self._timeout_sec,
+                pid=proc.pid,
+                args=" ".join(extra_args) or "(selection)",
+                output_tail=self._decode_tail(tail)[-500:],
+            )
             return PrefillResult(
                 ok=False,
-                raw=f"timeout: SteamPrefill exceeded {self._timeout_sec:.0f}s and was killed",
+                raw=(
+                    f"timeout: SteamPrefill exceeded {self._timeout_sec:.0f}s and was killed\n"
+                    f"--- last output before the hang ---\n{self._decode_tail(tail)}"
+                ),
             )
-        raw = out.decode("utf-8", "replace")
-        return PrefillResult(ok=(proc.returncode == 0), raw=raw[-4000:])
+        with contextlib.suppress(asyncio.CancelledError):
+            await drain
+        return PrefillResult(ok=(proc.returncode == 0), raw=self._decode_tail(tail))
+
+    @staticmethod
+    async def _drain(proc: asyncio.subprocess.Process, tail: bytearray) -> None:
+        """Accumulate the subprocess's output, keeping only a bounded tail.
+
+        Bounded so a chatty multi-hour prefill cannot grow this without limit;
+        the tail is the part with the diagnostic value.
+        """
+        if proc.stdout is None:  # pragma: no cover - PIPE is always requested
+            return
+        while True:
+            chunk = await proc.stdout.read(65536)
+            if not chunk:
+                return
+            tail.extend(chunk)
+            if len(tail) > _TAIL_BYTES:
+                del tail[:-_TAIL_BYTES]
+
+    @staticmethod
+    def _decode_tail(tail: bytearray) -> str:
+        return bytes(tail).decode("utf-8", "replace")[-4000:]
 
     async def prefill_apps(self, app_ids: list[int], *, force: bool = False) -> PrefillResult:
         """Write our app selection, run SteamPrefill, then restore the operator's
@@ -115,16 +202,6 @@ class SteamPrefillDriver:
         finally:
             if prior is not None:
                 self._selection_path.write_text(prior)
-
-    async def prefill_recent(self) -> PrefillResult:
-        """Prefill newly-purchased apps using SteamPrefill's own discovery.
-
-        Deliberately does NOT touch selectedAppsToPrefill.json: SteamPrefill
-        derives the recent set itself, so there is no selection to save or
-        restore, and no window in which a concurrent reader would see our
-        temporary list. Never passes --force (spec OQ4: force is operator-only).
-        """
-        return await self._run("--recently-purchased")
 
     def downloaded_state(self) -> dict[int, list[int]]:
         """{app_id: [prefilled manifest GIDs]} from SteamPrefill's own record."""

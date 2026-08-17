@@ -44,42 +44,86 @@ def _prefill_gate(request: Request) -> dict[str, Any]:
     """Single-flight state for SteamPrefill, held on app.state.
 
     SteamPrefill is not built for concurrent invocations sharing one auth/cache
-    (re-arch ① §6). Until the host cron is retired its `flock` provides this;
-    afterwards the agent is the only thing standing between two scheduler ticks
-    (or an operator action racing a scheduled one) and a corrupted Config/.
-    Shared by every prefill mode (selection, recent-purchase) — they are all
-    SteamPrefill invocations against the same auth/cache.
+    (re-arch ① §6), so the agent serialises the runs it starts itself.
+
+    SCOPE — this gate covers AGENT-INITIATED runs only. It is an in-process dict,
+    not an OS-level lock, and the driver does not take the host cron's
+    `steamprefill.lock`. A cron tick at 04:00 and an agent-initiated run at 03:59
+    can therefore still overlap; that window closes only when the host cron is
+    retired (Phase 4). An earlier version of this docstring claimed the cron's
+    flock protected us — it does not, since the two writers share no lock file.
+
+    Carries the request `signature` alongside the job id so an in-flight run can
+    only absorb a request that is genuinely the same work — see `start_prefill`.
     """
     state = request.app.state
     if not hasattr(state, "steam_prefill_gate"):
-        state.steam_prefill_gate = {"job_id": None}
+        state.steam_prefill_gate = {"job_id": None, "signature": None}
     gate: dict[str, Any] = state.steam_prefill_gate
+    gate.setdefault("signature", None)  # tolerate a gate seeded without one
     return gate
 
 
-def _in_flight_job_id(request: Request) -> str | None:
-    """Return the in-flight job_id if one is genuinely still running, else None
-    (clearing a stale gate left behind by a job that finished without going
-    through its own `finally` — defensive; should not happen in practice)."""
+def _in_flight(request: Request) -> tuple[str | None, Any]:
+    """Return ``(job_id, signature)`` for a genuinely-running prefill, else
+    ``(None, None)``, clearing the gate.
+
+    FAILS OPEN. A job id the store no longer knows about (``snap is None``) is
+    treated as stale and cleared, not as still-running. The previous version
+    inverted this: it returned the unknown id forever, so every subsequent
+    request 202'd with a dead job_id, the control plane polled a 404 and raised,
+    and Steam prefill was wedged until the agent process restarted. A missing
+    snapshot IS the stale case the function exists to clear.
+    """
     gate = _prefill_gate(request)
     job_id: str | None = gate["job_id"]
     if job_id is None:
-        return None
+        return None, None
     store = request.app.state.agent_jobs
     snap = store.get(job_id)
-    if snap is None or snap["state"] not in ("done", "failed"):
-        return job_id
-    gate["job_id"] = None
-    return None
+    if snap is None or snap["state"] in ("done", "failed"):
+        gate["job_id"] = None
+        gate["signature"] = None
+        return None, None
+    return job_id, gate["signature"]
+
+
+def _prefill_signature(app_ids: list[int], force: bool) -> tuple[tuple[int, ...], bool]:
+    """Identity of a prefill request: which apps, and whether it forces.
+
+    Order-insensitive on app_ids — [730, 440] and [440, 730] are the same work.
+    """
+    return (tuple(sorted(app_ids)), force)
 
 
 @router.post("/v1/steam/prefill", status_code=status.HTTP_202_ACCEPTED)
 async def start_prefill(body: SteamPrefillRequest, request: Request) -> dict[str, str]:
     _validate_app_ids(body.app_ids)
-    existing = _in_flight_job_id(request)
+    signature = _prefill_signature(body.app_ids, body.force)
+    existing, existing_signature = _in_flight(request)
     if existing is not None:
-        _log.info("steam_prefill.dedup_hit", job_id=existing)
-        return {"job_id": existing}
+        if existing_signature == signature:
+            # Genuinely the same work — absorbing it is correct.
+            _log.info("steam_prefill.dedup_hit", job_id=existing)
+            return {"job_id": existing}
+        # DIFFERENT work. Returning the in-flight id here would make the control
+        # plane record THIS request's games as prefilled when a different app was
+        # downloaded (and would silently downgrade a force refill to non-force).
+        # Refuse loudly instead: AgentClient turns non-2xx into AgentError, so the
+        # job fails honestly and can be retried once the current run finishes.
+        _log.warning(
+            "steam_prefill.conflict",
+            in_flight_job_id=existing,
+            requested_app_ids=body.app_ids,
+            requested_force=body.force,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"a different SteamPrefill run is already in flight as job {existing}; "
+                "retry once it completes"
+            ),
+        )
 
     driver = request.app.state.prefill_driver
     settings = request.app.state.settings
@@ -87,6 +131,7 @@ async def start_prefill(body: SteamPrefillRequest, request: Request) -> dict[str
     gate = _prefill_gate(request)
     job_id = store.create()
     gate["job_id"] = job_id
+    gate["signature"] = signature
 
     async def _run() -> None:
         try:
@@ -99,6 +144,7 @@ async def start_prefill(body: SteamPrefillRequest, request: Request) -> dict[str
         finally:
             if gate["job_id"] == job_id:
                 gate["job_id"] = None
+                gate["signature"] = None
 
     # Hold a strong reference so the fire-and-forget task is not GC'd mid-flight
     # (mirrors the /v1/pull background-task set + discard-on-done pattern).
@@ -156,48 +202,28 @@ async def get_prefill(job_id: str, request: Request) -> dict[str, Any]:
     return snap
 
 
-@router.post("/v1/steam/prefill-recent", status_code=status.HTTP_202_ACCEPTED)
-async def start_prefill_recent(request: Request) -> dict[str, str]:
-    """Prefill newly-purchased apps (SteamPrefill's own discovery, spec OQ1).
-
-    Shares the single-flight gate with /v1/steam/prefill: both are SteamPrefill
-    invocations against the same auth/cache and must never run concurrently.
-    """
-    existing = _in_flight_job_id(request)
-    if existing is not None:
-        _log.info("steam_prefill.dedup_hit", job_id=existing)
-        return {"job_id": existing}
-
-    driver = request.app.state.prefill_driver
-    settings = request.app.state.settings
-    store = request.app.state.agent_jobs
-    gate = _prefill_gate(request)
-    job_id = store.create()
-    gate["job_id"] = job_id
-
-    async def _run() -> None:
-        try:
-            result = await driver.prefill_recent()
-            if result.ok:
-                _capture_prefill_manifests(job_id, settings)
-            store.set_done(job_id, {"ok": result.ok, "raw": result.raw})
-        except Exception as e:  # record, never crash the loop
-            store.set_failed(job_id, f"{type(e).__name__}: {e}"[:200])
-        finally:
-            if gate["job_id"] == job_id:
-                gate["job_id"] = None
-
-    bg_tasks = request.app.state.agent_bg_tasks
-    task = asyncio.create_task(_run())
-    bg_tasks.add(task)
-    task.add_done_callback(bg_tasks.discard)
-    return {"job_id": job_id}
-
-
 @router.post("/v1/steam/fetch-manifests", status_code=status.HTTP_202_ACCEPTED)
 async def start_fetch_manifests(request: Request) -> dict[str, str]:
     fetcher = request.app.state.manifest_fetcher
     store = request.app.state.agent_jobs
+
+    # A prefill owns selectedAppsToPrefill.json for the duration of its run:
+    # `prefill_apps` overwrites it with a temporary one-app list and restores it
+    # afterwards. The fetcher's `_enumerate_app_ids` reads that same file, so an
+    # overlap enumerates ~1 app instead of the whole library — silently, with
+    # normal-looking fetched/skipped counts, quietly reopening the .shas coverage
+    # gap #213 exists to close.
+    prefill_job, _ = _in_flight(request)
+    if prefill_job is not None:
+        _log.warning("steam_fetch_manifests.conflict", in_flight_prefill_job_id=prefill_job)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"a SteamPrefill run is in flight as job {prefill_job} and owns the app "
+                "selection; retry once it completes"
+            ),
+        )
+
     inflight = getattr(request.app.state, "fetch_manifests_job", None)
     if inflight is not None:
         snap = store.get(inflight)

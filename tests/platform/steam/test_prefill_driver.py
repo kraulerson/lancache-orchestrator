@@ -16,18 +16,29 @@ def _fake_binary(tmp_path, stdout="Done.", code=0):
 
 
 def _hanging_binary(tmp_path):
-    """Mimics the 2026-08-12 incident: prints success, then never exits."""
+    """Mimics the 2026-08-12 incident: prints success, then never exits.
+
+    `sleep 30`, not 300: when an assertion fails before the kill lands, this
+    process is left behind with no fixture reaping it. 30s still vastly outlives
+    every test here, while bounding the mess a failing run leaves on the box.
+    """
     p = tmp_path / "HangingSteamPrefill"
-    p.write_text("#!/bin/sh\necho 'Prefill complete!'\nsleep 300\n")
+    p.write_text("#!/bin/sh\necho 'Prefill complete!'\nsleep 30\n")
     p.chmod(p.stat().st_mode | stat.S_IEXEC)
     return p
 
 
-def _group_spawning_binary(tmp_path, marker):
+def _group_spawning_binary(tmp_path, marker, *, child_delay=0.5):
     """Spawns a background child that outlives its parent unless the whole
-    process GROUP is killed. The child writes `marker` after a delay."""
+    process GROUP is killed. The child writes `marker` after ``child_delay``.
+
+    The delay is deliberately short: the assertion only needs the child to
+    outlive its parent, and a multi-second delay costs real wall-clock on every
+    CI run. It MUST stay shorter than the caller's post-kill wait, or the test
+    passes vacuously — the marker would simply not have been written yet.
+    """
     p = tmp_path / "GroupSteamPrefill"
-    p.write_text(f"#!/bin/sh\n(sleep 5; echo pwned > {marker}) &\nsleep 300\n")
+    p.write_text(f"#!/bin/sh\n(sleep {child_delay}; echo pwned > {marker}) &\nsleep 30\n")
     p.chmod(p.stat().st_mode | stat.S_IEXEC)
     return p
 
@@ -172,41 +183,88 @@ async def test_timeout_kills_the_whole_process_group(tmp_path):
     cfg = tmp_path / "Config"
     cfg.mkdir()
     marker = tmp_path / "child-survived.txt"
+    # The child MUST outlive the driver's timeout, or the assertion is vacuous:
+    # timeout fires at 0.5s, the child would write at 1.5s, and we look at 2.0s.
     d = SteamPrefillDriver(
-        binary=_group_spawning_binary(tmp_path, marker), config_dir=cfg, timeout_sec=1.0
+        binary=_group_spawning_binary(tmp_path, marker, child_delay=1.5),
+        config_dir=cfg,
+        timeout_sec=0.5,
     )
     await d.prefill_apps([730])
-    await asyncio.sleep(7)  # past the child's 5s delay
+    await asyncio.sleep(2.0)  # past the child's 1.5s delay
     assert not marker.exists(), "background child survived the group kill"
 
 
 @pytest.mark.asyncio
-async def test_prefill_recent_passes_the_flag(tmp_path):
+async def test_cancelling_the_run_kills_the_process_group(tmp_path):
+    """Cancelling the prefill task must not orphan SteamPrefill.
+
+    `start_new_session=True` puts the child in its OWN process group, so it is no
+    longer killed by a group-wide kill of the agent. Combined with the router's
+    `finally` clearing the single-flight gate on cancellation, an orphan would
+    survive with nothing tracking it — and the restarted agent, seeing an empty
+    gate, would start a SECOND concurrent SteamPrefill against the same
+    auth/cache. That is precisely the corruption this driver exists to prevent.
+
+    Real trigger: the agent lifespan cancels every task in `agent_bg_tasks` on
+    shutdown/redeploy. Note CancelledError is a BaseException, so `except
+    Exception` does not catch it — the same shape as the UAT-11 gevent.Timeout
+    escape.
+    """
     cfg = tmp_path / "Config"
     cfg.mkdir()
-    argv = tmp_path / "argv.txt"
-    p = tmp_path / "ArgvSteamPrefill"
-    p.write_text(f'#!/bin/sh\necho "$@" > {argv}\nexit 0\n')
-    p.chmod(p.stat().st_mode | stat.S_IEXEC)
-    d = SteamPrefillDriver(binary=p, config_dir=cfg)
-    res = await d.prefill_recent()
-    assert res.ok is True
-    recorded = argv.read_text()
-    assert "--recently-purchased" in recorded
-    assert "--no-ansi" in recorded
-    assert "--force" not in recorded  # scheduled prefill is never force (spec OQ4)
+    marker = tmp_path / "child-survived"
+    d = SteamPrefillDriver(binary=_group_spawning_binary(tmp_path, marker), config_dir=cfg)
+
+    task = asyncio.create_task(d.prefill_apps([730]))
+    await asyncio.sleep(0.3)  # let the binary spawn its background child
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.sleep(1.2)  # past the child's delay
+    assert not marker.exists(), "background child survived cancellation of the run"
 
 
 @pytest.mark.asyncio
-async def test_prefill_recent_does_not_touch_the_selection_file(tmp_path):
-    """SteamPrefill derives the recent set itself, so the operator's selection
-    must be left completely alone — not rewritten and restored."""
+async def test_cancelling_the_run_restores_the_prior_selection(tmp_path):
+    """The operator's selection must survive cancellation, not just completion —
+    `prefill_apps` overwrites it for the duration of the run."""
     cfg = tmp_path / "Config"
     cfg.mkdir()
     sel = cfg / "selectedAppsToPrefill.json"
     sel.write_text("[111, 222]")
-    before = sel.stat().st_mtime_ns
-    d = SteamPrefillDriver(binary=_fake_binary(tmp_path), config_dir=cfg)
-    await d.prefill_recent()
+    d = SteamPrefillDriver(binary=_hanging_binary(tmp_path), config_dir=cfg)
+
+    task = asyncio.create_task(d.prefill_apps([730]))
+    await asyncio.sleep(0.3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
     assert json.loads(sel.read_text()) == [111, 222]
-    assert sel.stat().st_mtime_ns == before, "selection file was rewritten"
+
+
+@pytest.mark.asyncio
+async def test_timeout_preserves_the_output_printed_before_the_hang(tmp_path):
+    """The timeout result must carry what SteamPrefill printed before it hung.
+
+    The 2026-08-12 incident was a run that logged `Prefill complete!` and then
+    never exited. Distinguishing "hung AFTER finishing" from "hung mid-download"
+    is the whole diagnostic question, and the answer is in that output — which
+    `asyncio.wait_for(proc.communicate())` throws away, because cancelling
+    communicate() means `out` is never bound.
+    """
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    p = tmp_path / "ChattyHangingSteamPrefill"
+    p.write_text("#!/bin/sh\necho 'Prefill complete!'\necho 'Prefilled 1132 apps'\nsleep 30\n")
+    p.chmod(p.stat().st_mode | stat.S_IEXEC)
+
+    d = SteamPrefillDriver(binary=p, config_dir=cfg, timeout_sec=1.0)
+    res = await d.prefill_apps([730])
+
+    assert res.ok is False
+    assert "timeout" in res.raw.lower()
+    assert "Prefill complete!" in res.raw, "the pre-hang output was discarded"
+    assert "Prefilled 1132 apps" in res.raw
