@@ -19,6 +19,16 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — a dying agent background task logged nothing, hiding failures indefinitely — 2026-08-17
+
+Every fire-and-forget task in the agent (prefill, pull, manifest fetch, archive sync) was wired as `bg_tasks.add(task)` + `task.add_done_callback(bg_tasks.discard)`. `discard` releases the strong reference without ever inspecting the task, and asyncio only reports an unretrieved exception when the task object is garbage-collected — which for a task held in a set until it finishes means the traceback is discarded along with the reference. A task that raised simply vanished.
+
+This is the reason the manifest-archive sync silently no-oped **for a week** before anyone noticed. `db/pool.py` already guarded its own tasks with `_log_bg_task_exception`; the agent never adopted the same discipline.
+
+- **Fixed:** new `agent/background.py` with `track_background_task(task, bg_tasks)`, which holds the strong reference *and* attaches an exception-logging callback emitting `agent.background_task_failed` at error level with the task name, message and exception type. All four agent call sites now use it, so the two concerns can no longer be separated by accident — the exact way this bug arose.
+- **Cancellation is deliberately not reported as a failure:** the lifespan cancels every tracked task on shutdown/redeploy, so logging that as an error would make each normal restart look like a crash and train operators to ignore the signal.
+- Covered by four tests: a failing task logs, a successful one does not, a cancelled one does not, and the strong reference is still released when the task completes.
+
 ### Fixed — the manifest archive sync watched the wrong directory, so newly-prefilled games stayed invisible — 2026-08-17
 
 The agent's lifespan started `manifest_archive_sync_loop` with `steam_manifest_cache_dir` (`/steamprefill-cache`) as its source. That is one of the roots `GET /v1/steam/prefilled-apps` already enumerates, and it is static — so the loop copied **0 files every cycle for a week**, and because its success log is guarded by `if copied:` it did so in complete silence.

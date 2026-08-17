@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import structlog
 from fastapi import FastAPI
 
+from orchestrator.agent.background import track_background_task
 from orchestrator.agent.jobs import AgentJobStore
 from orchestrator.agent.manifest_archive import manifest_archive_sync_loop
 from orchestrator.agent.routers import epic, health, manual_downloads, pull, stat, steam
@@ -99,8 +100,7 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
                     interval,
                 )
             )
-            app.state.agent_bg_tasks.add(sync_task)
-            sync_task.add_done_callback(app.state.agent_bg_tasks.discard)
+            track_background_task(sync_task, app.state.agent_bg_tasks)
         try:
             yield
         finally:
