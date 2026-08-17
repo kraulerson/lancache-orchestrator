@@ -30,10 +30,24 @@ _log = structlog.get_logger(__name__)
 # Name-bearing upsert for the SteamPrefill-sourced enumeration (re-arch ③b):
 # the Steam store lookup gives us the real title, so a NEW app is inserted with
 # it and an EXISTING app has its title refreshed to the store name. Lifecycle
-# columns (status, cached_version, …) are preserved.
+# columns (cached_version, last_prefilled_at, …) are preserved.
+#
+# `status` is preserved too, with ONE exception: `not_downloaded` is reset to
+# `unknown`. Reaching this statement means the app is in the agent's prefilled
+# manifest cache — direct evidence it IS cached — while `not_downloaded` asserts
+# the opposite, and the gated sweep's candidate SQL covers only
+# ('unknown','up_to_date','validation_failed'). So a prefilled `not_downloaded`
+# row is never validated and can never correct itself. Found live 2026-08-16:
+# Half-Life: Alyx, Killing Floor 2 and Total War: PHARAOH DYNASTIES were fully
+# cached yet permanently stuck. Resetting to `unknown` hands them to the sweep,
+# which determines the real status. Deliberately NOT done by widening the sweep
+# to all `not_downloaded` rows: 1355 of the 1363 have no cache evidence, so that
+# would add ~1363 wasted validations per 6-hourly tick on a CPU-constrained host
+# to catch 8 games.
 _NAMED_UPSERT_SQL = (
     "INSERT INTO games (platform, app_id, title) VALUES ('steam', ?, ?) "
-    "ON CONFLICT(platform, app_id) DO UPDATE SET title = excluded.title, owned = 1"
+    "ON CONFLICT(platform, app_id) DO UPDATE SET title = excluded.title, owned = 1, "
+    "status = CASE WHEN games.status = 'not_downloaded' THEN 'unknown' ELSE games.status END"
 )
 
 # Idempotent upsert into the store-lookup cache (incl. MP-only category flags, #366).

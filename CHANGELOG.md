@@ -29,6 +29,14 @@ Meanwhile the host prefill cron runs SteamPrefill with `HOME=/tmp`, so real mani
 - **Fixed:** the loop now watches `steam_prefill_live_cache_dir`. Regression test asserts the source *and* destination the lifespan wires up — the previous tests only asserted that a task existed, which is why the wrong directory went unnoticed.
 - **Related:** the post-prefill capture (`_capture_prefill_manifests`) already used the live dir correctly, but only fires for agent-initiated prefills; host-cron prefills bypass it entirely, leaving this loop as their only path to the archive.
 
+### Fixed — a cached Steam game stuck at `not_downloaded` could never correct itself — 2026-08-16
+
+Found during a live investigation into games showing no cache status. The gated sweep's candidate SQL (`jobs/handlers/sweep.py`) selects only `('unknown','up_to_date','validation_failed')`, and `library_sync`'s upsert deliberately preserved `status` — so a game recorded `not_downloaded` was never validated and had no path back, even when it was fully present in the cache. Live impact: 8 owned Steam games, including **Half-Life: Alyx**, **Killing Floor 2** and **Total War: PHARAOH DYNASTIES**, were prefilled and sitting in lancache while the orchestrator reported them as not downloaded. #250 had added `'unknown'` to the sweep for newly-*inserted* games; legacy `not_downloaded` rows from the pre-re-arch-③ ownership sync were not covered.
+
+- **Fixed:** `library_sync`'s Steam upsert now resets `not_downloaded` → `unknown` when the app is present in the agent's prefilled manifest cache — direct evidence the game IS cached. The existing gated sweep then validates it and resolves the real status. Self-healing on the next 6-hourly sync; no data migration required.
+- **Deliberately not** widening the sweep to all `not_downloaded` rows: 1355 of the 1363 have no cache evidence, so that would add ~1363 wasted validations per tick on a CPU-constrained host to catch 8 games. Only rows with cache evidence are reconsidered, so sweep churn is unchanged.
+- **Scope:** only `not_downloaded` is reset; `up_to_date` and `validation_failed` are untouched (they are already sweep candidates, and resetting them would discard a real validation result). Covered by three tests including both negative guards.
+
 ### Infrastructure — ruff 0.16.2; Markdown excluded from the formatter — 2026-08-16
 
 ruff 0.16 began formatting Python code blocks embedded in Markdown, which expanded the formatter's file set from 250 to 427 and would have failed CI's Lint job on 37 documentation files. Excluding `*.md` (the opt-out Astral's formatter docs prescribe) restores the previous file set exactly.
