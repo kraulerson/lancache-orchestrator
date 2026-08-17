@@ -84,7 +84,16 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
         if interval > 0:
             sync_task = asyncio.create_task(
                 manifest_archive_sync_loop(
-                    Path(settings.steam_manifest_cache_dir),
+                    # The LIVE cache — the dir SteamPrefill actually writes to
+                    # ($HOME/.cache/SteamPrefill; the host prefill cron runs it
+                    # with HOME=/tmp). NOT steam_manifest_cache_dir: that is a
+                    # root `prefilled-apps` already enumerates and is static, so
+                    # syncing it copied 0 files every cycle — silently, since the
+                    # success log is guarded by `if copied:`. Real manifests
+                    # accumulated unsynced in the live dir (lost on container
+                    # restart), so 11 newly-purchased games were fully cached in
+                    # lancache yet invisible to the orchestrator for days.
+                    Path(settings.steam_prefill_live_cache_dir),
                     Path(settings.steam_manifest_archive_dir),
                     interval,
                 )
