@@ -23,7 +23,15 @@ where = ["src"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
-extend-exclude = ["spikes", "tests/uat/sessions"]
+# `*.md` is excluded because ruff 0.16 began formatting Python code blocks
+# embedded in Markdown. That reformats 37 documentation files, and it is not
+# merely noisy — it is wrong for this repo: it rewraps
+# `hashlib.md5(...)  # nosemgrep: insecure-hash-algorithms` in
+# docs/reference/security-scan-guide.md across three lines, moving the
+# suppression comment off the line it suppresses. Excluding Markdown restores
+# the pre-0.16 file set exactly (250 files). This is the approach Astral's own
+# formatter docs prescribe for opting out.
+extend-exclude = ["spikes", "tests/uat/sessions", "*.md"]
 force-exclude = true
 
 [tool.ruff.format]
