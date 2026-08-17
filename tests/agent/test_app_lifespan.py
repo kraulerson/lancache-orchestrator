@@ -79,3 +79,39 @@ async def test_loop_runs_immediately(monkeypatch):
     with contextlib.suppress(asyncio.CancelledError):
         await task
     assert calls  # ran once immediately, before the first sleep
+
+
+async def test_sync_task_uses_the_live_prefill_cache_as_source(monkeypatch):
+    """The sync loop must read the dir SteamPrefill actually writes to.
+
+    Found live 2026-08-17: the lifespan started the loop with
+    `steam_manifest_cache_dir` (/steamprefill-cache) as live_root. That is one of
+    the roots `prefilled-apps` already enumerates, and it is static — so every
+    cycle copied 0 files and, because the success log is guarded by `if copied:`,
+    it did so in total silence for a week.
+
+    Meanwhile the host prefill cron runs SteamPrefill with HOME=/tmp, so real
+    manifests land in `steam_prefill_live_cache_dir` (/tmp/.cache/SteamPrefill) —
+    a dir nothing synced and which is lost on container restart. 11 newly
+    purchased games were fully downloaded into lancache yet stayed invisible to
+    the orchestrator because their manifests never reached an enumerated root.
+    """
+    captured: dict[str, object] = {}
+
+    def _fake_loop(live_root, archive_root, interval_sec, **kw):
+        captured["live_root"] = live_root
+        captured["archive_root"] = archive_root
+
+        async def _noop() -> None:
+            await asyncio.sleep(3600)
+
+        return _noop()
+
+    monkeypatch.setattr(agent_app_mod, "manifest_archive_sync_loop", _fake_loop)
+    settings = Settings(orchestrator_token=TOKEN, manifest_archive_sync_interval_sec=1800)
+    app = create_agent_app(settings=settings)
+    async with app.router.lifespan_context(app):
+        pass
+
+    assert captured["live_root"] == settings.steam_prefill_live_cache_dir
+    assert captured["archive_root"] == settings.steam_manifest_archive_dir

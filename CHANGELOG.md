@@ -19,6 +19,40 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — the manifest archive sync watched the wrong directory, so newly-prefilled games stayed invisible — 2026-08-17
+
+The agent's lifespan started `manifest_archive_sync_loop` with `steam_manifest_cache_dir` (`/steamprefill-cache`) as its source. That is one of the roots `GET /v1/steam/prefilled-apps` already enumerates, and it is static — so the loop copied **0 files every cycle for a week**, and because its success log is guarded by `if copied:` it did so in complete silence.
+
+Meanwhile the host prefill cron runs SteamPrefill with `HOME=/tmp`, so real manifests land in `steam_prefill_live_cache_dir` (`/tmp/.cache/SteamPrefill`) — a directory nothing synced, and which is lost when the agent container restarts.
+
+- **Live impact:** 11 newly-purchased Steam games (Abyssus, Astroloot, Bloody Spell, Riftstorm, Swordcery + 6 Ghost Recon titles) were fully downloaded into lancache yet never appeared in the orchestrator, because their manifests never reached a root `prefilled-apps` enumerates. Confirmed on the live agent: 62 `.bin` files were pending in the live cache with 0 of them archived; the newest archived `.bin` predated them by a week.
+- **Fixed:** the loop now watches `steam_prefill_live_cache_dir`. Regression test asserts the source *and* destination the lifespan wires up — the previous tests only asserted that a task existed, which is why the wrong directory went unnoticed.
+- **Related:** the post-prefill capture (`_capture_prefill_manifests`) already used the live dir correctly, but only fires for agent-initiated prefills; host-cron prefills bypass it entirely, leaving this loop as their only path to the archive.
+
+### Fixed — a cached Steam game stuck at `not_downloaded` could never correct itself — 2026-08-16
+
+Found during a live investigation into games showing no cache status. The gated sweep's candidate SQL (`jobs/handlers/sweep.py`) selects only `('unknown','up_to_date','validation_failed')`, and `library_sync`'s upsert deliberately preserved `status` — so a game recorded `not_downloaded` was never validated and had no path back, even when it was fully present in the cache. Live impact: 8 owned Steam games, including **Half-Life: Alyx**, **Killing Floor 2** and **Total War: PHARAOH DYNASTIES**, were prefilled and sitting in lancache while the orchestrator reported them as not downloaded. #250 had added `'unknown'` to the sweep for newly-*inserted* games; legacy `not_downloaded` rows from the pre-re-arch-③ ownership sync were not covered.
+
+- **Fixed:** `library_sync`'s Steam upsert now resets `not_downloaded` → `unknown` when the app is present in the agent's prefilled manifest cache — direct evidence the game IS cached. The existing gated sweep then validates it and resolves the real status. Self-healing on the next 6-hourly sync; no data migration required.
+- **Deliberately not** widening the sweep to all `not_downloaded` rows: 1355 of the 1363 have no cache evidence, so that would add ~1363 wasted validations per tick on a CPU-constrained host to catch 8 games. Only rows with cache evidence are reconsidered, so sweep churn is unchanged.
+- **Scope:** only `not_downloaded` is reset; `up_to_date` and `validation_failed` are untouched (they are already sweep candidates, and resetting them would discard a real validation result). Covered by three tests including both negative guards.
+
+### Infrastructure — ruff 0.16.2; Markdown excluded from the formatter — 2026-08-16
+
+ruff 0.16 began formatting Python code blocks embedded in Markdown, which expanded the formatter's file set from 250 to 427 and would have failed CI's Lint job on 37 documentation files. Excluding `*.md` (the opt-out Astral's formatter docs prescribe) restores the previous file set exactly.
+
+- **Not merely cosmetic:** the reformat rewraps `hashlib.md5(cache_key.encode())  # nosemgrep: insecure-hash-algorithms` in `docs/reference/security-scan-guide.md` across three lines, moving the suppression comment off the line it suppresses — a documented example that would have silently stopped being valid.
+- Verified with the bump applied: `ruff check` clean, `ruff format --check` 250 files, `mypy` strict clean, full suite 1649 passed.
+
+### Documentation — ADR-0016: ownership as an explicit input (Proposed) — 2026-08-16
+
+Records the diagnosis behind 11 owned Steam games being permanently invisible to the orchestrator, and lays out the options for fixing it structurally. `library_sync` enumerates the Steam library from apps SteamPrefill has **already prefilled**, so ownership is inferred from cache contents — a game the cache has never held is indistinguishable from one that does not exist. Epic is unaffected (`library_enumerate()` is a real ownership API; counts agree exactly across both systems), which makes the asymmetry the defect rather than the architecture.
+
+- **Establishes the invariant:** ownership is an explicit input, never inferred from cache contents.
+- **Four options weighed:** host `--recently-purchased` (applied as an operational stopgap; does not satisfy the invariant), a direct Steam Web API ownership client, a Game_shelf ownership push, and a hybrid. Recommends the hybrid, with push-only direction, per-launcher freshness metadata that fails loud, and reconcile-then-prune for the 1363 licence-residue rows.
+- **Status is Proposed** — the decision is not yet made. Four open questions are recorded (Steam credential, F2P inclusion, authority on conflict, residue disposal).
+- **Also documents** that `scheduler/jobs.py:288` asserts a `--recently-purchased` host cron that has never existed; correcting that comment is owed by the implementing change.
+
 ### Fixed — Steam validation and purge silently ignored most of a multi-depot game's secondary depots — 2026-08-16
 
 `locate_manifest_bins` globbed `.bin` manifests as `{app_id}_{app_id}_*` — true only for a game's primary depot. SteamPrefill names secondary depots `{app_id}_{depotGroupId}_{depot}_{gid}.bin` with a differing group id, so the old glob silently excluded them as candidates. Live investigation found Grim Dawn's 9 real depots: only 1 matched the old pattern; the locator fell back to a 51-day-old `.shas` sidecar for 5 more and found nothing at all for the remaining 3 — explaining why Grim Dawn, STAR WARS Jedi: Survivor, and Battlefield 2042 stayed `validation_failed` despite the host Steam prefill cron completing successfully every 6h. Design: `docs/superpowers/specs/2026-08-16-manifest-locator-depot-glob-design.md` (5 rounds of independent adversarial review).
