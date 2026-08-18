@@ -11,8 +11,8 @@ choice in §5 is **not yet made**.
 > contents* — is retained unchanged and is the durable contribution here. The
 > mechanism question left open in §5 is answered by
 > **[ADR-0018](0018-standalone-ownership-service.md)**.
-> [ADR-0017](0017-shared-ownership-service.md) attempted that and was **rejected**;
-> it is retained only as a record of a rejected design.
+> An intermediate attempt (ADR-0017) was **rejected by adversarial review** and has
+> been removed; its errors are catalogued in ADR-0018 §1. The number 0017 is retired.
 >
 > Two corrections to this document, found by later verification:
 > - The circular enumeration cited as `library_sync.py:89` is at **`:103`**.
