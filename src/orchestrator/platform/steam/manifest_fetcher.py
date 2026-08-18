@@ -128,10 +128,19 @@ class DepotDownloaderManifestFetcher:
             except (TypeError, ValueError):
                 continue
         # Durability (#213 follow-up): also cover apps prefilled OUTSIDE the
-        # selection — a `.bin` in the live cache with no `.shas` in the archive yet
-        # (e.g. a `--recently-purchased` game). Bounded to that delta so the first
-        # run never triggers a full-library DepotDownloader logon burst (#228).
-        have_bin = self._app_ids_with_ext(self._manifest_cache_dir, "bin")
+        # selection — a `.bin` with no `.shas` yet (e.g. a `--recently-purchased`
+        # game). Bounded to that delta so the first run never triggers a
+        # full-library DepotDownloader logon burst (#228).
+        #
+        # Look for the `.bin` in BOTH roots. It was previously read only from the
+        # manifest cache dir, but the agent's archive-sync loop writes
+        # newly-prefilled manifests to the ARCHIVE — so the net that exists
+        # precisely for recently-purchased games never saw them. Confirmed live
+        # 2026-08-17: 11 newly-purchased games had their `.bin` in the archive and
+        # zero in the manifest cache.
+        have_bin = self._app_ids_with_ext(self._manifest_cache_dir, "bin") | self._app_ids_with_ext(
+            self._archive_dir, "bin"
+        )
         have_shas = self._app_ids_with_ext(self._archive_dir, "shas")
         return sorted(apps | (have_bin - have_shas))
 
