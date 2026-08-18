@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Documentation — ADR-0018 supersedes ADR-0017 (rejected) on the ownership question — 2026-08-17
+
+Records the full arc of the ownership-source decision, including the design that did not survive review.
+
+- **ADR-0018 (Proposed)** — *Standalone Ownership Service: contract first, service on trigger.* Adopt the ownership **contract** now (full snapshot + monotonic generation id, hosted by Game_shelf, pushed to the orchestrator's proven `prefill_exclusions.py` reconcile pattern), harden the credential store in place because that is prerequisite work under every topology, and build the standalone service **only when a named trigger fires** — with its full specification recorded so that, if built, it is built right the first time. Specifies what ADR-0017 omitted: the credential **write** plane and its trust boundary, per-consumer scoped tokens (never the shared `ORCH_TOKEN`), key derivation with AAD binding and a tested rotation routine, per-launcher refresh mutex with persist-before-use, and human-in-the-loop as a first-class state.
+- **ADR-0017 (Rejected)** — retained unedited behind a prominent banner, because ADR-0018 cites it and a rejected design is worth recording so the same proposal is not re-made. Two independent adversarial reviews found its load-bearing evidence false on both sides of the decision; the headline errors are tabulated in its banner and catalogued in ADR-0018 §1.
+- **ADR-0016** — its invariant (*ownership is an explicit input, never inferred from cache contents*) stands unchanged and is the durable contribution. Two corrections noted inline: the circular enumeration is at `library_sync.py:103`, not `:89`, and there are **four** cache-derived enumeration sites rather than one — fixing only the first leaves new games visible but inert.
+
 ### Fixed — the manifest fetcher's recently-purchased safety net looked in the wrong directory — 2026-08-17
 
 `_enumerate_app_ids` covers apps prefilled *outside* `selectedAppsToPrefill.json` by taking (has `.bin`) minus (has `.shas`) — a net added by the #213 follow-up specifically so a `--recently-purchased` game still gets its `.shas` sidecar. It read the `.bin` only from `steam_manifest_cache_dir`, but the agent's archive-sync loop writes newly-prefilled manifests to `steam_manifest_archive_dir`. The net that exists precisely for those games therefore never saw them.
