@@ -386,3 +386,44 @@ def test_enumerate_selection_only_when_no_cache_dir(tmp_path):
         manifest_cache_dir=None,
     )
     assert f._enumerate_app_ids() == [111]
+
+
+def test_enumerate_covers_a_prefilled_app_whose_bin_is_in_the_archive(tmp_path):
+    """The durability net must see manifests wherever prefill actually puts them.
+
+    Its stated purpose (#213 follow-up) is to cover apps prefilled OUTSIDE the
+    selection — e.g. a `--recently-purchased` game — by taking (has .bin) minus
+    (has .shas). But it read `.bin` only from steam_manifest_cache_dir, while the
+    agent's archive-sync loop writes newly-prefilled manifests to
+    steam_manifest_archive_dir. Confirmed live 2026-08-17: 11 newly-purchased
+    games had their `.bin` in the archive and ZERO in the manifest cache, so the
+    net that exists precisely for them never saw them.
+    """
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "selectedAppsToPrefill.json").write_text(json.dumps([111]))
+
+    archive = tmp_path / "archive"
+    (archive / "v1").mkdir(parents=True)
+    # A recently-purchased game: prefilled (its .bin was archived), no .shas yet.
+    (archive / "v1" / "2282790_2282790_2282791_777.bin").write_bytes(b"m")
+
+    f = _fetcher(tmp_path, steam_config_dir=cfg, archive_dir=archive)
+    assert f._enumerate_app_ids() == [111, 2282790]
+
+
+def test_enumerate_does_not_refetch_an_app_that_already_has_shas(tmp_path):
+    """The net is (has .bin) MINUS (has .shas) — an app already covered must not
+    be re-fetched, or every run would trigger a needless DepotDownloader logon
+    burst (#228)."""
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "selectedAppsToPrefill.json").write_text(json.dumps([]))
+
+    archive = tmp_path / "archive"
+    (archive / "v1").mkdir(parents=True)
+    (archive / "v1" / "2282790_2282790_2282791_777.bin").write_bytes(b"m")
+    (archive / "v1" / "2282790_2282790_2282791_777.shas").write_text("a" * 40 + "\n")
+
+    f = _fetcher(tmp_path, steam_config_dir=cfg, archive_dir=archive)
+    assert f._enumerate_app_ids() == []

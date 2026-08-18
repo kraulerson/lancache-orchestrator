@@ -19,6 +19,14 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — the manifest fetcher's recently-purchased safety net looked in the wrong directory — 2026-08-17
+
+`_enumerate_app_ids` covers apps prefilled *outside* `selectedAppsToPrefill.json` by taking (has `.bin`) minus (has `.shas`) — a net added by the #213 follow-up specifically so a `--recently-purchased` game still gets its `.shas` sidecar. It read the `.bin` only from `steam_manifest_cache_dir`, but the agent's archive-sync loop writes newly-prefilled manifests to `steam_manifest_archive_dir`. The net that exists precisely for those games therefore never saw them.
+
+- **Confirmed live 2026-08-17:** all 11 newly-purchased Steam games had their `.bin` in the archive and **zero** in the manifest cache, so none was ever a fetch candidate.
+- **Fixed:** the `.bin` scan now unions both roots. The `.shas` side is unchanged, so the delta stays bounded and a run still cannot trigger a full-library DepotDownloader logon burst (#228).
+- **Impact was latent, not active:** those games validate correctly from the archived `.bin`, so nothing was broken — the sidecar coverage simply never materialised. Same directory-mismatch shape as the archive-sync defect fixed earlier the same day.
+
 ### Fixed — a dying agent background task logged nothing, hiding failures indefinitely — 2026-08-17
 
 Every fire-and-forget task in the agent (prefill, pull, manifest fetch, archive sync) was wired as `bg_tasks.add(task)` + `task.add_done_callback(bg_tasks.discard)`. `discard` releases the strong reference without ever inspecting the task, and asyncio only reports an unretrieved exception when the task object is garbage-collected — which for a task held in a set until it finishes means the traceback is discarded along with the reference. A task that raised simply vanished.
