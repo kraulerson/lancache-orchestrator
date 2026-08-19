@@ -125,20 +125,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install pip-audit==2.9.0
 
-      # requirements-dev.in begins with `-r requirements.in`, so requirements-dev.txt
-      # is a strict superset of requirements.txt — containment is asserted by
-      # tests/test_lockfile_consistency.py, not assumed. Auditing the dev lockfile
-      # alone therefore covers every runtime package too, and is the ONLY form that
-      # works:
+      # Two independent invocations, and the `if: always()` is load-bearing.
       #
       #   * runtime-only (the original) missed dev pins entirely — a vulnerable idna
       #     sat in the dev lockfile for 91 days with every check green.
-      #   * two steps let the second inherit the default `if: success()`, so a
-      #     runtime advisory would skip the dev audit and mask every dev-only one.
-      #   * both files in one invocation aborts on any version skew between them —
-      #     `package idna has duplicate requirements` — reporting nothing at all,
-      #     and skew is exactly the condition that signals trouble.
-      - name: Run pip-audit (dev lockfile — superset of runtime)
+      #   * both files in ONE invocation aborts on any version skew between them
+      #     (`package idna has duplicate requirements`, empty output) — and skew is
+      #     exactly the condition that signals trouble.
+      #   * dev-only relies on containment holding, which is asserted in a different
+      #     job by a text parser; a runtime pin that parser cannot read would be
+      #     audited by nothing at all.
+      #
+      # So: audit each file on its own, and make the second run even when the first
+      # fails, or a runtime advisory silently masks every dev-only advisory.
+      - name: Run pip-audit (runtime lockfile)
+        run: pip-audit --requirement requirements.txt --disable-pip --strict
+
+      - name: Run pip-audit (dev lockfile)
+        if: always()
         run: pip-audit --requirement requirements-dev.txt --disable-pip --strict
 
   # ── Licenses: pip-licenses allowlist ──────────────────────────

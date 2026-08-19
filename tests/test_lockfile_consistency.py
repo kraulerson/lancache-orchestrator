@@ -17,6 +17,10 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import yaml
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
@@ -24,22 +28,36 @@ from tests.test_licenses import ALLOWED_LICENSES
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# `name==version` at the start of a line, tolerating extras (`uvicorn[standard]==...`)
-# and the trailing ` \` that precedes pip-compile's hash block.
-_PIN = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)(?:\[[^\]]*\])?==(?P<version>[^\s\\;]+)")
 
+def _parse_pins(path: Path) -> dict[str, set[str]]:
+    """Parse a pip-compile lockfile into {canonical name: {versions}}.
 
-def _normalise(name: str) -> str:
-    """PEP 503 normalisation, so `typing_extensions` and `typing-extensions` match."""
-    return re.sub(r"[-_.]+", "-", name).lower()
+    Uses `packaging` (pinned in both lockfiles) rather than a hand-rolled regex: it
+    is the reference PEP 503 implementation and it understands extras, markers,
+    `===` and direct references. A regex that silently skipped those forms would
+    drop them from the comparison instead of failing it — the package would simply
+    vanish from the containment check.
 
+    Versions are collected as a *set*, not last-wins, so a package pinned twice under
+    different environment markers is visible as a collision rather than silently
+    resolved to whichever line came last.
+    """
+    pins: dict[str, set[str]] = {}
 
-def _parse_pins(path: Path) -> dict[str, str]:
-    pins: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        match = _PIN.match(line)
-        if match:
-            pins[_normalise(match.group("name"))] = match.group("version")
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip().rstrip("\\").strip()
+        if not line or line.startswith(("-", "--")):
+            continue
+        try:
+            requirement = Requirement(line)
+        except InvalidRequirement:
+            continue
+        versions = {
+            spec.version for spec in requirement.specifier if spec.operator in {"==", "==="}
+        }
+        if versions:
+            pins.setdefault(canonicalize_name(requirement.name), set()).update(versions)
+
     return pins
 
 
@@ -62,18 +80,52 @@ def test_runtime_lockfile_is_contained_in_the_dev_lockfile_at_matching_versions(
     # runtime pin that never reached the dev lockfile vanish from the comparison
     # instead of failing it — while Lint and Test run against an environment missing
     # a production dependency.
+    ambiguous = {
+        name: sorted(versions)
+        for pins in (runtime, dev)
+        for name, versions in pins.items()
+        if len(versions) > 1
+    }
+    assert not ambiguous, (
+        "a package is pinned to more than one version within a single lockfile, so "
+        f"any comparison against it would be arbitrary: {ambiguous}"
+    )
+
     missing = sorted(set(runtime) - set(dev))
     assert not missing, (
         "these packages are pinned in requirements.txt but absent from "
         f"requirements-dev.txt, which is compiled from it: {missing}"
     )
 
-    skewed = {name: (runtime[name], dev[name]) for name in runtime if runtime[name] != dev[name]}
+    skewed = {
+        name: (sorted(runtime[name])[0], sorted(dev[name])[0])
+        for name in runtime
+        if runtime[name] != dev[name]
+    }
 
     assert not skewed, (
         "these packages are pinned to different versions in requirements.txt vs "
         f"requirements-dev.txt (runtime, dev): {skewed}"
     )
+
+
+def _gate_commands() -> list[str]:
+    """Every `run:` command in the workflow, with folded scalars already unfolded.
+
+    Parsing the YAML rather than scraping raw text matters: the licence gate is a
+    `run: >-` folded block, so re-wrapping it for readability — which YAML folds back
+    to a byte-identical shell argument — would otherwise capture an embedded newline
+    and indent inside a licence name, failing the build on a cosmetic edit.
+    """
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    )
+    return [
+        step["run"]
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if isinstance(step, dict) and isinstance(step.get("run"), str)
+    ]
 
 
 def _licence_tokens(entries: str | Iterable[str]) -> set[str]:
@@ -99,11 +151,9 @@ def test_ci_licence_allowlist_matches_the_one_the_tests_enforce() -> None:
     test and rejected by CI, so pointing the CI gate at the dev lockfile failed until
     the two were reconciled.
     """
-    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-
-    # findall, not search: a second licence gate added later must be guarded too,
-    # rather than silently drifting behind the first one's green result.
-    allowlists = re.findall(r'--allow-only="([^"]+)"', workflow)
+    # findall over every command: a second licence gate added later must be guarded
+    # too, rather than silently drifting behind the first one's green result.
+    allowlists = [m for cmd in _gate_commands() for m in re.findall(r'--allow-only="([^"]+)"', cmd)]
     assert allowlists, "could not find any --allow-only allowlist in ci.yml"
 
     for ci_allowlist in allowlists:
@@ -168,9 +218,7 @@ def test_ci_licence_denylist_covers_every_copyleft_spelling_pip_licenses_emits()
     did, matching only two long-form spellings while pip-licenses emits short forms
     too (this repo's own `hypothesis` reports `MPL-2.0`).
     """
-    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-
-    denylists = re.findall(r'--fail-on="([^"]+)"', workflow)
+    denylists = [m for cmd in _gate_commands() for m in re.findall(r'--fail-on="([^"]+)"', cmd)]
     assert denylists, "could not find any --fail-on denylist in ci.yml"
 
     for denylist in denylists:
@@ -186,8 +234,16 @@ def test_no_uv_lockfile_is_present() -> None:
     A 142-byte stub declaring the project with zero `[[package]]` entries sat here
     until 2026-08-19. Gitignoring it hid it from `git status` while leaving it on
     disk, so `uv sync` still produced an environment with none of the pinned runtime
-    dependencies. `uvx` is invoked by scripts/lib/helpers.sh, so uv can recreate it at
-    any time — and the ignore rule guarantees nobody would see it happen.
+    dependencies.
+
+    Scope, stated honestly: this is a **local developer guard only**. It cannot fail
+    in CI, because the file is gitignored and a fresh checkout can never contain it.
+    The repo's only uv usage is `uvx --python 3.13 mcp-server-qdrant`
+    (scripts/lib/helpers.sh, scripts/check-phase-gate.sh) and `uvx` is `uv tool run`,
+    which builds an ephemeral isolated environment and never writes a project
+    lockfile — an earlier version of this docstring claimed otherwise and was wrong.
+    The reachable path is a developer running `uv sync` or `uv lock` by hand, which is
+    exactly how the stub arrived, and the ignore rule is what makes it invisible.
     """
     stray = REPO_ROOT / "uv.lock"
 
