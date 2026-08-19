@@ -6,6 +6,25 @@
 permanently invisible to the orchestrator. Records the diagnosis and the options; the
 choice in §5 is **not yet made**.
 
+> **Update 2026-08-17 — this ADR's *invariant* stands; its *mechanism* is resolved elsewhere.**
+> §3's invariant — *ownership is an explicit input, never inferred from cache
+> contents* — is retained unchanged and is the durable contribution here. The
+> mechanism question left open in §5 is answered by
+> **[ADR-0018](0018-standalone-ownership-service.md)**.
+> An intermediate attempt (ADR-0017) was **rejected by adversarial review** and has
+> been removed; its errors are catalogued in ADR-0018 §1. The number 0017 is retired.
+>
+> Two corrections to this document, found by later verification:
+> - The circular enumeration cited as `library_sync.py:89` is at **`:103`**.
+> - §1.3 lists it as the *only* cache-derived enumeration site. There are **four**
+>   (`library_sync.py:103`, `scheduler/jobs.py:305`, `manifest_fetcher.py:115-137`,
+>   and `scheduler/jobs.py:165` which is Epic-only). Fixing one leaves new games
+>   visible but inert — see ADR-0018 §1.
+>
+> The acute symptom was resolved operationally on 2026-08-17 (host cron
+> `--recently-purchased`, plus three orchestrator defects fixed: PRs #279, #281,
+> #283). All 11 games are `up_to_date`.
+
 ---
 
 ## 1. Context — the orchestrator has no Steam ownership source
