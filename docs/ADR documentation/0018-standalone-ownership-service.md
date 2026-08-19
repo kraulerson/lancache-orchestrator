@@ -512,28 +512,80 @@ short-lived access tokens to scoped consumers.
   a `gog:token` twin is mechanical *if* a consumer ever needs GOG download auth. None
   does today; it is not built.
 
-### 5.11 Steam download auth — position, stated plainly (NEW in v2)
+### 5.11 Steam credential custody — position restated (v3, 2026-08-19)
 
-**Recommendation: do not broker, do not move the file — in any currently planned
-phase.** SteamPrefill reads `Config/account.config` as a file next to the binary
-(`core/settings.py:88-93`); its auth is not a bearer token and cannot be served over
-HTTP. The remaining options and why they lose today:
+**Supersedes the v2 text of this section.** Two of its claims were wrong; correcting
+them changed the conclusion.
 
-- **Service hosts SteamPrefill:** relocates a *data-plane* workload — SteamPrefill
-  must download through lancache from the NAS side, which is exactly why the agent
-  runs there (re-architecture ②/④). The ownership service is control-plane. Rejected.
-- **Service owns the file and provisions it to the prefill host:** adds a
-  secret-distribution channel whose entire payoff is custody symmetry. Steam's auth
-  is ~200-day durable and re-auth is attended 2FA on the host regardless — the
-  service cannot reduce that burden, only observe it. Deferred as **Phase C**
-  (encrypted escrow copy + provision-on-change), built only if a named need appears
-  (e.g. NAS rebuild automation).
-- **What the service DOES do for Steam now:** carry Steam ownership (the API-key
-  adapter — trivially unattended) and surface the prefill host's auth health as part
-  of `/v1/health` (the agent already exposes auth status; the service aggregates, it
-  does not custody).
+**Correction 1 (factual).** v2 asserted that Steam's prefill auth *"is not a bearer
+token and cannot be served over HTTP."* That is false. SteamPrefill persists a
+SteamKit2 **refresh-token JWT** in `Config/account.config` (513 bytes) — a string, and
+trivially transmissible. The real obstacles are renewal and custody semantics, below;
+transport was never one of them.
 
----
+**Correction 2 (inventory).** Every prior draft discussed one Steam credential. There
+are **three**, at two privilege levels — verified against the live hosts 2026-08-18:
+
+| # | Location | Kind | Observed | Power |
+| --- | --- | --- | --- | --- |
+| 1 | Game_shelf DB (LXC 1102), `launchers.credentials_json` | Web **API key** + `steamid64` (`steam.js:11-13`) | Does not expire | **Read-only** — `GetOwnedGames` and nothing else |
+| 2 | NAS `lancache-host/SteamPrefill/Config/account.config` | SteamKit2 refresh-token JWT | 513 B, written 2026-04-14; prior copy `account.config.bak` 2025-07-28 | **Full account session** |
+| 3 | NAS volume `depotdownloader-config`, .NET IsolatedStorage (`manifest_fetcher.py:66-71`) | DepotDownloader `-remember-password` session | 392 B, written 2026-07-01 — the PR #213 go-live 2FA | **Full account session** |
+
+Credential #3 appears in no earlier draft of this ADR.
+
+**Renewal is silent and self-healing.** #2's file was replaced exactly once between
+2025-07-28 and 2026-04-14 (~261 days) with no operator action, and has not been
+rewritten in the 126 days since — across roughly 500 logins, extrapolating the
+observed cadence (`app.log` covers ~2 weeks and holds 56 × `Starting login!`, 54
+successful, 2 transient `RateLimitExceeded` that self-recovered within six hours).
+Each run exchanges the stored refresh token for a short-lived access token; the stored
+token itself is renewed only as it nears expiry. **Consequence:** the unattended
+re-auth cadence is roughly eight months, not the "~200 days, then attended 2FA" an
+earlier session's note assumed. That note is superseded.
+
+**Decision (operator, 2026-08-19): the service is sole custodian of all three, and the
+badges stay distinct.**
+
+- **Single custody, not a single credential.** All three live in the service's store.
+  They are *not* merged into one shared token. #2 and #3 carry identical power, so
+  merging saves no privilege and no operator attention, while handing two independent
+  programs one mutable secret to race on — the §5.7 rotation hazard, and precisely the
+  shape of the live Epic defect in §2.4. Distinct badges under one custodian is the
+  same centralization without the coupling.
+- **The API key is never lent.** The service calls `GetOwnedGames` itself and
+  publishes the entitlement record (§5.2); no consumer ever receives #1. This is
+  strictly stronger than brokering it, and it is what §5.12's *"no consumer ever
+  touches credential material"* already requires.
+- **Delivery for #2/#3 is checkout/check-in over the existing agent channel.**
+  SteamPrefill and DepotDownloader are third-party .NET binaries with no
+  credential-provider hook — their only integration surface is a file at a path they
+  choose, so "reference it remotely" is not available. The agent already runs on the
+  NAS with read-write mounts on both stores (`/SteamPrefill` rw,
+  `/depotdownloader-config` rw), so it writes the badge locally immediately before a
+  run and pushes any renewal back afterwards. No new secret channel, no new mount, and
+  authentication is the token that already exists.
+- **Phasing.** This supersedes v2's "Phase C, uncommitted" position on *custody*.
+  Ownership (#1) remains Phase A. Custody of #2/#3 is scheduled after Phase A and
+  ahead of the old Phase C, because the operator requirement is a single vault and the
+  delivery plumbing already exists.
+
+**Considered and held in reserve: replacing each tool's credential path with a network
+mount of the service's store.** Designed in full rather than dismissed — see
+`docs/superpowers/specs/2026-08-19-mapped-credential-mount-fallback-design.md`, which
+is the adopted fallback should checkout/check-in prove unworkable. Not chosen now
+because: renewal replaces the file by rename, which detaches a single-file mount and
+forces a whole-directory mount, dragging the 176 KB `successfullyDownloadedDepots.json`
+(rewritten every run) onto the share; it makes prefill availability depend on the
+service being reachable across the `192.168.1.0/24` ↔ `10.100.23.0/24` boundary that
+today fails host-key verification LXC→NAS; and NFS `AUTH_SYS` would carry a full
+account session in cleartext, a downgrade from the authenticated agent channel. The
+stale-attribute failures recorded during the 2026-07/08 eviction investigation sit on
+that same substrate.
+
+**What the service does not take on.** SteamPrefill remains a *data-plane* workload on
+the NAS (re-arch ②/④); the service does not host it. Re-authentication stays attended
+2FA on the host — a vault can hold and restore a badge, never mint one.
 
 ### 5.12 Management web interface (REQUIRED, Phase A — added by the operator)
 
@@ -606,7 +658,7 @@ the container.
 | Step | What | Value on its own | Reversibility |
 | --- | --- | --- | --- |
 | 0 | ~~Partial-sync fix~~ **DONE, merged** (Game_shelf PRs #24–#26): adapters throw (`epic.js:142-155`, `humble.js:81-88`), unown-ratio guard (`syncEngine.js:142-153`), sync-health classifier + `GET /api/sync/health` | Silent mass un-owning already stopped, in production | n/a (shipped) |
-| 1 | Crypto hardening in place (§5.6: KDF/raw key, AAD, key-id envelope, tested rotation) + remove the plaintext QR endpoint (§5.5) | Closes C7 where the credentials live today; unblocks every later step | Blobs re-encryptable both directions while both paths exist; endpoint removal loses nothing (zero callers) |
+| 1 | Crypto hardening in place (§5.6: KDF/raw key, AAD, key-id envelope, tested rotation) + remove the plaintext QR endpoint (§5.5) | Closes C7 where the credentials live today; unblocks every later step | Blobs re-encryptable both directions while both paths exist; endpoint removal loses nothing once `Setup.jsx` builds the URI from the submitted secret (**one** caller, `frontend/src/pages/Setup.jsx:207` — corrected 2026-08-19; the *zero-caller* claim is true of the TOTP generators per C1, not of the endpoint) |
 | 2 | Cut the epicCatalog coupling inside Game_shelf (C3): catalog *facts* with sync, *presentation* consumer-side (OQ3) | Removes the hardest extraction blocker as a plain refactor, testable in place | Code revert |
 | 3 | **Phase A service:** adapters + attended workflows + file imports (parser-isolated, §5.5) + contract (§5.2–5.4) + health; Game_shelf becomes consumer #1 | The operator's "single docker container / source of truth", live | Game_shelf's own sync engine remains deployable until step 6; flip back by config |
 | 4 | Orchestrator consumer end (§5.9): ingest (reconcile pattern), `owned=0` + `last_sync_at` writers, staleness rejection, the three other enumeration-site fixes. **Runs in parallel with steps 2–3** — ingest is fed interim by a Game_shelf push if the service is not ready | **This is the step that fixes the motivating bug** | Config-flag off per sub-feature; `owned` flips are soft (never deletes cache, ADR-0015/0016); `--recently-purchased` stopgap remains as fallback |
