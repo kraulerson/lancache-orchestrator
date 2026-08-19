@@ -74,3 +74,7 @@ terraform.tfvars.json
 .claude/process-audit.log
 .claude/settings.local.json
 .claude/settings.json.pre-wire-backup
+
+# uv is not this project's lockfile manager — requirements*.txt (pip-compile) are
+# authoritative. A stray uv.lock would be a second, contradictory source of pins.
+uv.lock
