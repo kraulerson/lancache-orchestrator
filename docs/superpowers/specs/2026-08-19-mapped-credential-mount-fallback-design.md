@@ -26,7 +26,7 @@ specific unintended consequences option 1 is exposed to:
 
 | # | Symptom | Why it favours this design |
 | --- | --- | --- |
-| T1 | A renewal is lost because check-in raced a still-running tool | SteamPrefill is known to hang after finishing (`project_lancache_host_gotchas_2026_08_12`), so "the run is over" is not cleanly observable. A mount has no check-in to race. |
+| T1 | A renewal is lost because check-in raced a still-running tool | SteamPrefill is known to hang after finishing (live finding, 2026-08-12 — it broke a naive `flock -n` guard on the host cron), so "the run is over" is not cleanly observable. A mount has no check-in to race. |
 | T2 | Badge divergence between vault and host after an agent crash mid-run | With one file, divergence is structurally impossible. |
 | T3 | Operator objects to the badge resting on the consumer host's disk | Under a mount the badge is never at rest on the NAS — a genuine security advantage of this design (§13). |
 | T4 | Checkout latency or failure becomes a material share of prefill failures | A mount removes two network operations per run and replaces them with demand paging. |
@@ -103,12 +103,17 @@ order to write into it.
 SteamPrefill reads `Config/account.config`. Two properties make a narrow mount
 impossible:
 
-1. **Renewal replaces the file.** The badge was replaced once (2025-07-28 →
-   2026-04-14) with the same path and a new mtime. Safe-write is temp-file-plus-rename;
-   a rename swaps the inode and **detaches a single-file bind mount**, after which the
-   tool writes to a file nothing else can see. A single-file mount is therefore not an
-   option, and neither is a symlink at `Config/account.config` (rename replaces the
-   symlink itself).
+1. **Renewal probably replaces the file — unverified, and load-bearing.** The badge
+   was replaced once (2025-07-28 → 2026-04-14), same path, new mtime, same 513-byte
+   size. Temp-file-plus-rename is the usual safe-write pattern and is consistent with
+   that, but **it was not observed**: an in-place rewrite fits the same evidence. If it
+   *is* a rename, the inode swap **detaches a single-file bind mount** and the tool
+   writes somewhere nothing else can see — so neither a single-file mount nor a symlink
+   at `Config/account.config` survives (rename replaces the symlink itself), and the
+   whole directory must be mounted. **If it turns out to be an in-place rewrite, a
+   single-file mount becomes viable and §5.2's neighbour problem disappears entirely** —
+   which would make this design materially better than it currently looks. Resolve
+   before adopting: **OQ6**.
 2. **`Config/` has hot neighbours.** The same directory holds
    `successfullyDownloadedDepots.json` — **176,498 bytes, rewritten every run** (4×/day)
    — plus `selectedAppsToPrefill.json` and six backup copies.
@@ -179,9 +184,12 @@ fallback only if skipped runs become frequent enough to matter.
 With the fallback disabled there is one file and one writer per badge, and divergence
 cannot occur. The rules below exist only for the fallback path.
 
-- **R1. Newest `iat` wins.** Both copies are JWTs carrying an issued-at claim. On mount
-  recovery, the agent compares `iat` and promotes the newer. This is decidable without
-  guessing, which is why it beats mtime.
+- **R1. Newest `iat` wins — *if* the badge is a JWT.** The badge is understood to be a
+  refresh-token JWT carrying an issued-at claim, in which case the agent compares `iat`
+  on recovery and promotes the newer — decidable without guessing, which is why it
+  beats mtime. **The encoding is unverified (OQ6).** If it is not a JWT, R1 falls back
+  to mtime plus a successful-login probe, which is weaker and must be stated as such
+  rather than silently substituted.
 - **R2. Persist-before-use.** Adopted from §5.7 rule 2, unchanged.
 - **R3. Previous-badge slot.** Retain the immediately-prior badge in the vault, one
   generation. Adopted from §5.7 rule 3. This is what distinguishes "renewed and lost"
@@ -287,6 +295,14 @@ when the time comes to choose it:
   responsibility, or does the LXC host serve it? Serving from the host keeps the
   container as "a single container other systems connect to" (§5.12) but splits the
   service across two deployment units.
+- **OQ6 (blocks §5.2 and R1).** Two unverified facts about the badge, both
+  load-bearing here. (a) **Is renewal a rename or an in-place rewrite?** Determines
+  whether a single-file mount works — an in-place rewrite makes this design
+  substantially simpler and removes the hot-neighbour problem. (b) **Is the badge a
+  JWT?** R1's newest-`iat` rule depends on it. Both are answerable by decoding
+  `Config/account.config`, which the agent sandbox blocks as a live credential — the
+  operator must run it, or an `inotify`/`fanotify` watch on `Config/` during a renewal
+  will answer (a) without reading the file at all.
 
 ## 15. What is NOT decided by this document
 

@@ -525,9 +525,14 @@ them changed the conclusion.
 
 **Correction 1 (factual).** v2 asserted that Steam's prefill auth *"is not a bearer
 token and cannot be served over HTTP."* That is false. SteamPrefill persists a
-SteamKit2 **refresh-token JWT** in `Config/account.config` (513 bytes) — a string, and
-trivially transmissible. The real obstacles are renewal and custody semantics, below;
-transport was never one of them.
+**session artifact** in `Config/account.config` — 513 bytes on disk, understood from
+prior investigation to be a SteamKit2 refresh-token JWT. **This session could not
+confirm the encoding**: reading the file is blocked as a live credential, so the JWT
+specifics are carried forward on the earlier note's authority, not re-verified (see
+OQ6 of the fallback design, which depends on it). The correction stands either way —
+a 513-byte file holding a persisted token is exactly as serveable as any other small
+file. The real obstacles are renewal and custody semantics, below; transport was never
+one of them.
 
 **Correction 2 (inventory).** Every prior draft discussed one Steam credential. There
 are **three**, at two privilege levels — verified against the live hosts 2026-08-18:
@@ -580,14 +585,17 @@ badges stay distinct.**
 mount of the service's store.** Designed in full rather than dismissed — see
 `docs/superpowers/specs/2026-08-19-mapped-credential-mount-fallback-design.md`, which
 is the adopted fallback should checkout/check-in prove unworkable. Not chosen now
-because: renewal replaces the file by rename, which detaches a single-file mount and
-forces a whole-directory mount, dragging the 176 KB `successfullyDownloadedDepots.json`
-(rewritten every run) onto the share; it makes prefill availability depend on the
-service being reachable across the `192.168.1.0/24` ↔ `10.100.23.0/24` boundary that
-today fails host-key verification LXC→NAS; and NFS `AUTH_SYS` would carry a full
-account session in cleartext, a downgrade from the authenticated agent channel. The
-stale-attribute failures recorded during the 2026-07/08 eviction investigation sit on
-that same substrate.
+because: renewal is believed to *replace* the file rather than rewrite it in place,
+which would detach a single-file mount and force a whole-directory mount, dragging the
+176 KB `successfullyDownloadedDepots.json` (rewritten every run) onto the share —
+**an assumption, not a verified fact; see OQ6**; and it makes prefill availability
+depend on the service being reachable across the `192.168.1.0/24` ↔ `10.100.23.0/24`
+boundary, whose *reverse* direction already fails host-key verification LXC→NAS (the
+mount needs NAS→service, which is untested). A full account session would also sit on
+a network filesystem, the same substrate as the stale-attribute failures recorded
+during the 2026-07/08 eviction investigation. **Note what is *not* a reason:** the
+fallback design itself rejects NFS/`AUTH_SYS` and specifies encrypted SMB3, so
+"cleartext on the wire" would be an objection to a design nobody proposed.
 
 **What the service does not take on.** SteamPrefill remains a *data-plane* workload on
 the NAS (re-arch ②/④); the service does not host it. Re-authentication stays attended
