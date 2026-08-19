@@ -34,8 +34,9 @@ prerequisites (partial-sync fix — already merged; credential-store hardening �
 then build the standalone service in phases — **Phase A** ownership + lists + **its own web management UI** (the
 "functions exactly as it does for gameshelf" bar, queryable by any consumer, and
 configurable without depending on any consumer's UI),
-**Phase B** an Epic token broker for download auth, **Phase C** (explicitly
-uncommitted) Steam credential custody — because the restated requirement plus the
+**Phase B** an Epic token broker for download auth, and **Steam badge custody**
+(§5.11 v3 — decided 2026-08-19, superseding the "Phase C, explicitly uncommitted"
+position this paragraph originally recorded) — because the restated requirement plus the
 orchestrator's own verified Epic-credential duplication (§2.4) supply the second
 consumer need v1's trigger gate was waiting for.
 
@@ -71,10 +72,11 @@ stated ("with help when needed" was in his own words) — and that refutation wa
 load-bearing in v1's §4 decision to gate construction. Its §3 "CANNOT #2" declared
 prefill-credential consolidation categorically impossible; that is **false for Epic**
 (§5.10 — the orchestrator's Epic auth is an OAuth refresh chain behind a single choke
-point) and **overstated for Steam** (§5.11 — file-based, so not broker-able, but
-custody options exist). v1 also treated file-import launchers as a limitation rather
-than a deliverable. The v1 §5 engineering survives; everything downstream of the
-misstated question was re-derived in this revision. Register rows C1–C9 cite the
+point) and **overstated for Steam** (§5.11 v3 — the "file-based, therefore not
+broker-able" reasoning was itself wrong; custody is now decided). v1 also treated
+file-import launchers as a limitation rather than a deliverable. The v1 §5
+engineering survives; everything downstream of the misstated question was re-derived
+in this revision. Register rows C1–C9 cite the
 Game_shelf tree as reviewed at rejection time (03cd89f); PRs #24–#26 have since
 drifted line numbers in `epic.js`, `humble.js`, `syncEngine.js`, and
 `routes/sync.js` — live sections cite current refs, updated where drift occurred.
@@ -206,10 +208,12 @@ login. The launcher population, verified per adapter:
    does not eliminate them. (v1 wielded this as an argument against building; v2
    records it as a property, not an objection.)
 2. **Brokering Steam download auth over HTTP.** SteamPrefill authenticates from
-   `Config/account.config` — a *file* read by the binary, not a bearer token
-   (`core/settings.py:88-93`); there is no token to serve. The options are the
-   service owning/distributing that file, or hosting SteamPrefill itself. §5.11
-   recommends **neither, for now**: the file stays on the host that runs SteamPrefill.
+   `Config/account.config` — a file read by the binary (`core/settings.py:88-93`).
+   **That is an integration constraint, not a transport one** (§5.11 v3 corrects this
+   entry's original "there is no token to serve"): the file holds a persisted session
+   artifact and is as serveable as any other small file. The options are the service
+   owning/distributing that file, or hosting SteamPrefill itself. §5.11 v3 adopts the
+   first — single custody, delivered by the agent that already mounts the store.
 3. **The motivating bug, by itself.** §2.2: one of four sites. The orchestrator-side
    consumer work is topology-independent and proceeds in parallel (§6 step 4).
 4. **Better data.** Same upstream APIs, same failure classes. The partial-sync
@@ -287,7 +291,9 @@ Concretely:
 6. **Build Phase B** — the Epic token broker (§5.10) — after step 2's crypto exists
    and Phase A is stable; the orchestrator swaps its `_access_token` internals to the
    broker and retires `epic_session.json`.
-7. **Phase C (Steam custody, §5.11) stays uncommitted** until a named need appears.
+7. **Steam badge custody (§5.11 v3) is decided** — single custodian, distinct
+   badges, agent-delivered — and scheduled after Phase A. Only the *escrow to a third
+   location* variant of the old Phase C remains uncommitted.
 
 ---
 
@@ -664,7 +670,7 @@ the container.
 | 4 | Orchestrator consumer end (§5.9): ingest (reconcile pattern), `owned=0` + `last_sync_at` writers, staleness rejection, the three other enumeration-site fixes. **Runs in parallel with steps 2–3** — ingest is fed interim by a Game_shelf push if the service is not ready | **This is the step that fixes the motivating bug** | Config-flag off per sub-feature; `owned` flips are soft (never deletes cache, ADR-0015/0016); `--recently-purchased` stopgap remains as fallback |
 | 5 | **Phase B broker** (§5.10): service performs ONE fresh Epic auth-code grant; orchestrator `_access_token` swaps to broker; delete `epic_session.json`; retire Game_shelf's epic credential blob | §2.4 duplication retired; one custodian, one re-auth | Orchestrator seam swaps back to file mode + one attended re-auth (the routine flow) |
 | 6 | Credential handover for remaining launchers, **per launcher, last**: API keys (steam/xbox/itchio) copy trivially; OAuth launchers (gog) get a **fresh grant into the service** rather than a blob export; cookie/token launchers re-paste; files re-import | Single credential custodian; Game_shelf sheds its store | API keys trivially; others = one attended re-auth each, which is their routine flow anyway |
-| 7 | *(Phase C — uncommitted)* Steam `account.config` escrow (§5.11) | Custody symmetry only | Not planned; requires its own justification |
+| 7 | **Steam badge custody (§5.11 v3)** — the service becomes custodian of SteamPrefill's and DepotDownloader's badges; the agent checks one out before a run and checks any renewal back in | Single vault: one place holding every credential, one expiry board, one re-auth surface | Restore the local files from the vault and disable checkout by config — no re-auth required |
 
 **Why fresh grants, not blob export (steps 5–6):** Epic/GOG refresh tokens rotate on
 use, so an encrypted blob copied at time T is dead the moment the old deployment
@@ -709,9 +715,11 @@ hybrid stays open.
 
 ### D. Build everything at once (Phase A+B+C, big-bang)
 
-Rejected. Phase B must not precede the §5.6 crypto (Security > Speed), and Phase C
-has no named need. Big-bang also couples the motivating-bug fix (step 4) to the
-service's construction schedule for no benefit.
+Rejected. Phase B must not precede the §5.6 crypto (Security > Speed). Steam badge
+custody now *does* have a named need (§5.11 v3 — the operator's single-vault
+requirement), but it still follows Phase A rather than running beside it, because it
+depends on the service's store existing. Big-bang also couples the motivating-bug fix
+(step 4) to the service's construction schedule for no benefit.
 
 ### E. Game_shelf hosts the whole requirement — no third deployable
 
@@ -740,10 +748,12 @@ building Phase A out of momentum.
 - Phase B makes the orchestrator's Epic prefill depend on the service's availability
   (fail-loud, retryable; OQ1). In exchange, the §2.4 duplication is retired: one Epic
   custodian, one re-auth paste restoring both consumers.
-- Steam download auth deliberately stays on the prefill host (§5.11); the service
-  observes its health but does not custody it. Anyone reading this ADR expecting
-  "one login for everything" should re-read the operator's requirement — he
-  explicitly did not ask for that.
+- Steam download auth **is custodied by the service** (§5.11 v3, decided
+  2026-08-19). SteamPrefill keeps *running* on the prefill host, but its badge — and
+  DepotDownloader's — live in the vault and are checked out per run. An earlier
+  revision of this line asserted the operator "explicitly did not ask for one login
+  for everything"; he subsequently asked for exactly that consolidation, and §5.11 v3
+  is the answer: one custodian, distinct badges.
 - Game_shelf ultimately sheds sync + credential custody (steps 3/6) and keeps
   UI/enrichment/identity — resolving v1's standing concern that it hosted a
   responsibility it "never asked to own".
