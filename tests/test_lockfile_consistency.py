@@ -14,6 +14,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 from tests.test_licenses import ALLOWED_LICENSES
 
@@ -52,10 +56,18 @@ def test_shared_packages_pin_the_same_version_in_both_lockfiles() -> None:
     assert runtime, "parsed no pins from requirements.txt — the parser is broken"
     assert dev, "parsed no pins from requirements-dev.txt — the parser is broken"
 
-    shared = sorted(set(runtime) & set(dev))
-    assert shared, "expected overlapping packages between the two lockfiles"
+    # requirements-dev.in starts with `-r requirements.in`, so every runtime package
+    # must appear in the dev lockfile. Comparing only the intersection would let a
+    # runtime pin that never reached the dev lockfile vanish from the comparison
+    # instead of failing it — while Lint and Test run against an environment missing
+    # a production dependency.
+    missing = sorted(set(runtime) - set(dev))
+    assert not missing, (
+        "these packages are pinned in requirements.txt but absent from "
+        f"requirements-dev.txt, which is compiled from it: {missing}"
+    )
 
-    skewed = {name: (runtime[name], dev[name]) for name in shared if runtime[name] != dev[name]}
+    skewed = {name: (runtime[name], dev[name]) for name in runtime if runtime[name] != dev[name]}
 
     assert not skewed, (
         "these packages are pinned to different versions in requirements.txt vs "
@@ -63,7 +75,7 @@ def test_shared_packages_pin_the_same_version_in_both_lockfiles() -> None:
     )
 
 
-def _licence_tokens(entries: object) -> set[str]:
+def _licence_tokens(entries: str | Iterable[str]) -> set[str]:
     """Split on ';' the way pip-licenses does, so both sides compare identically.
 
     The CI gate passes one ';'-delimited string to `--allow-only`, which pip-licenses
@@ -71,10 +83,9 @@ def _licence_tokens(entries: object) -> set[str]:
     ("Apache Software License; MIT License") that the CI form splits apart, so the
     two are only comparable after normalising both the same way.
     """
-    if isinstance(entries, str):
-        entries = [entries]
+    items = [entries] if isinstance(entries, str) else list(entries)
     tokens: set[str] = set()
-    for entry in entries:  # type: ignore[union-attr]
+    for entry in items:
         tokens.update(part.strip() for part in entry.split(";") if part.strip())
     return tokens
 
@@ -92,11 +103,27 @@ def test_ci_licence_allowlist_matches_the_one_the_tests_enforce() -> None:
     match = re.search(r'--allow-only="(?P<licences>[^"]+)"', workflow)
     assert match, "could not find the --allow-only allowlist in ci.yml"
 
-    ci_tokens = _licence_tokens(match.group("licences"))
+    ci_allowlist = match.group("licences")
+    ci_tokens = _licence_tokens(ci_allowlist)
     test_tokens = _licence_tokens(ALLOWED_LICENSES)
 
     assert ci_tokens == test_tokens, (
         "licence allowlists have drifted — "
         f"only in ci.yml: {sorted(ci_tokens - test_tokens)}; "
         f"only in tests/test_licenses.py: {sorted(test_tokens - ci_tokens)}"
+    )
+
+    # Token equality alone cannot see a compound entry disappearing from
+    # ALLOWED_LICENSES: "Apache Software License; MIT License" splits into two halves
+    # that are already separate members, so both sides stay equal while
+    # tests/test_licenses.py — which matches the whole CSV column verbatim — starts
+    # failing on sniffio and uvloop. Counting segments catches it, because the CI
+    # string still encodes one more segment than the set accounts for.
+    expected_segments = sum(entry.count(";") + 1 for entry in ALLOWED_LICENSES)
+    actual_segments = len([p for p in ci_allowlist.split(";") if p.strip()])
+
+    assert actual_segments == expected_segments, (
+        f"ci.yml encodes {actual_segments} allowlist segments but "
+        f"tests/test_licenses.py accounts for {expected_segments} — an entry "
+        "containing ';' was added to or removed from only one of them"
     )
