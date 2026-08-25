@@ -24,6 +24,44 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+# Same shape validate.py writes. method stays 'disk_stat' because that is the
+# observation being recorded — the state of the chunk files on disk.
+_INSERT_VH = (
+    "INSERT INTO validation_history "
+    "(game_id, manifest_version, started_at, finished_at, method, "
+    " chunks_total, chunks_cached, chunks_missing, outcome, error) "
+    "VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'disk_stat', ?, 0, ?, 'missing', NULL)"
+)
+
+
+async def _record_cache_emptied(pool: Pool, game_id: int) -> None:
+    """Append an observation that nothing is cached any more (#293).
+
+    ``chunks_cached`` is not stored on ``games`` — the API reads it from the newest
+    ``validation_history`` row. Purge used to delete the files and record nothing, so
+    the newest observation stayed the pre-purge one and every consumer kept reporting
+    a fully cached game with no files behind it. Game_shelf's cache badge is driven by
+    exactly those fields, so a purged game displayed "Cached 337/337".
+
+    History is append-only: the previous row was true when it was written, so this
+    adds a new observation rather than editing the old one.
+
+    ``chunks_total`` is carried from the last validation because purge does not
+    re-read the manifest. With no prior validation there is no known total, and
+    inventing one would be its own false report — so nothing is written and the
+    re-prefill flag alone carries the state.
+    """
+    previous = await pool.read_one(
+        "SELECT manifest_version, chunks_total FROM validation_history "
+        "WHERE game_id = ? ORDER BY id DESC LIMIT 1",
+        (game_id,),
+    )
+    if previous is None:
+        return
+
+    total = int(previous["chunks_total"])
+    await pool.execute_write(_INSERT_VH, (game_id, previous["manifest_version"], total, total))
+
 
 async def _purge_epic_game(
     agent: AgentClient, pool: Pool, game_id: int, app_id: str
@@ -99,6 +137,8 @@ async def purge_handler(job: dict[str, Any], deps: Deps) -> None:
         "UPDATE games SET status='validation_failed' WHERE id=? AND status != 'validation_failed'",
         (game_id,),
     )
+
+    await _record_cache_emptied(deps.pool, game_id)
     _log.info(
         "game.purged",
         job_id=job_id,
