@@ -249,6 +249,28 @@ class Settings(BaseSettings):
     # still writing reports it as a false partial.
     scheduled_prefill_enabled: bool = True
     scheduled_prefill_cron: str = "45 3,9,15,21 * * *"
+
+    # Uptime Kuma push heartbeats. Kuma marks a monitor DOWN when no heartbeat
+    # arrives within its interval, which is how a job that silently stops running
+    # gets noticed — nothing else here detects absence.
+    #
+    # Each URL is a SECRET (it is the whole credential), so these live only in the
+    # environment as ORCH_KUMA_PUSH_*. Leaving one unset disables that heartbeat,
+    # which is the documented way to turn a monitor off.
+    kuma_push_library_sync: str | None = None
+    kuma_push_sweep: str | None = None
+    kuma_push_scheduled_prefill: str | None = None
+    kuma_push_fetch_manifests: str | None = None
+
+    # Above this share of apps failing, the fetch_manifests heartbeat goes DOWN
+    # (#294). It does NOT fail the job: a partially-failing run is still a run that
+    # happened, and conflating the two makes 'failed' useless as a signal.
+    #
+    # 0.75 is a starting point chosen to sit above the current steady state
+    # (698/1174 ≈ 0.59 on 2026-08-25) so the monitor is not born red, while still
+    # catching a genuine collapse. Tune it once the numbers have been visible for a
+    # while — that is the whole point of putting them on the monitor.
+    fetch_manifests_max_failure_ratio: float = Field(default=0.75, ge=0.0, le=1.0)
     # #225: after a game is prefilled, auto-exclude classifier-flagged non-games
     # (soundtracks/tools/servers/demos) from FUTURE prefill. Runs on the same
     # interval as the scheduled prefill; download-once-then-block.

@@ -16,19 +16,70 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from orchestrator.clients import heartbeat
 from orchestrator.core.logging import new_correlation_id
+from orchestrator.core.settings import Settings, get_settings
 from orchestrator.db.pool import PoolError
 from orchestrator.jobs.handlers import HANDLERS
 
 if TYPE_CHECKING:
     from orchestrator.clients.agent_client import AgentClient
     from orchestrator.db.pool import Pool
+    from orchestrator.jobs.summary import JobSummary
     from orchestrator.platform.epic.client import EpicClient
     from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
 
 _log = structlog.get_logger(__name__)
 
 JOB_ERROR_TRUNCATE = 200
+
+
+def monitor_url_for(kind: str, source: str, settings: Settings) -> str | None:
+    """The Uptime Kuma push URL for a finished job, or None for no heartbeat.
+
+    Keyed on kind AND source because **scheduled prefill is not its own job kind**:
+    it is ``kind='prefill'`` with ``source='scheduler'``, and a prefill triggered by
+    hand from the CLI or Game_shelf is the same kind. Heartbeating every prefill
+    would push the monitor up whenever someone clicked something, reporting a dead
+    scheduler as healthy — worse than having no monitor at all.
+
+    The other three kinds only ever run on the schedule, so source is not consulted
+    for them.
+    """
+    if kind == "prefill":
+        return settings.kuma_push_scheduled_prefill if source == "scheduler" else None
+    return {
+        "library_sync": settings.kuma_push_library_sync,
+        "sweep": settings.kuma_push_sweep,
+        "fetch_manifests": settings.kuma_push_fetch_manifests,
+    }.get(kind)
+
+
+async def _emit_heartbeat(
+    row: dict[str, Any], *, ok: bool, error: str = "", summary: JobSummary | None = None
+) -> None:
+    """Tell Kuma how a job ended. Never raises, never blocks the outcome.
+
+    heartbeat.push already swallows its own failures; this second guard covers a
+    fault in the lookup itself (a settings load that throws, say). A job's recorded
+    outcome must never depend on whether we managed to report it.
+    """
+    try:
+        url = monitor_url_for(str(row.get("kind", "")), str(row.get("source", "")), get_settings())
+        if url is None:
+            return
+
+        # A handler that reported its own verdict overrides "it did not throw".
+        # fetch_manifests uses this to say 669 of 1170 apps failed on a run that
+        # legitimately succeeded (#294).
+        if summary is not None:
+            status, msg = ("up" if summary.ok else "down"), summary.msg
+        else:
+            status, msg = ("up" if ok else "down"), (error if error else "ok")
+
+        await heartbeat.push(url, status=status, msg=msg)
+    except Exception as exc:
+        _log.warning("jobs.heartbeat_failed", error=str(exc)[:JOB_ERROR_TRUNCATE])
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,8 +112,12 @@ async def claim_next_job(pool: Pool) -> dict[str, Any] | None:
             "WHERE id=? AND state='queued'",
             (row["id"],),
         )
+        # `source` is selected for the heartbeat lookup: scheduled prefill is
+        # kind='prefill' with source='scheduler', indistinguishable from a manual
+        # one without it.
         return await tx.read_one(
-            "SELECT id, kind, game_id, platform, state, started_at, payload FROM jobs WHERE id=?",
+            "SELECT id, kind, game_id, platform, state, started_at, payload, source "
+            "FROM jobs WHERE id=?",
             (row["id"],),
         )
 
@@ -161,9 +216,11 @@ async def worker_loop(
             _log.info("jobs.handler.started", kind=kind, job_id=job_id)
             try:
                 if job_max_runtime_sec > 0:
-                    await asyncio.wait_for(handler(row, deps), timeout=job_max_runtime_sec)
+                    summary = await asyncio.wait_for(
+                        handler(row, deps), timeout=job_max_runtime_sec
+                    )
                 else:
-                    await handler(row, deps)
+                    summary = await handler(row, deps)
             except Exception as e:
                 # A TimeoutError under an active budget means wait_for cancelled a
                 # wedged handler — label it distinctly. (TimeoutError is an
@@ -202,6 +259,7 @@ async def worker_loop(
                     kind_error=type(e).__name__,
                     elapsed_ms=int((time.monotonic() - t0) * 1000),
                 )
+                await _emit_heartbeat(row, ok=False, error=err)
                 continue
 
             try:
@@ -219,5 +277,6 @@ async def worker_loop(
                 job_id=job_id,
                 elapsed_ms=int((time.monotonic() - t0) * 1000),
             )
+            await _emit_heartbeat(row, ok=True, summary=summary)
 
     _log.info("jobs.worker.stopped")
