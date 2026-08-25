@@ -292,7 +292,9 @@ async def _validate_epic_game(
     for the RPC; cdn_base is required (NULL means a pre-migration row — re-prefill
     heals it by writing cdn_base at prefill time)."""
     manifest = await pool.read_one(
-        "SELECT version, cdn_base, raw FROM manifests "
+        # chunk_count scales the agent's read budget (#297): game 15035 is 359,671
+        # chunks and was cut off by the old flat 300s on every sweep for 52 days.
+        "SELECT version, cdn_base, raw, chunk_count FROM manifests "
         "WHERE game_id=? ORDER BY fetched_at DESC LIMIT 1",
         (game_id,),
     )
@@ -308,11 +310,13 @@ async def _validate_epic_game(
         app_id_int = int(app_id_str)
     except (TypeError, ValueError):
         app_id_int = 0
+    raw_count = manifest["chunk_count"]
     res = await agent.epic_validate(
         app_id=app_id_int,
         version=str(manifest["version"]),
         cdn_base=str(manifest["cdn_base"]),
         raw_manifest_b64=base64.b64encode(manifest["raw"]).decode("ascii"),
+        chunk_count=int(raw_count) if raw_count is not None else None,
     )
     return _shape(res)
 

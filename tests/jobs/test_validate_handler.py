@@ -156,7 +156,13 @@ class _StubEpicAgent:
         self.calls: list[int] = []
 
     async def epic_validate(
-        self, *, app_id: int, version: str, cdn_base: str, raw_manifest_b64: str
+        self,
+        *,
+        app_id: int,
+        version: str,
+        cdn_base: str,
+        raw_manifest_b64: str,
+        chunk_count: int | None = None,
     ) -> dict:
         self.calls.append(app_id)
         return self._response
