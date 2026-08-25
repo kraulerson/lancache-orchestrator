@@ -326,11 +326,17 @@ class SteamValidateRequest(BaseModel):
 
 
 def _classify(total: int, cached: int) -> str:
-    # total == 0 here means the located manifests contained no chunks —
-    # nothing to cache, so the app is up to date ('cached'). The genuinely
-    # no-manifest case returns 'error' before reaching classification.
+    # total == 0 is "I could not tell", NOT "nothing to cache" (#292). A zero-byte
+    # .bin, a truncated one, and an empty .shas all arrive here looking identical to
+    # a genuinely empty app — and this used to answer 'cached', which validate.py
+    # maps to up_to_date. A game went green on the strength of a zero-byte file, and
+    # the 6-hourly sweep re-confirmed it forever.
+    #
+    # 'error' is both the honest answer and the safe one: validate.py's _STATUS_FOR
+    # has no entry for it, so an unreadable manifest leaves games.status untouched
+    # rather than flipping it green or falsely failing a healthy game.
     if total == 0:
-        return "cached"
+        return "error"
     if cached == total:
         return "cached"
     if cached == 0:
@@ -497,17 +503,17 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
         )
 
     if included == 0:
-        # No depot has any cached chunks. If there were chunks to cache at all
-        # the app is genuinely not cached ('missing'); if the manifests held no
-        # chunks there's nothing to cache ('cached', matching _classify).
+        # No depot has any cached chunks. If there were chunks to cache at all the
+        # app is genuinely not cached ('missing'); if the manifests held none we
+        # could not read them, which is 'error' rather than a green (#292).
         union_total = sum(len(p) for p in depot_paths.values())
         return {
             "chunks_total": union_total,
             "chunks_cached": 0,
             "chunks_missing": union_total,
-            "outcome": "missing" if union_total else "cached",
+            "outcome": "missing" if union_total else "error",
             "versions": ",".join(sorted(versions)),
-            "error": None,
+            "error": None if union_total else "manifests yielded no chunks",
         }
 
     return {

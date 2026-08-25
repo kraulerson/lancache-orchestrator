@@ -11,6 +11,8 @@ tests/agent/test_import_isolation.py)."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 import shutil
 import time
 from typing import TYPE_CHECKING
@@ -45,18 +47,32 @@ def sync_manifests_to_archive(
             reason=f"{type(e).__name__}: {e}"[:200],
         )
         return 0
-    existing = {p.name for p in archive_v1.glob("*.bin")}
+    # A ZERO-BYTE entry counts as absent, not as already-archived (#292). The old
+    # copy wrote straight to the final name, so an interrupted one left a truncated
+    # file that was then skipped by name forever — and an empty manifest validates
+    # as a false green, which the 6-hourly sweep re-confirmed indefinitely. Treating
+    # it as missing lets an install that already suffered that heal itself.
+    existing = {p.name for p in archive_v1.glob("*.bin") if p.stat().st_size > 0}
     now = time.time()
     copied = 0
     for src in live_v1.glob("*.bin"):
         if src.name in existing:
             continue
+        tmp = archive_v1 / f".{src.name}.partial"
         try:
             if now - src.stat().st_mtime < settle_seconds:
                 continue
-            shutil.copy2(src, archive_v1 / src.name)
+            # Copy to a temp name in the SAME directory, then rename. os.replace is
+            # atomic within a filesystem, so the final name only ever refers to a
+            # complete file — no reader can observe a half-written manifest, and a
+            # crash mid-copy leaves the archive untouched rather than poisoned.
+            shutil.copy2(src, tmp)
+            os.replace(tmp, archive_v1 / src.name)
             copied += 1
         except OSError as e:
+            # Remove the stub so the next sync is free to retry.
+            with contextlib.suppress(OSError):
+                tmp.unlink()
             _log.warning(
                 "manifest_archive.copy_failed",
                 bin=src.name,
