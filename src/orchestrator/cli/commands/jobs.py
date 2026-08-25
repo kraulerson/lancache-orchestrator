@@ -7,10 +7,26 @@ import click
 from orchestrator.cli import output
 from orchestrator.cli.base import handles_api_errors, make_client
 
-# Closed sets (jobs table CHECK + migration 0002). Surfaced via click.Choice so a
-# typo'd filter is rejected up front rather than returning a silent empty table
+# Closed sets mirroring the jobs table CHECK constraint. Surfaced via click.Choice so
+# a typo'd filter is rejected up front rather than returning a silent empty table
 # (UAT-11 S11-E-04).
-_KINDS = ["prefill", "validate", "library_sync", "manifest_fetch", "sweep", "auth_refresh"]
+#
+# This list was pinned to migration 0002 and never moved when 0009 added
+# 'fetch_manifests' and 0014 added 'purge', so `jobs --kind purge` was rejected and a
+# purge could not be audited from the CLI at all — half of F18's audit criterion
+# (#296). tests/api/test_job_kinds_in_sync.py derives the expected set from the
+# migrated schema, so the next kind added to a migration fails there loudly instead
+# of silently going missing here.
+_KINDS = [
+    "prefill",
+    "validate",
+    "library_sync",
+    "manifest_fetch",
+    "fetch_manifests",
+    "sweep",
+    "auth_refresh",
+    "purge",
+]
 _STATES = ["queued", "running", "succeeded", "failed", "cancelled"]
 
 
