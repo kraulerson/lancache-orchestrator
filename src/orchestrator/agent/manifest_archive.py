@@ -86,27 +86,38 @@ def sync_manifests_to_archive(
             # complete file — no reader can observe a half-written manifest, and a
             # crash mid-copy leaves the archive untouched rather than poisoned.
             src_stat = src.stat()
-            shutil.copy2(src, tmp)
 
-            # Two mtimes to satisfy, and they pull in opposite directions.
+            # Two mtimes to satisfy, pulling in opposite directions.
             #
-            # IN FLIGHT the temp must look NEW. copy2 runs copystat, so it inherits
-            # the source's mtime — and a manifest only becomes eligible to copy once
-            # it is older than the settle window, so the temp is born looking stale.
-            # A concurrent sweep would see an orphan and unlink it mid-rename.
+            # IN FLIGHT the temp must look NEW, or the orphan sweep above unlinks it
+            # mid-copy. copyfile — NOT copy2 — because copystat is copy2's last act,
+            # so copy2 hands back a temp already carrying the source's mtime, and a
+            # manifest is only eligible to copy once it is older than the settle
+            # window. Stamping it fresh afterwards merely moves the exposure into the
+            # gap before the stamp; copyfile leaves the temp's mtime as its own write
+            # time, fresh from the first byte and refreshed by every write during a
+            # slow NFS copy.
             #
             # ARCHIVED it must keep the SOURCE's mtime. manifest_locator picks the
-            # manifest to validate against with max(..., key=st_mtime) — newest
-            # wins — so re-stamping the archive would change which version validate
-            # compares against, which is the false-Partial bug class (UAT-13 F2).
-            #
-            # So: stamp the temp to now, rename, then restore the source's mtime on
-            # the archived file.
-            os.utime(tmp)
+            # manifest to validate against with max(..., key=st_mtime) — newest wins
+            # — so an archived file stamped "now" would outrank its siblings and
+            # change which version validate compares against: the false-Partial bug
+            # class (UAT-13 F2).
+            shutil.copyfile(src, tmp)
             dest = archive_v1 / src.name
             os.replace(tmp, dest)
-            with contextlib.suppress(OSError):
+            try:
                 os.utime(dest, (src_stat.st_atime, src_stat.st_mtime))
+            except OSError as e:
+                # NOT suppressed. If this fails the archived manifest keeps the fresh
+                # mtime permanently and outranks every sibling for selection until a
+                # newer one lands — silently. The file's contents are correct, so
+                # this is a warning rather than a failure, but it must be visible.
+                _log.warning(
+                    "manifest_archive.mtime_restore_failed",
+                    bin=src.name,
+                    reason=f"{type(e).__name__}: {e}"[:200],
+                )
             copied += 1
         except OSError as e:
             # Remove the stub so the next sync is free to retry.
