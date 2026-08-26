@@ -512,11 +512,20 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
         #     error". #292 reversed it by accident; left as 'error' the app
         #     re-validates every 6h forever, and one at 'downloading' becomes
         #     'failed', which the sweep excludes — a dead end.
-        #   - nothing parsed at all -> we could not read it ('error'), never a green
+        #   - anything else -> we could not read it ('error'), never a green
+        #
+        # The discriminator is `versions`, NOT parsed_ok. parse_chunk_shas and
+        # parse_shas NEVER raise — their docstring says a malformed buffer "yields an
+        # empty set" — so parsed_ok counts any readable, well-named file whatever its
+        # contents. Keying on it alone called a zero-byte manifest 'cached', which is
+        # #292's false green returning through this branch, on the platform where it
+        # actually occurred live. The redist skip `continue`s BEFORE versions.append,
+        # while a depot that parsed to nothing still appends — so all-redist is
+        # exactly "parsed something, appended no versions".
         union_total = sum(len(p) for p in depot_paths.values())
         if union_total:
             outcome, err = "missing", None
-        elif parsed_ok:
+        elif parsed_ok and not versions:
             outcome, err = "cached", None
         else:
             outcome, err = "error", "manifests yielded no chunks"

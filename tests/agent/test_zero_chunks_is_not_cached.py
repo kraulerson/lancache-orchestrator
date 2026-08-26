@@ -27,6 +27,19 @@ from orchestrator.agent.routers.steam import _classify as steam_classify
 
 
 class TestZeroChunksIsNotCached:
+    """HONEST SCOPE for the steam case: since the all-redist fix, steam_validate's
+    final return only runs when included > 0, and `included` is incremented only
+    after `total += len(dpaths)` on a non-empty depot — so total >= 1 there and
+    `steam_classify(0, ·)` is UNREACHABLE from the endpoint. This pins the function's
+    contract, not the live path.
+
+    The endpoint-level guard is
+    tests/agent/test_steam_validate.py::test_validate_empty_manifest_is_error_at_the_endpoint,
+    which caught a regression this file could not: keying the all-redist branch on
+    `parsed_ok` made a zero-byte manifest report 'cached' again, because the parsers
+    never raise. The epic case below IS on the live path.
+    """
+
     def test_steam_zero_total_is_an_error_not_cached(self) -> None:
         assert steam_classify(0, 0) == "error", (
             "zero chunks means the manifest could not be read, which is indistinguishable "

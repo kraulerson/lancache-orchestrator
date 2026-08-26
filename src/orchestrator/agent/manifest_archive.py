@@ -55,6 +55,17 @@ def sync_manifests_to_archive(
     # it as missing lets an install that already suffered that heal itself.
     existing = {p.name for p in archive_v1.glob("*.bin") if p.stat().st_size > 0}
     now = time.time()
+
+    # Sweep orphaned temp files. Unique names fix the collision below but introduce
+    # litter: one abandoned by a SIGKILL mid-copy is never touched again, where the
+    # old fixed name at least self-overwrote on retry. Only OLD ones go — a recent
+    # .partial may belong to a copy running right now, and removing it would
+    # reintroduce the very race the unique names prevent.
+    for orphan in archive_v1.glob("*.partial"):
+        with contextlib.suppress(OSError):
+            if now - orphan.stat().st_mtime > max(settle_seconds, 60.0):
+                orphan.unlink()
+
     copied = 0
     for src in live_v1.glob("*.bin"):
         if src.name in existing:

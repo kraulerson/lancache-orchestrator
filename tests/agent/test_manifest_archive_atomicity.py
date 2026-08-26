@@ -155,3 +155,36 @@ def test_concurrent_syncs_do_not_share_a_temp_name(tmp_path: Path) -> None:
         "truncate the first one's file and the rename would publish a partial "
         "manifest under the final name."
     )
+
+
+def test_a_stale_partial_from_a_killed_process_is_swept_up(tmp_path: Path) -> None:
+    """Unique temp names fix the collision but introduce litter.
+
+    The old fixed name at least self-overwrote on the next attempt. A unique one
+    orphaned by SIGKILL mid-copy is never touched again, so the archive accumulates
+    them indefinitely — on a store this loop stats every cycle.
+
+    Only OLD ones are swept: a .partial younger than the settle window may belong to
+    a copy running right now, and deleting it would break the very race the unique
+    names exist to prevent.
+    """
+    live, archive = tmp_path / "live", tmp_path / "archive"
+    _live_manifest(live, "app.bin", b"content")
+    archive_v1 = archive / "v1"
+    archive_v1.mkdir(parents=True)
+
+    stale = archive_v1 / ".old.bin.999.deadbeef.partial"
+    stale.write_bytes(b"orphaned by a kill")
+    old = time.time() - 7200
+    os.utime(stale, (old, old))
+
+    fresh = archive_v1 / ".other.bin.1000.cafebabe.partial"
+    fresh.write_bytes(b"a copy in flight right now")
+
+    sync_manifests_to_archive(live, archive)
+
+    assert not stale.exists(), "an hours-old orphan must be swept up"
+    assert fresh.exists(), (
+        "a just-created .partial may belong to a concurrent copy — deleting it would "
+        "reintroduce the truncation race the unique names exist to prevent"
+    )
