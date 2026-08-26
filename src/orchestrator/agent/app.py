@@ -12,10 +12,15 @@ import structlog
 from fastapi import FastAPI
 
 from orchestrator.agent.background import track_background_task
+from orchestrator.agent.constants import AGENT_BODY_SIZE_CAP_BYTES
 from orchestrator.agent.jobs import AgentJobStore
 from orchestrator.agent.manifest_archive import manifest_archive_sync_loop
 from orchestrator.agent.routers import epic, health, manual_downloads, pull, stat, steam
-from orchestrator.api.middleware import BearerAuthMiddleware, SourceAllowlistMiddleware
+from orchestrator.api.middleware import (
+    BearerAuthMiddleware,
+    BodySizeCapMiddleware,
+    SourceAllowlistMiddleware,
+)
 from orchestrator.core.net import detect_non_loopback_bind
 from orchestrator.core.settings import Settings, get_settings
 from orchestrator.platform.steam.manifest_fetcher import DepotDownloaderManifestFetcher
@@ -154,5 +159,11 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
     # against the source-IP allowlist, then the bearer token. The allowlist is a
     # pure no-op when ORCH_ALLOWED_SOURCE_IPS is empty (loopback-only deploy).
     app.add_middleware(BearerAuthMiddleware, exempt_paths=_AGENT_EXEMPT_PATHS)
+    # The agent had NO body cap at all (#298) — a 238 MB POST to /v1/stat returned
+    # 200 after 88 seconds and moved its RSS from 63 MB to 698 MB permanently, on
+    # the CPU-constrained NAS beside lancache. The cap is far looser than the API's
+    # 32 KiB because /v1/epic/validate legitimately carries an ~88 MB manifest; see
+    # agent/constants.py.
+    app.add_middleware(BodySizeCapMiddleware, cap=AGENT_BODY_SIZE_CAP_BYTES)
     app.add_middleware(SourceAllowlistMiddleware)
     return app
