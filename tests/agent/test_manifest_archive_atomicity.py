@@ -22,13 +22,12 @@ so an install that already suffered the bug heals itself on the next sync.
 from __future__ import annotations
 
 import os
+import shutil
 import time
-from typing import TYPE_CHECKING
+from pathlib import Path
+from unittest import mock
 
 from orchestrator.agent.manifest_archive import sync_manifests_to_archive
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _live_manifest(live: Path, name: str, content: bytes, *, age_seconds: float = 60.0) -> Path:
@@ -118,4 +117,41 @@ def test_a_failed_copy_leaves_nothing_behind(tmp_path: Path) -> None:
     assert copied == 0
     assert list((archive / "v1").iterdir()) == [], (
         "a failed copy must not leave a stub — the next sync has to be free to retry"
+    )
+
+
+def test_concurrent_syncs_do_not_share_a_temp_name(tmp_path: Path) -> None:
+    """Two callers copying the same manifest must not truncate each other's temp file.
+
+    There genuinely are two: the 1800s background loop, and _capture_prefill_manifests
+    calling this synchronously with settle_seconds=0 right after a prefill. With one
+    fixed temp name per manifest they interleave — A finishes copying to tmp, B
+    reopens and truncates the SAME tmp, A renames B's half-written file into place.
+    A reader then sees a truncated manifest under the final name, which the atomicity
+    comment claims is impossible, and if the process dies mid-way the final file is
+    truncated with size > 0 — which the zero-byte heal does NOT catch.
+
+    Asserted structurally: the temp name must vary between calls. Racing two real
+    threads would make this flaky and prove less.
+    """
+    live, archive = tmp_path / "live", tmp_path / "archive"
+    _live_manifest(live, "app.bin", b"content")
+
+    seen: list[str] = []
+    real_copy = shutil.copy2
+
+    def spy(src, dst, *a, **kw):
+        seen.append(Path(dst).name)
+        return real_copy(src, dst, *a, **kw)
+
+    with mock.patch.object(shutil, "copy2", spy):
+        sync_manifests_to_archive(live, archive)
+        (archive / "v1" / "app.bin").unlink()  # force a second copy of the same name
+        sync_manifests_to_archive(live, archive)
+
+    assert len(seen) == 2, f"expected two copies, saw {seen}"
+    assert seen[0] != seen[1], (
+        f"both copies used the temp name {seen[0]!r}. A concurrent caller would "
+        "truncate the first one's file and the rename would publish a partial "
+        "manifest under the final name."
     )

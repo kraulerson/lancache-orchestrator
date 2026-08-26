@@ -37,18 +37,24 @@ JOB_ERROR_TRUNCATE = 200
 def monitor_url_for(kind: str, source: str, settings: Settings) -> str | None:
     """The Uptime Kuma push URL for a finished job, or None for no heartbeat.
 
-    Keyed on kind AND source because **scheduled prefill is not its own job kind**:
-    it is ``kind='prefill'`` with ``source='scheduler'``, and a prefill triggered by
-    hand from the CLI or Game_shelf is the same kind. Heartbeating every prefill
-    would push the monitor up whenever someone clicked something, reporting a dead
-    scheduler as healthy — worse than having no monitor at all.
+    These monitors answer one question: **is the schedule still running?** Kuma
+    detects that by absence — no heartbeat inside the interval means DOWN. So only a
+    run the SCHEDULER started may push, whatever its kind.
 
-    The other three kinds only ever run on the schedule, so source is not consulted
-    for them.
+    Every monitored kind can also be triggered by hand: prefill from the CLI or
+    Game_shelf, sweep from ``POST /api/v1/sweep`` (which is Game_shelf's full-sweep
+    button), library_sync from the epic ``/sync`` endpoint, fetch_manifests from its
+    own trigger — all with ``source='api'`` or similar. An earlier version gated only
+    prefill, on the claim that the other three "only ever run on the schedule". That
+    was false and unchecked, and it mattered most on the sweep monitor: if APScheduler
+    wedges and someone then clicks full-sweep, the monitor goes green and its
+    countdown resets, hiding the dead scheduler for as long as manual activity
+    continues — the precise failure the gate exists to prevent.
     """
-    if kind == "prefill":
-        return settings.kuma_push_scheduled_prefill if source == "scheduler" else None
+    if source != "scheduler":
+        return None
     return {
+        "prefill": settings.kuma_push_scheduled_prefill,
         "library_sync": settings.kuma_push_library_sync,
         "sweep": settings.kuma_push_sweep,
         "fetch_manifests": settings.kuma_push_fetch_manifests,

@@ -14,7 +14,7 @@ from orchestrator.cli.base import handles_api_errors, make_client
 # This list was pinned to migration 0002 and never moved when 0009 added
 # 'fetch_manifests' and 0014 added 'purge', so `jobs --kind purge` was rejected and a
 # purge could not be audited from the CLI at all — half of F18's audit criterion
-# (#296). tests/api/test_job_kinds_in_sync.py derives the expected set from the
+# (#296). tests/db/test_job_kinds_in_sync.py derives the expected set from the
 # migrated schema, so the next kind added to a migration fails there loudly instead
 # of silently going missing here.
 _KINDS = [

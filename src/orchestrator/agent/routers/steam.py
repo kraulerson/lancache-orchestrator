@@ -503,17 +503,30 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
         )
 
     if included == 0:
-        # No depot has any cached chunks. If there were chunks to cache at all the
-        # app is genuinely not cached ('missing'); if the manifests held none we
-        # could not read them, which is 'error' rather than a green (#292).
+        # No depot has any cached chunks. Three distinct cases, and conflating them
+        # is what #292 was about:
+        #   - chunks existed to cache  -> genuinely not cached ('missing')
+        #   - manifests parsed but every depot was excluded as shared redist -> the
+        #     app has no data of its own to validate ('cached'). The redist branch
+        #     above says exactly this: "an all-redist enumeration isn't a false
+        #     error". #292 reversed it by accident; left as 'error' the app
+        #     re-validates every 6h forever, and one at 'downloading' becomes
+        #     'failed', which the sweep excludes — a dead end.
+        #   - nothing parsed at all -> we could not read it ('error'), never a green
         union_total = sum(len(p) for p in depot_paths.values())
+        if union_total:
+            outcome, err = "missing", None
+        elif parsed_ok:
+            outcome, err = "cached", None
+        else:
+            outcome, err = "error", "manifests yielded no chunks"
         return {
             "chunks_total": union_total,
             "chunks_cached": 0,
             "chunks_missing": union_total,
-            "outcome": "missing" if union_total else "error",
+            "outcome": outcome,
             "versions": ",".join(sorted(versions)),
-            "error": None if union_total else "manifests yielded no chunks",
+            "error": err,
         }
 
     return {

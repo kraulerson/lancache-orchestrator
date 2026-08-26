@@ -1377,3 +1377,52 @@ still 403 a remote allowlisted host.
 ---
 
 <!-- Copy the section above for each new feature. Number sequentially. -->
+
+---
+
+## Feature 24: Scheduled-Job Heartbeats (Uptime Kuma push)
+
+**Phase Built:** 2 (UAT-14 remediation)
+**Status:** Complete (2026-08-26)
+
+**Summary:** Pushes an Uptime Kuma heartbeat when a scheduled job finishes, so a job
+that **silently stops running** is detected by absence — the one failure mode nothing
+else here catches, since every other signal reports on work that happened. Kuma marks
+a monitor DOWN when no heartbeat arrives inside its interval. Wire format is
+`GET <url>?status=up|down&msg=<text>`; the message carries the failure text on `down`,
+truncated to 200 characters keeping the **tail**, because the specific failure in an
+error is at the end.
+
+Emitted from the jobs worker at the point a job's outcome is decided rather than from
+individual handlers, so one site covers every kind and a kind added later needs only a
+setting. **Only a run the scheduler started may push** — every monitored kind can also
+be triggered by hand (prefill from the CLI or Game_shelf, sweep from Game_shelf's
+full-sweep button, library_sync from the epic `/sync` endpoint, fetch_manifests from
+its own trigger), and heartbeating a manual run would let clicking a button mask a
+wedged scheduler.
+
+A handler may optionally return a `JobSummary` to override "it did not throw";
+`fetch_manifests` uses this to report its per-app tally and to push DOWN above a
+failure-ratio threshold **without** changing `jobs.state` (#294).
+
+**Key Interfaces:**
+  - `src/orchestrator/clients/heartbeat.py` — `push()`; never raises
+  - `src/orchestrator/jobs/worker.py` — `monitor_url_for()`, `_emit_heartbeat()`
+  - `src/orchestrator/jobs/summary.py` — `JobSummary`
+  - Env: `ORCH_KUMA_PUSH_LIBRARY_SYNC`, `_SWEEP`, `_SCHEDULED_PREFILL`,
+    `_FETCH_MANIFESTS` (secrets — the URL is the whole credential; unset disables that
+    heartbeat), `ORCH_FETCH_MANIFESTS_MAX_FAILURE_RATIO` (default 0.75)
+
+**Test Coverage:** 28 in `tests/jobs/test_worker_heartbeats.py` (monitor selection as a
+pure function, including every kind × every manual source; wiring for up, down-with-error,
+silence on a manual trigger, and a push that raises leaving the job succeeded), 8 in
+`tests/clients/test_heartbeat.py` (driven through `httpx.MockTransport`, asserting the
+real outgoing request), 12 in `tests/jobs/test_fetch_manifests_summary.py`.
+
+**Known Limitations:**
+  - Monitoring is fire-and-forget: a push rejected by Kuma (e.g. a paused monitor,
+    which returns HTTP 404) is not distinguished from success. Deliberate — the
+    monitor going DOWN for want of a heartbeat is the correct signal either way.
+  - The `fetch_manifests` threshold default of 0.75 was chosen to sit above the
+    observed steady state (0.59 on 2026-08-25) rather than from a target, and should
+    be tuned once the numbers have been visible for a while.

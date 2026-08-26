@@ -68,6 +68,31 @@ class TestSummariseTally:
         assert ok is True
         assert msg
 
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            {"apps": "n/a"},
+            {"apps": [1, 2]},
+            {"apps": 10, "failed": None},
+            {"apps": {"count": 3}},
+            {"failed": "many", "apps": 10},
+        ],
+        ids=["str_apps", "list_apps", "none_failed", "dict_apps", "str_failed"],
+    )
+    def test_a_malformed_tally_reads_as_healthy_rather_than_raising(self, malformed) -> None:
+        """The docstring promises this and the code did not deliver it.
+
+        int("n/a") raises ValueError and int([1,2]) raises TypeError, and either
+        propagates out of the handler — so the worker marks the JOB failed and
+        pushes the heartbeat DOWN. That manufactures precisely the false alarm the
+        contract forswears, from nothing worse than a version skew between the LXC
+        and the NAS changing a field's type.
+        """
+        ok, msg = summarise_tally(malformed, 0.75)
+
+        assert ok is True, "an unparseable tally is not evidence of failure"
+        assert msg, "it must still report something"
+
 
 @pytest.mark.asyncio
 class TestHandlerReturnsTheSummary:

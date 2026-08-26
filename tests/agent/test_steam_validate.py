@@ -372,6 +372,31 @@ def test_validate_excludes_shared_redist_depot(tmp_path):
     assert "228990" not in body["versions"]  # redist depot excluded from versions
 
 
+def test_validate_all_redist_app_is_cached_not_error(tmp_path):
+    """An app whose ONLY depots are shared redist validates as cached, not error.
+
+    #292 made a zero-chunk result report 'error', which is right when the manifests
+    could not be read. It is wrong here: these manifests parsed perfectly, and every
+    depot was then deliberately excluded as shared Steamworks redistributables. The
+    guard at steam.py's redist branch already says so — "the manifest still parsed
+    (parsed_ok counts it) so an all-redist enumeration isn't a false error" — and
+    #292 silently reversed it.
+
+    Left as 'error' the app is re-validated every 6h forever and never resolves, and
+    one caught at status 'downloading' becomes 'failed', which the sweep excludes
+    from its candidate set — a dead end needing manual SQL.
+    """
+    client = _build_multidepot(tmp_path, depot_cached={228990: (8, 4)})
+    body = client.post("/v1/steam/validate", json={"app_id": MD_APP}).json()
+
+    assert body["outcome"] == "cached", (
+        "manifests that parsed and were then excluded as shared redist are not an "
+        f"unreadable manifest. Got {body['outcome']!r} / {body.get('error')!r}"
+    )
+    assert body["chunks_total"] == 0
+    assert body["error"] is None
+
+
 def test_validate_mode000_depot_counted_cached(tmp_path):
     """A depot whose chunk files EXIST on disk but are mode-000 validates as
     CACHED: mode-000 is a transient nginx-over-NFS write-race that self-heals to

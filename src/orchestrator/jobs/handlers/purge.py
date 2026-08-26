@@ -34,7 +34,7 @@ _INSERT_VH = (
 )
 
 
-async def _record_cache_emptied(pool: Pool, game_id: int) -> None:
+async def _record_cache_emptied(pool: Pool, game_id: int, tx: Any = None) -> None:
     """Append an observation that nothing is cached any more (#293).
 
     ``chunks_cached`` is not stored on ``games`` — the API reads it from the newest
@@ -51,7 +51,8 @@ async def _record_cache_emptied(pool: Pool, game_id: int) -> None:
     inventing one would be its own false report — so nothing is written and the
     re-prefill flag alone carries the state.
     """
-    previous = await pool.read_one(
+    reader = tx if tx is not None else pool
+    previous = await reader.read_one(
         "SELECT manifest_version, chunks_total FROM validation_history "
         "WHERE game_id = ? ORDER BY id DESC LIMIT 1",
         (game_id,),
@@ -60,7 +61,11 @@ async def _record_cache_emptied(pool: Pool, game_id: int) -> None:
         return
 
     total = int(previous["chunks_total"])
-    await pool.execute_write(_INSERT_VH, (game_id, previous["manifest_version"], total, total))
+    params = (game_id, previous["manifest_version"], total, total)
+    if tx is not None:
+        await tx.execute(_INSERT_VH, params)
+    else:
+        await pool.execute_write(_INSERT_VH, params)
 
 
 async def _purge_epic_game(
@@ -133,12 +138,17 @@ async def purge_handler(job: dict[str, Any], deps: Deps) -> None:
     # Reversibility invariant: purge sets validation_failed so F5/F6 re-prefills a
     # fresh copy. Conditional to avoid churn when the game was already flagged (a
     # {deleted:0} idempotent re-purge still lands here harmlessly).
-    await deps.pool.execute_write(
-        "UPDATE games SET status='validation_failed' WHERE id=? AND status != 'validation_failed'",
-        (game_id,),
-    )
-
-    await _record_cache_emptied(deps.pool, game_id)
+    # ONE transaction. These were two separate writes, so a crash or PoolError
+    # between them left the files deleted, the status flagged, and the newest
+    # validation_history row still claiming a full cache — the exact badge #293
+    # fixes, resurrected until the next sweep. Either both land or neither does.
+    async with deps.pool.write_transaction() as tx:
+        await tx.execute(
+            "UPDATE games SET status='validation_failed' "
+            "WHERE id=? AND status != 'validation_failed'",
+            (game_id,),
+        )
+        await _record_cache_emptied(deps.pool, game_id, tx)
     _log.info(
         "game.purged",
         job_id=job_id,

@@ -15,6 +15,7 @@ import contextlib
 import os
 import shutil
 import time
+import uuid
 from typing import TYPE_CHECKING
 
 import structlog
@@ -58,7 +59,14 @@ def sync_manifests_to_archive(
     for src in live_v1.glob("*.bin"):
         if src.name in existing:
             continue
-        tmp = archive_v1 / f".{src.name}.partial"
+        # A UNIQUE temp name per attempt. A fixed one is not enough: this function
+        # has two concurrent callers — the background sync loop, and
+        # _capture_prefill_manifests running it synchronously with settle_seconds=0
+        # after a prefill. Sharing a temp name lets one truncate the other's file
+        # mid-copy, and the rename then publishes a partial manifest under the final
+        # name. That also defeats the zero-byte heal below, because the wreckage is
+        # truncated-but-nonzero.
+        tmp = archive_v1 / f".{src.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.partial"
         try:
             if now - src.stat().st_mtime < settle_seconds:
                 continue

@@ -35,10 +35,22 @@ def summarise_tally(tally: dict[str, Any], max_failure_ratio: float) -> tuple[bo
     ours to guarantee, and inventing a failure from an unexpected payload would be
     its own false alarm.
     """
-    apps = int(tally.get("apps") or 0)
-    failed = int(tally.get("failed") or 0)
-    fetched = int(tally.get("fetched") or 0)
-    skipped = int(tally.get("skipped") or 0)
+
+    def _count(key: str) -> int:
+        # Coerce defensively. int("n/a") raises ValueError and int([1,2]) raises
+        # TypeError, and either would propagate out of the handler — the worker would
+        # mark the JOB failed and push the heartbeat DOWN, manufacturing exactly the
+        # false alarm this function's contract forswears, from nothing worse than a
+        # version skew changing a field's type.
+        try:
+            return int(tally.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    apps = _count("apps")
+    failed = _count("failed")
+    fetched = _count("fetched")
+    skipped = _count("skipped")
 
     msg = f"apps={apps} fetched={fetched} skipped={skipped} failed={failed}"
 

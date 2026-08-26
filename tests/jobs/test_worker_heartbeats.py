@@ -25,6 +25,7 @@ from orchestrator.jobs.worker import Deps, monitor_url_for, worker_loop
 SWEEP_URL = "http://kuma.example/api/push/sweep"
 PREFILL_URL = "http://kuma.example/api/push/prefill"
 LIBSYNC_URL = "http://kuma.example/api/push/libsync"
+FETCH_URL = "http://kuma.example/api/push/fetch"
 
 
 def _settings(**overrides) -> Settings:
@@ -33,6 +34,7 @@ def _settings(**overrides) -> Settings:
         "kuma_push_sweep": SWEEP_URL,
         "kuma_push_scheduled_prefill": PREFILL_URL,
         "kuma_push_library_sync": LIBSYNC_URL,
+        "kuma_push_fetch_manifests": FETCH_URL,
     }
     base.update(overrides)
     return Settings(**base)
@@ -56,6 +58,32 @@ class TestMonitorSelection:
             "a prefill you triggered yourself says nothing about whether the SCHEDULE "
             "is running; pushing up here would report a dead scheduler as healthy"
         )
+
+    @pytest.mark.parametrize("kind", ["sweep", "library_sync", "fetch_manifests", "prefill"])
+    @pytest.mark.parametrize("source", ["cli", "gameshelf", "api"])
+    def test_no_kind_heartbeats_on_a_manual_trigger(self, kind: str, source: str) -> None:
+        """The rule is about SOURCE, and it applies to every monitored kind.
+
+        The first version of this gated only prefill, on a docstring claiming "the
+        other three kinds only ever run on the schedule". That is false and was never
+        checked: POST /api/v1/sweep (wired to Game_shelf's full-sweep button), the
+        epic /sync endpoint and the fetch-manifests trigger all enqueue with
+        source='api'.
+
+        The consequence is the exact failure the prefill gate exists to prevent, on
+        the monitor that matters most: APScheduler wedges, someone clicks full-sweep,
+        the sweep monitor goes green and its countdown resets, and a dead scheduler
+        stays hidden for as long as manual activity continues.
+        """
+        assert monitor_url_for(kind, source, _settings()) is None, (
+            f"a hand-triggered {kind} says nothing about whether the SCHEDULE ran; "
+            "pushing up here lets manual activity mask a dead scheduler"
+        )
+
+    @pytest.mark.parametrize("kind", ["sweep", "library_sync", "fetch_manifests", "prefill"])
+    def test_every_monitored_kind_still_heartbeats_on_the_schedule(self, kind: str) -> None:
+        """The other half: gating on source must not disable the heartbeats."""
+        assert monitor_url_for(kind, "scheduler", _settings()) is not None
 
     def test_a_kind_with_no_monitor_configured_gets_none(self) -> None:
         assert monitor_url_for("validate", "scheduler", _settings()) is None

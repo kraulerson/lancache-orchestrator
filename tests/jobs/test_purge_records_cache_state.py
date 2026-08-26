@@ -159,3 +159,41 @@ async def test_purge_with_no_prior_validation_records_nothing(pool):
 
     g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
     assert g["status"] == "validation_failed", "the re-prefill flag is set regardless"
+
+
+async def test_the_status_and_the_observation_land_together(pool):
+    """Flagging for re-prefill and recording the empty cache are one atomic write.
+
+    They were two separate execute_write calls. A crash or PoolError between them
+    left the files deleted, status='validation_failed', and the newest
+    validation_history row still reading 337/337 cached — exactly the badge #293
+    exists to fix, resurrected for up to 6h until the sweep revalidates.
+
+    Asserted by failing the second write and requiring the first to roll back with
+    it: under one transaction neither lands, so the job fails visibly with the store
+    self-consistent, rather than half-applied.
+    """
+    game_id = await _seed_game(pool, app_id="440")
+    await _seed_validation(pool, game_id, total=337, cached=337)
+
+    agent = _StubPurgeAgent(steam={"deleted": 337, "failed": 0, "bytes_freed": 999})
+
+    import orchestrator.jobs.handlers.purge as purge_mod
+
+    original = purge_mod._record_cache_emptied
+
+    async def boom(pool_arg, gid, tx=None):
+        raise RuntimeError("write failed between the two statements")
+
+    purge_mod._record_cache_emptied = boom
+    try:
+        with pytest.raises(RuntimeError):
+            await purge_handler(_job(game_id), Deps(pool=pool, agent_client=agent))
+    finally:
+        purge_mod._record_cache_emptied = original
+
+    g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
+    assert g["status"] == "up_to_date", (
+        "the status flip must roll back with the failed observation — otherwise the "
+        "game reads validation_failed while the newest row still claims 337/337"
+    )
