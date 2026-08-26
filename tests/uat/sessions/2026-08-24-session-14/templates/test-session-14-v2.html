@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>UAT Session 14 — Orchestrator</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0f0f17; color: #cdd6f4; line-height: 1.5; padding: 24px; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin-bottom: 4px; }
+  .meta { color: #a6adc8; font-size: 0.9rem; margin-bottom: 24px; }
+  .progress-bar { background: #1e1e2e; border-radius: 8px; height: 8px; margin-bottom: 24px; overflow: hidden; }
+  .progress-fill { background: #a6e3a1; height: 100%; width: 0%; transition: width 0.3s; }
+  .progress-text { text-align: center; color: #a6adc8; font-size: 0.85rem; margin-bottom: 24px; }
+  h2 { font-size: 1.2rem; color: #89b4fa; margin: 32px 0 16px; padding-bottom: 8px; border-bottom: 1px solid #313244; }
+  .fixture-ref { background: #11111b; border: 1px solid #313244; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 0.85rem; color: #a6adc8; }
+  .fixture-ref strong { color: #cdd6f4; }
+  .fixture-ref code { background: #313244; padding: 2px 6px; border-radius: 3px; color: #f9e2af; }
+  .scenario { background: #1e1e2e; border-radius: 8px; margin-bottom: 12px; overflow: hidden; border-left: 4px solid #45475a; transition: border-color 0.2s; }
+  .scenario.pass { border-left-color: #a6e3a1; }
+  .scenario.fail { border-left-color: #f38ba8; }
+  .scenario-header { padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+  .scenario-num { background: #313244; color: #a6adc8; font-size: 0.8rem; font-weight: 600; padding: 2px 8px; border-radius: 4px; min-width: 28px; text-align: center; }
+  .scenario-title { flex: 1; font-weight: 500; }
+  .btn-group { display: flex; gap: 4px; }
+  .btn { padding: 6px 14px; border: 1px solid #45475a; border-radius: 4px; background: transparent; color: #cdd6f4; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
+  .btn:hover { background: #313244; }
+  .btn.pass-btn.active { background: #a6e3a1; color: #1e1e2e; border-color: #a6e3a1; font-weight: 600; }
+  .btn.fail-btn.active { background: #f38ba8; color: #1e1e2e; border-color: #f38ba8; font-weight: 600; }
+  .btn.skip-btn.active { background: #f9e2af; color: #1e1e2e; border-color: #f9e2af; font-weight: 600; }
+  .scenario-details { padding: 0 16px 8px 16px; display: none; }
+  .scenario-details.open { display: block; }
+  .steps { background: #11111b; padding: 10px 14px; border-radius: 4px; font-size: 0.85rem; color: #a6adc8; margin-bottom: 8px; }
+  .steps strong { color: #cdd6f4; }
+  .scenario-notes { padding: 4px 16px 12px 16px; }
+  .notes-input { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; resize: vertical; min-height: 36px; }
+  .notes-input:focus { outline: none; border-color: #89b4fa; }
+  .toggle-details { background: none; border: none; color: #6c7086; cursor: pointer; font-size: 0.75rem; padding: 4px 8px; }
+  .toggle-details:hover { color: #89b4fa; }
+  .bugs-section { margin-top: 40px; }
+  .bug-entry { background: #1e1e2e; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #f38ba8; }
+  .bug-row { display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .bug-field { flex: 1; min-width: 200px; }
+  .bug-field label { display: block; color: #a6adc8; font-size: 0.8rem; margin-bottom: 4px; }
+  .bug-field input, .bug-field select, .bug-field textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; }
+  .bug-field textarea { resize: vertical; min-height: 60px; }
+  .bug-field input:focus, .bug-field select:focus, .bug-field textarea:focus { outline: none; border-color: #89b4fa; }
+  .bug-field select { appearance: auto; }
+  .add-bug-btn { background: #313244; border: 1px dashed #45475a; color: #a6adc8; padding: 10px; border-radius: 8px; width: 100%; cursor: pointer; font-size: 0.85rem; margin-bottom: 12px; }
+  .add-bug-btn:hover { border-color: #f38ba8; color: #f38ba8; }
+  .remove-bug { background: none; border: none; color: #f38ba8; cursor: pointer; font-size: 0.8rem; float: right; }
+  .overall-notes { margin-top: 32px; }
+  .overall-notes textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 12px; border-radius: 8px; font-size: 0.9rem; font-family: inherit; resize: vertical; min-height: 100px; }
+  .overall-notes textarea:focus { outline: none; border-color: #89b4fa; }
+  .export-section { margin-top: 32px; text-align: center; padding: 24px; }
+  .export-btn { background: #89b4fa; color: #1e1e2e; border: none; padding: 12px 32px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; }
+  .export-btn:hover { background: #74c7ec; }
+  .export-btn:active { transform: scale(0.98); }
+  .copy-msg { color: #a6e3a1; margin-top: 8px; font-size: 0.85rem; display: none; }
+</style>
+</head>
+<body>
+
+
+<h1>UAT Session 14 — Orchestrator</h1>
+
+
+<div class="meta">Date: 2026-08-24 | Features: epic-prefill-status-based, f18-cache-purge | Tester: <input id="tester-name" type="text" placeholder="Your name" style="background:#1e1e2e;border:1px solid #45475a;color:#cdd6f4;padding:4px 8px;border-radius:4px;font-size:0.85rem;width:140px;"></div>
+
+<div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+<div class="progress-text" id="progress-text">0 / 0 completed</div>
+
+
+<h2>Feature 1: epic-prefill-status-based (PR #241)</h2>
+<div class="fixture-ref"><strong>What it was specified to do</strong> (CHANGELOG 2026-07-04): the Epic-scoped <code>enqueue_scheduled_prefill</code> selects owned Epic games where <code>status &lt;&gt; 'up_to_date'</code>, bounding it to the genuinely-uncached ones. A prefill's validate flips a game to <code>up_to_date</code> and drops it from the set; the sweep re-validates so eviction re-triggers it; new purchases at <code>unknown</code> are still picked up. Its stated purpose is to unblock the Epic cutover — <code>ORCH_SCHEDULED_PREFILL_ENABLED=true</code> plus retiring the host EpicPrefill cron.</div>
+<div id="feature1"></div>
+
+<h2>Feature 2: f18-cache-purge (ADR-0015 + issue #37)</h2>
+<div class="fixture-ref"><strong>What it was specified to do</strong> — the plan's spec-coverage checklist: API endpoint · CLI · UI · enumerate&rarr;unlink&rarr;<code>validation_failed</code> · audit <code>purge</code> job + migration · idempotency · block-list untouched · <code>game.purged</code> observability · lancache safety · path safety. Declared non-goals: per-game only, no cache-wide purge, no chunk-level purge.</div>
+<div id="feature2"></div>
+
+
+<div class="bugs-section">
+  <h2>Bugs Found</h2>
+  <div id="bugs-list"></div>
+  <button class="add-bug-btn" onclick="addBug()">+ Add Bug</button>
+</div>
+
+<div class="overall-notes">
+  <h2>Overall Notes</h2>
+  <textarea id="overall-notes" placeholder="Free-form observations, UX concerns, suggestions, things that felt wrong even if they technically worked..."></textarea>
+</div>
+
+<div class="export-section">
+  <button class="export-btn" onclick="exportResults()">Copy Results to Clipboard</button>
+  <div class="copy-msg" id="copy-msg">Copied! Paste into terminal or save to submissions folder.</div>
+</div>
+
+<script>
+const scenarios = [
+  {
+    "id": 1,
+    "feature": 1,
+    "title": "Is the feature actually switched on?",
+    "steps": "You are at a terminal on your Mac. The orchestrator runs in Docker on LXC 1105 (10.100.23.105); every command below SSHes there, so nothing needs installing locally.\n1. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli config show\" | grep -i scheduled_prefill\n2. Read the value of scheduled_prefill_enabled.",
+    "expected": "One line containing scheduled_prefill_enabled. PASS if it reads true. FAIL if it reads false \u2014 the feature was built to unblock the Epic cutover, so false means it has never run in the mode it was specified for, and scenarios 2-4 are describing code that is not executing. Record the value either way; it decides how the rest of this feature is triaged."
+  },
+  {
+    "id": 2,
+    "feature": 1,
+    "title": "The Epic selection set is bounded by validation status",
+    "steps": "You are at a terminal on your Mac. The orchestrator runs in Docker on LXC 1105 (10.100.23.105); every command below SSHes there, so nothing needs installing locally.\n1. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game list --platform epic --status up_to_date --limit 500\" | tail -1\n2. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game list --platform epic --limit 500\" | tail -1\n3. Note the \"showing X of Y\" total on each line.",
+    "expected": "Both lines end with a 'showing X of Y' footer giving a total. PASS if the up_to_date total is a large majority of the all-Epic total, leaving only a small remainder uncached \u2014 that remainder is the set this feature prefills. FAIL if the two totals are equal or the up_to_date total is a minority, which would mean the status filter is not bounding the set as specified."
+  },
+  {
+    "id": 3,
+    "feature": 1,
+    "title": "A newly purchased Epic game is still picked up",
+    "steps": "You are at a terminal on your Mac. The orchestrator runs in Docker on LXC 1105 (10.100.23.105); every command below SSHes there, so nothing needs installing locally.\n1. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game list --platform epic --status unknown --limit 50\"\n2. Count the rows. Zero rows is a valid and expected result today.",
+    "expected": "Either a table of Epic games at status unknown, or an empty result. PASS in both cases \u2014 this records the current population. FAIL only if the command errors or returns a non-empty set whose titles you do not recognise as recent purchases. Note the count in your notes; the specification says games at unknown are still enqueued, so a non-empty set here should shrink after a prefill run."
+  },
+  {
+    "id": 4,
+    "feature": 1,
+    "title": "Eviction re-triggers a prefill rather than being ignored",
+    "steps": "You are at a terminal on your Mac. The orchestrator runs in Docker on LXC 1105 (10.100.23.105); every command below SSHes there, so nothing needs installing locally.\n1. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game list --platform epic --status validation_failed --limit 50\"\n2. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game list --platform epic --status not_downloaded --limit 50\" | tail -1",
+    "expected": "Two results. PASS if any games listed at validation_failed are ones you would expect to be re-downloaded, and the not_downloaded footer total is plausible for Epic titles you do not own or have never installed. FAIL if you see a game at not_downloaded that you know you own and have downloaded, because the specification routes eviction back through prefill rather than stranding it."
+  },
+  {
+    "id": 5,
+    "feature": 2,
+    "title": "The purge surface exists on both API and CLI",
+    "steps": "You are at a terminal on your Mac. The orchestrator runs in Docker on LXC 1105 (10.100.23.105); every command below SSHes there, so nothing needs installing locally.\n1. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game purge --help\"\n2. Run: ssh root@10.100.23.105 \"curl -s -o /dev/null -w '%{http_code}\\n' -X GET http://127.0.0.1:8765/api/v1/games/2451/purge\"",
+    "expected": "Step 1 prints usage text containing the word Reversible and takes a GAME_ID argument. Step 2 prints 405. PASS on exactly that pair \u2014 405 proves the route exists and is POST-only. FAIL if step 2 prints 404, which would mean the API endpoint named in the acceptance criteria is not deployed."
+  },
+  {
+    "id": 6,
+    "feature": 2,
+    "title": "Purge enumerates, unlinks, and flags for re-prefill",
+    "steps": "You are at a terminal on your Mac. The orchestrator runs in Docker on LXC 1105 (10.100.23.105); every command below SSHes there, so nothing needs installing locally.\n1. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game show 2451\" and write down the status and the chunk figures.\n2. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game purge 2451\"\n3. Wait 30 seconds.\n4. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game show 2451\" again.\nCLEANUP \u2014 this scenario deletes cached data on purpose, so restore it now:\n5. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game prefill 2451\"\n6. Wait until it finishes (a few minutes for this game).\n7. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game validate 2451\"\n8. Wait 60 seconds.\n9. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game show 2451\" and compare against what you wrote down in step 1.",
+    "expected": "Step 2 accepts the command without error. Step 4 shows the game no longer at UP_TO_DATE. Step 9 shows it back at UP_TO_DATE with the SAME chunk figures you recorded in step 1. PASS only if the figures match. FAIL if step 9 shows UP_TO_DATE with zero or missing chunk figures \u2014 that is a game reported as cached with nothing behind it, and it is the most serious defect this session can find."
+  },
+  {
+    "id": 7,
+    "feature": 2,
+    "title": "Purging an already-purged game is a harmless no-op",
+    "steps": "You are at a terminal on your Mac. The orchestrator runs in Docker on LXC 1105 (10.100.23.105); every command below SSHes there, so nothing needs installing locally.\n1. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game show 15460\" and note the status.\n2. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game purge 15460\"\n3. Wait 20 seconds.\n4. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game purge 15460\" a second time.\nCLEANUP:\n5. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game prefill 15460\"\n6. Wait for it to finish, then run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game validate 15460\"",
+    "expected": "Step 4 returns without an error and without a traceback, exactly as step 2 did. PASS if the second purge is accepted quietly. FAIL if it errors, hangs, or reports a failure \u2014 the acceptance criteria list idempotency explicitly, so a second purge must be a no-op rather than a fault."
+  },
+  {
+    "id": 8,
+    "feature": 2,
+    "title": "The purge is recorded in the audit trail",
+    "steps": "You are at a terminal on your Mac. The orchestrator runs in Docker on LXC 1105 (10.100.23.105); every command below SSHes there, so nothing needs installing locally.\n1. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli jobs --limit 20\"\n2. Look for the purge you ran in the previous scenarios.\n3. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli jobs --kind purge --limit 20\"",
+    "expected": "Step 1 lists recent jobs including your purge with kind 'purge'. Step 3 is EXPECTED TO FAIL today with: Invalid value for '--kind': 'purge' is not one of 'prefill', 'validate', ... . PASS the scenario if step 1 shows the purge and mark step 3's rejection in your notes. FAIL if step 1 does not show it at all, which would mean purges are not auditable from the operator tooling."
+  },
+  {
+    "id": 9,
+    "feature": 2,
+    "title": "Purge leaves the block list alone",
+    "steps": "You are at a terminal on your Mac. The orchestrator runs in Docker on LXC 1105 (10.100.23.105); every command below SSHes there, so nothing needs installing locally.\n1. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game show 2451\" and note whether it is blocked.\n2. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game purge 2451\"\n3. Wait 20 seconds.\n4. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game show 2451\" and compare the blocked field.\nCLEANUP:\n5. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game prefill 2451\"\n6. Wait for it to finish, then run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game validate 2451\"",
+    "expected": "The blocked field reads the same in step 4 as it did in step 1. PASS only on an exact match. FAIL if purging changed it in either direction \u2014 the acceptance criteria state that purge never touches the block list, because blocking and cache-eviction are separate operator decisions."
+  },
+  {
+    "id": 10,
+    "feature": 2,
+    "title": "No cache-wide or chunk-level purge exists",
+    "steps": "You are at a terminal on your Mac. The orchestrator runs in Docker on LXC 1105 (10.100.23.105); every command below SSHes there, so nothing needs installing locally.\n1. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli cache --help\"\n2. Run: ssh root@10.100.23.105 \"docker exec orchestrator orchestrator-cli game --help\"\n3. Read both command lists looking for anything that purges more than one game.",
+    "expected": "Neither list offers a purge that takes no game argument, a platform-wide purge, or a chunk-level purge. PASS if the only purge available is the per-game one you used above. FAIL if you find any broader delete \u2014 those were declared explicit non-goals, and one appearing would mean a much larger blast radius than the feature was reviewed and security-audited for."
+  }
+];
+
+function renderScenarios() {
+  scenarios.forEach(s => {
+    const container = document.getElementById('feature' + s.feature);
+    if (!container) return;
+    container.innerHTML += '<div class="scenario" id="scenario-' + s.id + '">' +
+      '<div class="scenario-header">' +
+        '<span class="scenario-num">' + s.id + '</span>' +
+        '<span class="scenario-title">' + s.title + '</span>' +
+        '<button class="toggle-details" onclick="toggleDetails(' + s.id + ')">details</button>' +
+        '<div class="btn-group">' +
+          '<button class="btn pass-btn" onclick="setResult(' + s.id + ',\'pass\',this)">Pass</button>' +
+          '<button class="btn fail-btn" onclick="setResult(' + s.id + ',\'fail\',this)">Fail</button>' +
+          '<button class="btn skip-btn" onclick="setResult(' + s.id + ',\'skip\',this)">Skip</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="scenario-details open" id="details-' + s.id + '">' +
+        '<div class="steps"><strong>Steps:</strong><br>' + s.steps.replace(/\n/g,'<br>') + '</div>' +
+        '<div class="steps"><strong>Expected:</strong><br>' + s.expected + '</div>' +
+      '</div>' +
+      '<div class="scenario-notes">' +
+        '<textarea class="notes-input" id="notes-' + s.id + '" placeholder="Notes — observations, issues, anything worth recording"></textarea>' +
+      '</div>' +
+    '</div>';
+  });
+}
+
+const results = {};
+
+function setResult(id, result, btn) {
+  results[id] = result;
+  const sc = document.getElementById('scenario-' + id);
+  sc.className = 'scenario ' + (result === 'skip' ? '' : result);
+  sc.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  updateProgress();
+}
+
+function toggleDetails(id) {
+  document.getElementById('details-' + id).classList.toggle('open');
+}
+
+function updateProgress() {
+  const done = Object.keys(results).length;
+  const pct = (done / scenarios.length * 100).toFixed(0);
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent = done + ' / ' + scenarios.length + ' completed';
+}
+
+var bugCount = 0;
+function addBug() {
+  bugCount++;
+  var n = bugCount;
+  document.getElementById('bugs-list').innerHTML +=
+    '<div class="bug-entry" id="bug-' + n + '">' +
+      '<button class="remove-bug" onclick="document.getElementById(\'bug-' + n + '\').remove()">remove</button>' +
+      '<div class="bug-row">' +
+        '<div class="bug-field"><label>Severity</label><select id="bug-sev-' + n + '">' +
+          '<option>SEV-1 (crash/data loss)</option><option>SEV-2 (broken, workaround exists)</option>' +
+          '<option selected>SEV-3 (minor UX)</option><option>SEV-4 (polish/enhancement)</option>' +
+        '</select></div>' +
+        '<div class="bug-field"><label>Feature</label><select id="bug-feat-' + n + '">' +
+          '<option>1 — epic-prefill-status-based</option><option>2 — f18-cache-purge</option><option>Other / cross-cutting</option>' +
+        '</select></div>' +
+      '</div>' +
+      '<div class="bug-field"><label>Description</label><input id="bug-desc-' + n + '" placeholder="What went wrong?"></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Steps to Reproduce</label><textarea id="bug-steps-' + n + '" placeholder="1. ...\n2. ...\n3. ..."></textarea></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Expected vs Actual</label><textarea id="bug-exp-' + n + '" placeholder="Expected: ...\nActual: ..."></textarea></div>' +
+    '</div>';
+}
+
+function exportResults() {
+  var tester = document.getElementById('tester-name').value || 'Unknown';
+  var md = '# ' + document.querySelector('h1').textContent + ' Results\n\n';
+  md += '**Date:** 2026-08-24\n';
+  md += '**Tester:** ' + tester + '\n';
+  md += '**Features:** epic-prefill-status-based, f18-cache-purge\n\n';
+
+  var pass = 0, fail = 0, skip = 0;
+  for (var k in results) {
+    if (results[k] === 'pass') pass++;
+    else if (results[k] === 'fail') fail++;
+    else if (results[k] === 'skip') skip++;
+  }
+  var untested = scenarios.length - Object.keys(results).length;
+  md += '**Summary:** ' + pass + ' passed, ' + fail + ' failed, ' + skip + ' skipped, ' + untested + ' not tested\n\n---\n\n';
+
+  md += '## Scenarios\n\n';
+  md += '| # | Scenario | Result | Notes |\n';
+  md += '|---|---|---|---|\n';
+  scenarios.forEach(function(s) {
+    var r = results[s.id] || 'not tested';
+    var icon = r === 'pass' ? 'PASS' : r === 'fail' ? 'FAIL' : r === 'skip' ? 'SKIP' : '-';
+    var el = document.getElementById('notes-' + s.id);
+    var notes = el ? el.value.replace(/\|/g, '/').replace(/\n/g, ' ').replace(/`/g, "'").replace(/\[/g, '(').replace(/\]/g, ')').replace(/\*/g, '-') : '';
+    md += '| ' + s.id + ' | ' + s.title + ' | ' + icon + ' | ' + notes + ' |\n';
+  });
+
+  var bugEntries = document.querySelectorAll('.bug-entry');
+  if (bugEntries.length > 0) {
+    md += '\n---\n\n## Bugs Found\n\n';
+    var i = 0;
+    bugEntries.forEach(function(el) {
+      i++;
+      var id = el.id.split('-')[1];
+      var sev = document.getElementById('bug-sev-' + id);
+      var feat = document.getElementById('bug-feat-' + id);
+      var desc = document.getElementById('bug-desc-' + id);
+      var steps = document.getElementById('bug-steps-' + id);
+      var exp = document.getElementById('bug-exp-' + id);
+      md += '### Bug ' + i + '\n';
+      md += '- **Severity:** ' + (sev ? sev.value : '') + '\n';
+      md += '- **Feature:** ' + (feat ? feat.value : '') + '\n';
+      md += '- **Description:** ' + (desc ? desc.value : '') + '\n';
+      md += '- **Steps:** ' + (steps ? steps.value.replace(/\n/g, '; ') : '') + '\n';
+      md += '- **Expected vs Actual:** ' + (exp ? exp.value.replace(/\n/g, '; ') : '') + '\n\n';
+    });
+  }
+
+  var overall = document.getElementById('overall-notes').value;
+  if (overall) {
+    md += '\n---\n\n## Overall Notes\n\n' + overall + '\n';
+  }
+
+  navigator.clipboard.writeText(md).then(function() {
+    var msg = document.getElementById('copy-msg');
+    msg.style.display = 'block';
+    setTimeout(function() { msg.style.display = 'none'; }, 3000);
+  });
+}
+
+renderScenarios();
+// The template only refreshed the counter from setResult(), so on load it kept its
+// static '0 / 0 completed' even with every scenario rendered — indistinguishable from
+// the page being broken, which is exactly how a real generator fault presented before.
+updateProgress();
+</script>
+</body>
+</html>

@@ -212,13 +212,22 @@ def test_all_chunks_cached(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# (f) Zero-chunk manifest → chunks_total == 0, outcome "cached"
+# (f) Zero-chunk manifest → chunks_total == 0, outcome "error"
 # ---------------------------------------------------------------------------
 
 
 def test_zero_chunk_manifest(tmp_path):
-    """A manifest with no chunks yields chunks_total == 0 and outcome 'cached' —
-    there is nothing to validate, so the game is trivially fully cached."""
+    """A manifest with no chunks is unreadable, not trivially complete (#292).
+
+    This test previously asserted 'cached' on the reasoning that "there is nothing
+    to validate, so the game is trivially fully cached". That reasoning is the
+    defect: a manifest whose ChunkHashList is empty is indistinguishable from one
+    that failed to parse, and 'cached' maps to games.status='up_to_date' — a green
+    the system cannot back up, which the 6-hourly sweep then re-confirms forever.
+
+    'error' leaves games.status untouched (validate.py's _STATUS_FOR has no entry
+    for it), so a healthy game is not falsely failed either.
+    """
     raw = build_manifest(VERSION, make_chunks(0))
     client, _ = _make_client(tmp_path)
 
@@ -232,8 +241,8 @@ def test_zero_chunk_manifest(tmp_path):
         },
     ).json()
     assert body["chunks_total"] == 0
-    assert body["outcome"] == "cached"
-    assert body["error"] is None
+    assert body["outcome"] == "error"
+    assert body["error"] == "manifest yielded no chunks"
 
 
 # ---------------------------------------------------------------------------

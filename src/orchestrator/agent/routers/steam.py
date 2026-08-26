@@ -326,11 +326,17 @@ class SteamValidateRequest(BaseModel):
 
 
 def _classify(total: int, cached: int) -> str:
-    # total == 0 here means the located manifests contained no chunks —
-    # nothing to cache, so the app is up to date ('cached'). The genuinely
-    # no-manifest case returns 'error' before reaching classification.
+    # total == 0 is "I could not tell", NOT "nothing to cache" (#292). A zero-byte
+    # .bin, a truncated one, and an empty .shas all arrive here looking identical to
+    # a genuinely empty app — and this used to answer 'cached', which validate.py
+    # maps to up_to_date. A game went green on the strength of a zero-byte file, and
+    # the 6-hourly sweep re-confirmed it forever.
+    #
+    # 'error' is both the honest answer and the safe one: validate.py's _STATUS_FOR
+    # has no entry for it, so an unreadable manifest leaves games.status untouched
+    # rather than flipping it green or falsely failing a healthy game.
     if total == 0:
-        return "cached"
+        return "error"
     if cached == total:
         return "cached"
     if cached == 0:
@@ -497,17 +503,39 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
         )
 
     if included == 0:
-        # No depot has any cached chunks. If there were chunks to cache at all
-        # the app is genuinely not cached ('missing'); if the manifests held no
-        # chunks there's nothing to cache ('cached', matching _classify).
+        # No depot has any cached chunks. Three distinct cases, and conflating them
+        # is what #292 was about:
+        #   - chunks existed to cache  -> genuinely not cached ('missing')
+        #   - manifests parsed but every depot was excluded as shared redist -> the
+        #     app has no data of its own to validate ('cached'). The redist branch
+        #     above says exactly this: "an all-redist enumeration isn't a false
+        #     error". #292 reversed it by accident; left as 'error' the app
+        #     re-validates every 6h forever, and one at 'downloading' becomes
+        #     'failed', which the sweep excludes — a dead end.
+        #   - anything else -> we could not read it ('error'), never a green
+        #
+        # The discriminator is `versions`, NOT parsed_ok. parse_chunk_shas and
+        # parse_shas NEVER raise — their docstring says a malformed buffer "yields an
+        # empty set" — so parsed_ok counts any readable, well-named file whatever its
+        # contents. Keying on it alone called a zero-byte manifest 'cached', which is
+        # #292's false green returning through this branch, on the platform where it
+        # actually occurred live. The redist skip `continue`s BEFORE versions.append,
+        # while a depot that parsed to nothing still appends — so all-redist is
+        # exactly "parsed something, appended no versions".
         union_total = sum(len(p) for p in depot_paths.values())
+        if union_total:
+            outcome, err = "missing", None
+        elif parsed_ok and not versions:
+            outcome, err = "cached", None
+        else:
+            outcome, err = "error", "manifests yielded no chunks"
         return {
             "chunks_total": union_total,
             "chunks_cached": 0,
             "chunks_missing": union_total,
-            "outcome": "missing" if union_total else "cached",
+            "outcome": outcome,
             "versions": ",".join(sorted(versions)),
-            "error": None,
+            "error": err,
         }
 
     return {
