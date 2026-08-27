@@ -101,9 +101,13 @@ def test_a_failed_copy_leaves_nothing_behind(tmp_path: Path) -> None:
     """A failed copy leaves the archive unchanged, with no stub blocking a retry.
 
     HONEST SCOPE: with an unreadable source the copy fails before it creates
-    anything, so this passes against the old implementation as well. It is kept as a
-    guard on the new one — the temp file must be cleaned up on any error path, or a
-    disk-full mid-copy would leave .partial files behind forever.
+    anything, so no temp ever exists and this passes against every version of the
+    implementation. It does NOT guard the cleanup in the except handler, despite an
+    earlier version of this note claiming it did — deleting `tmp.unlink()` left the
+    whole suite green until round 5 of review caught it. The real guard is
+    test_a_copy_that_fails_after_creating_the_temp_cleans_it_up, which fails the
+    copy AFTER the temp is on disk. What this one still pins is that a failure
+    before any write leaves the archive untouched.
     """
     live, archive = tmp_path / "live", tmp_path / "archive"
     src = _live_manifest(live, "app.bin", b"content")
@@ -204,8 +208,14 @@ def test_the_temp_file_is_not_stale_when_it_is_renamed(tmp_path: Path) -> None:
     os.replace then raises FileNotFoundError and the copy is lost for that cycle.
 
     Benign — the except OSError catches it and the next sync retries, nothing is
-    truncated — but avoidable: stamp the temp to now before renaming, so it can never
-    look stale while it is in use.
+    truncated.
+
+    NOTE: this docstring used to recommend stamping the temp to now before renaming
+    "so it can never look stale while it is in use". That was wrong and PR #302
+    disproved it: copystat is copy2's LAST act, so the stamp merely moved the
+    exposure into the gap before itself, exactly as wide. The fix was to drop copy2
+    for copyfile, which leaves the temp fresh from its first byte. See
+    test_the_temp_is_never_stale_at_any_point, which asserts the stronger property.
 
     Asserted at the moment that matters, by inspecting the temp's age from inside
     os.replace.
@@ -339,4 +349,38 @@ def test_a_failed_mtime_restore_is_logged_not_swallowed(tmp_path: Path) -> None:
     assert any("mtime_restore_failed" in str(entry.get("event", "")) for entry in logs), (
         "a failed restore leaves the archived manifest permanently outranking its "
         f"siblings for validation. It must say so. Logged: {[e.get('event') for e in logs]}"
+    )
+
+
+def test_a_copy_that_fails_after_creating_the_temp_cleans_it_up(tmp_path: Path) -> None:
+    """The error path must unlink a temp that actually exists.
+
+    Every other failure test in this file raises BEFORE the temp is created — a
+    chmod-000 source and a spy that throws on entry both fail at open. So none of
+    them exercises `tmp.unlink()` in the except handler, and deleting that line
+    leaves the whole archive suite green. Round 5 of review caught the disclosure on
+    test_a_failed_copy_leaves_nothing_behind claiming otherwise.
+
+    This simulates the real shape: a disk filling mid-write, where the temp is on
+    disk and partially written when the error lands.
+    """
+    live, archive = tmp_path / "live", tmp_path / "archive"
+    _live_manifest(live, "app.bin", b"content")
+    (archive / "v1").mkdir(parents=True)
+
+    real_copyfile = shutil.copyfile
+
+    def fail_after_creating(src, dst, *a, **kw):
+        real_copyfile(src, dst, *a, **kw)  # the temp now exists on disk
+        raise OSError(28, "No space left on device")
+
+    with mock.patch.object(shutil, "copyfile", fail_after_creating):
+        copied = sync_manifests_to_archive(live, archive)
+
+    assert copied == 0
+    leftovers = [p.name for p in (archive / "v1").iterdir()]
+    assert leftovers == [], (
+        f"the temp survived a mid-copy failure: {leftovers}. Without cleanup these "
+        "accumulate until the orphan sweep's next pass, and the sweep is the backstop "
+        "rather than the mechanism."
     )

@@ -31,10 +31,12 @@ def sync_manifests_to_archive(
 ) -> int:
     """Copy .bin files present in live/v1 but not archive/v1 (append-only).
 
-    Preserves mtime (shutil.copy2), skips files written within ``settle_seconds``
-    (may be mid-write — picked up next cycle), never deletes from the archive, and
-    isolates per-file errors. Returns the number copied. A missing live dir or an
-    unwritable archive is a no-op returning 0."""
+    Copies with ``shutil.copyfile`` and then restores the source's mtime on the
+    archived file — NOT ``copy2``, whose ``copystat`` would hand back a temp already
+    carrying the source's stale mtime and let the orphan sweep unlink it mid-flight.
+    Skips files written within ``settle_seconds`` (may be mid-write — picked up next
+    cycle), never deletes from the archive, and isolates per-file errors. Returns the
+    number copied. A missing live dir or an unwritable archive is a no-op returning 0."""
     live_v1 = live_root / "v1"
     if not live_v1.is_dir():
         return 0
@@ -103,6 +105,27 @@ def sync_manifests_to_archive(
             # — so an archived file stamped "now" would outrank its siblings and
             # change which version validate compares against: the false-Partial bug
             # class (UAT-13 F2).
+            #
+            # RESIDUAL WINDOW, measured at ~9us: between the rename and the restore
+            # the archived file carries the temp's fresh mtime, so a locator call
+            # landing in that instant can pick it over a genuinely newer sibling.
+            # Reaching it needs all of: this sync archiving a manifest that is NOT
+            # its depot's newest (first backlog sync or a post-wipe heal — steady
+            # state archives the newest anyway), a concurrent validate statting that
+            # depot inside the window, and no prefilled_gids pin (#209 pins
+            # agent-prefilled runs). Cost is one wrong verdict for one game,
+            # corrected within 6h by the sweep. Stamping the temp with the source's
+            # times just before the rename would close it but reopen the
+            # sweep-eats-the-temp window instead — that failure is loud and benign
+            # (ENOENT -> copy_failed -> retried) where this one is silent, so it is
+            # arguably the better trade if this window ever proves reachable.
+            #
+            # NFS CAVEAT: the freshness argument above assumes one clock. On NFS the
+            # temp's mtime comes from the server while the sweep compares against the
+            # client's time.time(), so a server running >60s behind would make every
+            # in-flight temp look stale and the archive would never grow (loudly —
+            # copy_failed every cycle). Not the current deployment: the archive is a
+            # local named volume written only by this agent.
             shutil.copyfile(src, tmp)
             dest = archive_v1 / src.name
             os.replace(tmp, dest)
