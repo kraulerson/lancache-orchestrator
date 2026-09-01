@@ -346,7 +346,11 @@ class TestFieldValidators:
         assert s.validation_sweep_enabled is True
         # Every 6h (03/09/15/21 UTC), offset from the prefill crons.
         assert s.validation_sweep_cron == "0 3,9,15,21 * * *"
-        assert s.sweep_batch_size == 10
+        # 10 -> 2 (PR #303 review): capped at the agent's _CACHE_STAT_WORKERS.
+        # Concurrency above the stat pool adds queueing rather than throughput and
+        # silently divides the throughput each validate budget assumes, so budgets
+        # measured sequentially were wrong by the batch factor under a sweep.
+        assert s.sweep_batch_size == 2
 
     def test_invalid_sweep_cron_fails_fast(self, monkeypatch):
         monkeypatch.setenv("ORCH_TOKEN", VALID_TOKEN)

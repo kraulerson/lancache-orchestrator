@@ -182,6 +182,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     agent_client = AgentClient(
         base_url=settings.agent_base_url,
         token=settings.orchestrator_token.get_secret_value(),
+        validate_chunks_per_sec=settings.validate_assumed_chunks_per_sec,
     )
     app.state.agent_client = agent_client
     log.info(

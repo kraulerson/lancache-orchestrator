@@ -19,6 +19,19 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — adversarial review of the recalibration: four defects, same shape as the one it fixed — 2026-09-01
+
+An independent adversarial reviewer returned **BLOCK** on the change below. Every finding verified before any code moved. Each is a number that was correct in isolation and wrong in the system around it — which is exactly what the recalibration existed to fix, reproduced one layer up.
+
+- **The ceiling was never bound to the budget that actually kills.** `worker.py:224` wraps every handler in `asyncio.wait_for(job_max_runtime_sec)` = 21600s. A validate ceiling above that is a fiction, and worse than useless: `CancelledError` is a `BaseException`, so it bypasses the sweep's per-game `except Exception` and aborts validates writing **no** `validation_history` row — the precise "cannot self-correct" mechanism the change was written to remove. 14400 ≤ 21600 already held; nothing enforced it. Now pinned by a test reading the real Settings value.
+- **The per-call budget ignored the sweep's own concurrency.** `sweep_batch_size` defaulted to 10 concurrent validates funnelling into the agent's `_CACHE_STAT_WORKERS = 2` executor, on a disk at 62–79% iowait. The 48–54 chunks/sec every budget derives from was measured **sequentially**, so under a sweep each call got a fifth to a tenth of it against a budget assuming the full rate. Default 10 → **2**, pinned to `_CACHE_STAT_WORKERS` by a test. Cost: some lost overlap on Epic's non-stat-bound work, accepted for honest budgets.
+- **Steam never got a size-aware budget, and the previous audit certified that as safe.** `steam_validate` was called with no chunk count, keeping the flat 300s base — ~12,000–16,000 chunks at the measured rate, so every large Steam game still timed out and never self-corrected. The audit called it "backward-compatible: unaffected"; it is unchanged, and on this hardware unchanged means broken. Steam self-enumerates agent-side so there is no manifest row to read, but the orchestrator holds the previous run's `validation_history.chunks_total`. A never-validated game falls back to the base.
+- **The sweep re-validated the same head forever.** Candidates were `ORDER BY id`. The sweep is one job killed at 6h and needs ~147h for the library, so it is *always* truncated — games past the ~1M-chunk mark were unreachable by construction. Now ordered least-recently-validated first (NULL first), so each truncated run advances coverage instead of repeating.
+- **The tests did not constrain the implementation.** Demonstrated rather than argued: rate `1.0` and ceiling `86400.0` — absurd in both directions, ceiling *above* the job budget — left all 28 tests passing. After the fix the same mutation fails 2. The two existing `steam_validate` spies broke on the signature change, which is the spy doing its job; they now accept `chunk_count` **explicitly** rather than absorbing it via `**kwargs`.
+- **`chunks_per_sec` is now genuinely configurable.** The docstring claimed overriding it needed no code edit; as shipped there was no Settings field and both call sites used the default. Now `validate_assumed_chunks_per_sec`, injected through the AgentClient constructor.
+
+**Deferred:** Game_shelf's client-side poll ceilings (~90s per-game, ~12 min full-sweep) will time out the UI on legitimately long validations. Cross-repo.
+
 ### Fixed — the validate budget is calibrated against measured disk throughput, not a hidden constant — 2026-09-01
 
 The NAS was rebuilt on OpenMediaVault on 2026-08-31 to remove UGREEN's `ugacl` shim. The rebuild left the NVMe cache that had fronted the RAID0 detached, and validation — stat-heavy random metadata I/O — collapsed from a measured **1,471–1,539 chunks/sec to 48–54**. Same code, same games; the hardware underneath changed.

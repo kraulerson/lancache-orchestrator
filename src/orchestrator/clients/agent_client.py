@@ -49,13 +49,19 @@ VALIDATE_TIMEOUT_BASE_SEC = 300.0
 # incident: 379 of 1811 games (21%) could not validate at all, and a timed-out
 # validate writes no validation_history row, so those games never self-correct.
 VALIDATE_TIMEOUT_ASSUMED_CHUNKS_PER_SEC = 40.0
-VALIDATE_TIMEOUT_PER_CHUNK_SEC = 1.0 / VALIDATE_TIMEOUT_ASSUMED_CHUNKS_PER_SEC
 # Must exceed the largest real game's requirement or the cliff simply moves: at
 # 40/sec ARK: Survival Evolved (369,317 chunks) needs ~9,533s including the base.
 # 4 hours leaves room for library growth. The ceiling exists so a genuinely
-# wedged agent still surfaces as a failure rather than hanging forever — it is
-# not a scheduling constraint, because the sweep no longer has to fit every game
-# into one 6-hourly window.
+# wedged agent still surfaces as a failure rather than hanging forever.
+#
+# UPPER BOUND, and it is not negotiable: this must stay <= Settings.
+# job_max_runtime_sec (21600s). The worker wraps every handler in
+# asyncio.wait_for, so a ceiling above the job budget is a fiction — the job is
+# cancelled first, and CancelledError is a BaseException that bypasses the
+# sweep's per-game `except Exception`, aborting validates with NO
+# validation_history row. That is the very "cannot self-correct" mechanism this
+# constant was raised to remove. Pinned by
+# tests/clients/test_validate_timeout_review_remediation.py.
 VALIDATE_TIMEOUT_CEILING_SEC = 14400.0
 
 
@@ -102,8 +108,13 @@ class AgentClient:
         poll_timeout_sec: float = 7200.0,
         connect_retries: int = 2,
         connect_retry_backoff_sec: float = 0.5,
+        validate_chunks_per_sec: float = VALIDATE_TIMEOUT_ASSUMED_CHUNKS_PER_SEC,
     ) -> None:
         self._base_url = base_url
+        # Assumed disk throughput for validate budgets, injected from Settings so a
+        # hardware change is a config edit rather than a code edit — the 2026-09-01
+        # incident was exactly a storage change invalidating a buried constant.
+        self._validate_chunks_per_sec = validate_chunks_per_sec
         self._headers = {"Authorization": f"Bearer {token}"}
         self._transport = transport
         # UAT-12: poll at 3s (was 0.5s) — a multi-hour job needs far fewer
@@ -271,7 +282,7 @@ class AgentClient:
             "POST",
             "/v1/steam/validate",
             json={"app_id": app_id},
-            timeout=validate_timeout_for(chunk_count),
+            timeout=validate_timeout_for(chunk_count, chunks_per_sec=self._validate_chunks_per_sec),
         )
         result: dict[str, Any] = resp.json()
         return result
@@ -296,7 +307,7 @@ class AgentClient:
                 "cdn_base": cdn_base,
                 "raw_manifest_b64": raw_manifest_b64,
             },
-            timeout=validate_timeout_for(chunk_count),
+            timeout=validate_timeout_for(chunk_count, chunks_per_sec=self._validate_chunks_per_sec),
         )
         result: dict[str, Any] = resp.json()
         return result

@@ -30,13 +30,20 @@ _log = structlog.get_logger(__name__)
 _CANDIDATE_SQL = (
     "SELECT id, status FROM games "
     "WHERE status IN ('unknown','up_to_date','validation_failed') AND owned = 1 "
-    "ORDER BY id"
+    # Least-recently-validated first. The sweep is ONE job bounded by
+    # job_max_runtime_sec (6h) and needs ~147h for the library at post-rebuild
+    # speeds, so it is ALWAYS truncated. Ordering by id made every run re-validate
+    # the same head and never reach the tail (PR #303 review). NULL sorts first,
+    # so a never-validated game is picked up before any re-check.
+    "ORDER BY last_validated_at IS NOT NULL, last_validated_at, id"
 )
 
 # `full` mode (validate-all backfill, 2026-06-24): validate EVERY game across
 # all platforms, not just the already-cached subset. Carried on jobs.payload
 # `{"full": true}`.
-_CANDIDATE_SQL_FULL = "SELECT id, status FROM games ORDER BY id"
+_CANDIDATE_SQL_FULL = (
+    "SELECT id, status FROM games ORDER BY last_validated_at IS NOT NULL, last_validated_at, id"
+)
 
 
 async def sweep_handler(job: dict[str, Any], deps: Deps) -> None:
