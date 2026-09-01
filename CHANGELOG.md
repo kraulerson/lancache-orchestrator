@@ -19,6 +19,17 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — the validate budget is calibrated against measured disk throughput, not a hidden constant — 2026-09-01
+
+The NAS was rebuilt on OpenMediaVault on 2026-08-31 to remove UGREEN's `ugacl` shim. The rebuild left the NVMe cache that had fronted the RAID0 detached, and validation — stat-heavy random metadata I/O — collapsed from a measured **1,471–1,539 chunks/sec to 48–54**. Same code, same games; the hardware underneath changed.
+
+- **`VALIDATE_TIMEOUT_PER_CHUNK_SEC = 0.00217` encoded an unstated assumption of ~461 chunks/sec.** At the real 50/sec the budget was ~9× short, and the point where a game could no longer finish inside its own budget was `chunks / 50 > 300 + 0.00217 × chunks`, i.e. **above ~16,826 chunks — 379 of 1,811 games (21%)**, including ARK: Survival Evolved (369,317), ARK ModKit UE4 (359,671), Warhammer 40,000: Darktide (310,059) and God of War (216,751). Confirmed live: Ghostwire Tokyo (~24,000 chunks) failed with `ReadTimeout` after 352s while Mortal Shell (14,142) succeeded, straddling the predicted line exactly.
+- **Those games could not self-correct.** A timed-out validate writes **no** `validation_history` row, so the game keeps whatever status it had — permanently, however many sweeps run. This is the same failure family as [#297], one layer down: that fix removed a flat cliff by scaling with chunk count, but the *scale factor* was itself calibrated against hardware that no longer exists.
+- **The rate is now an explicit `VALIDATE_TIMEOUT_ASSUMED_CHUNKS_PER_SEC` (40.0), and a `chunks_per_sec` keyword on `validate_timeout_for`.** 40 is deliberately below the measured 48 so a slow day does not reintroduce the cliff. Stating the throughput rather than a derived per-chunk figure is the actual fix: the previous form hid the assumption where nothing could flag it when it stopped being true. Being wrong in the *optimistic* direction is what caused the incident.
+- **Ceiling raised 1,800s → 14,400s.** A ceiling below the largest real game's requirement (~9,533s at 40/sec including the base) just moves the cliff. The ceiling's remaining job is narrower — bound a genuinely wedged agent — and it is no longer a scheduling constraint, because no full sweep fits in a 6-hour window at any ceiling on this hardware. The superseded test asserting `<= 1800` on that reasoning is replaced, with the dead premise recorded rather than deleted.
+
+**Not fixed here:** the underlying storage regression. Restoring a cache layer (`lvconvert --type cache` over the idle 360 GB NVMe, or more RAM to hold the ~10–15 GB metadata working set) is an infrastructure decision tracked separately. This change makes the system correct on the hardware as it currently is.
+
 ### Fixed — UAT session 14: eight defects, all of them a green status that had stopped meaning anything — 2026-08-26
 
 The test gate blocked the next feature. Its counter knew about two features; **158 commits** had landed since the previous session, so the three agent arms were scoped to the real surface. Both features under test met their acceptance criteria — `epic-prefill-status-based` is live and behaving as specified, `f18-cache-purge` satisfies all ten points of its spec coverage against ADR-0015 and #37. **Every defect found was in what the system reported, not in what it did.**
