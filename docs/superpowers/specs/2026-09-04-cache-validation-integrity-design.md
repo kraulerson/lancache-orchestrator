@@ -59,9 +59,21 @@ suffers the corrupted records (wrong UI badges) and D2.
 
 ### Data model (migration 0015)
 
+**The existing status vocabulary is kept.** An earlier draft renamed the values to
+`cached`/`partial`/`missing`/`unknown`. That was rejected on 2026-09-04:
+`games.status` carries a CHECK constraint, SQLite cannot alter one in place, and
+the rename would have forced the full snapshot/drop/recreate recipe on the table
+holding the whole library — plus breaking the API, the CLI, Game_shelf and a large
+share of the test suite. The rename was cosmetic; the correctness fix is the
+column split and the write restriction, which are orthogonal to naming.
+
+Retained values: `unknown`, `not_downloaded`, `up_to_date`, `pending_update`,
+`downloading`, `validation_failed`, `blocked`, `failed`. `failed` becomes
+vestigial for cache purposes — `record_measurement()` never writes it.
+
 | Column | Meaning | Permitted writer |
 |---|---|---|
-| `status` | Cache truth: `cached` / `partial` / `missing` / `unknown` | `record_measurement()` **only** |
+| `status` | Cache truth, existing vocabulary above | `record_measurement()` **only** |
 | `status_measured_at` *(new)* | When cache truth was last established by a real measurement | `record_measurement()` only, on success |
 | `last_measure_attempt_at` *(new)* | When measurement was last **attempted**, success or failure | Every attempt |
 | `last_job_outcome` *(new)* | How the last job ended | Any job, any path |
@@ -70,8 +82,10 @@ suffers the corrupted records (wrong UI badges) and D2.
 `last_error` is renamed to `last_job_outcome`. It is never consulted for
 download decisions.
 
-`not_downloaded` folds into `missing` — it is a genuine measurement result
-(the checker looked and found nothing) and remains cache truth.
+`not_downloaded` stays as itself — a genuine measurement result (the checker
+looked and found nothing) and therefore cache truth. It is rescued not by
+renaming but by removing the status filter from candidate selection entirely
+(see "Measurement scheduling").
 
 **Repair.** Migration 0015 resets the corrupted rows to `status = 'unknown'`,
 `status_measured_at = NULL`. Under decision 3, `unknown` means *measure it*,
@@ -142,7 +156,7 @@ cannot ever succeed for ARK ModKit, which needs ~433s measured.
 ```sql
 -- Epic scheduled prefill, new form
 WHERE g.owned = 1 AND g.platform = 'epic'
-  AND g.status IN ('missing','partial')
+  AND g.status IN ('validation_failed','not_downloaded')
   AND g.status_measured_at IS NOT NULL
 ```
 
@@ -161,17 +175,21 @@ access to truth columns.
 
 Inside `record_measurement()`. States are ranked:
 
-| State | Rank |
-|---|---|
-| `cached` | 3 |
-| `partial` | 2 |
-| `missing` | 1 |
-| `unknown` | 0 |
+| State | Rank | Meaning |
+|---|---|---|
+| `up_to_date` | 3 | measured, fully cached |
+| `validation_failed` | 2 | measured, incomplete |
+| `not_downloaded` | 1 | measured, nothing cached |
+| `unknown` | 0 | not measured |
 
-**Counted:** any transition to a lower rank — cached→partial, cached→missing,
-cached→unknown, partial→missing, partial→unknown.
-**Ignored:** any upward or level transition — unknown→anything, missing→cached,
-partial→cached, no-change.
+`pending_update`, `downloading`, `blocked` and `failed` are **not cache truth**
+and carry no rank. Any transition involving them is ignored entirely.
+
+**Counted:** any transition to a lower rank — up_to_date→validation_failed,
+up_to_date→not_downloaded, up_to_date→unknown, validation_failed→not_downloaded,
+validation_failed→unknown, not_downloaded→unknown.
+**Ignored:** any upward or level transition — unknown→anything,
+not_downloaded→up_to_date, validation_failed→up_to_date, no-change.
 
 Ignoring upward moves is what keeps the recovery sweep silent: all 1769 repaired
 games start at `unknown`, so every measurement of them moves up.
@@ -226,9 +244,14 @@ next run of `/root/deploy-orchestrator-lxc.sh`, which passes only
 
 ## Coupled follow-up (separate repo: Game_shelf)
 
-- **Remove `Failed` from the cache-status filter.** `failed` ceases to be a cache
-  state when this ships, so the option becomes dead. Must land *after* the
-  orchestrator deploy.
+- **Remove `Failed` from the cache-status filter.** `record_measurement()` never
+  writes `failed`, so the option becomes dead once this ships. Must land *after*
+  the orchestrator deploy.
+- **Relabel `Partial` to `Partly cached`.** `frontend/src/utils/cacheBadge.js`
+  already renders `validation_failed` as an amber `Partial · N%` badge with real
+  chunk percentages (`partialLabel()`, used at line 43). This is a string change
+  in `partialLabel()` plus the assertions in `cacheBadge.test.js`. Independent of
+  the orchestrator work — the status value it keys off is unchanged.
 - **Humble Bundle missing from filter options.** Independent of this work.
   Orchestrator-side coverage is live (17/18); GS #22 remediation is already open
   and may be the cause.
