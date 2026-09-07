@@ -26,15 +26,6 @@ from orchestrator.jobs.measurement import CircuitBreakerTripped, record_measurem
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.fixture(autouse=True)
-def _clear_breaker_notice():
-    """The notification dedupe is module-level state, so it outlives a test.
-    Clear it either side of every test or ordering leaks between them."""
-    measurement.reset_breaker_notice()
-    yield
-    measurement.reset_breaker_notice()
-
-
 async def _seed_games(pool, n: int, *, status: str = "up_to_date", prefix: str = "g") -> list[int]:
     """Insert n games with unique app_ids, all at `status`. Returns their ids."""
     ids: list[int] = []

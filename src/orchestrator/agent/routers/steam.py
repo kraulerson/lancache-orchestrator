@@ -510,8 +510,8 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
         #     app has no data of its own to validate ('cached'). The redist branch
         #     above says exactly this: "an all-redist enumeration isn't a false
         #     error". #292 reversed it by accident; left as 'error' the app
-        #     re-validates every 6h forever, and one at 'downloading' becomes
-        #     'failed', which the sweep excludes — a dead end.
+        #     re-validates every 6h forever and never records what is actually
+        #     on disk.
         #   - anything else -> we could not read it ('error'), never a green
         #
         # The discriminator is `versions`, NOT parsed_ok. parse_chunk_shas and

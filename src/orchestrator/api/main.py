@@ -139,9 +139,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 'downloading' status by a pre-2026-09-04 prefill (crash, or a
         # timeout-cancelled handler). It stamps a job outcome only — the sweep's
         # next measurement is what restores cache truth (UAT-11 F-INT-1).
+        # INFO for the same reason reaper.py logs INFO: the predicate does not
+        # self-clear, so this repeats on every boot until the sweep measures the
+        # rows. A WARNING that always fires is a WARNING nobody reads.
         reaped_games = await reap_orphaned_game_status(get_pool())
         if reaped_games > 0:
-            log.warning("api.boot.reaped_orphan_downloading_games", count=reaped_games)
+            log.info("api.boot.reaped_orphan_downloading_games", count=reaped_games)
     except Exception as e:
         # Defensive: a failed reap shouldn't abort boot — the job rows are
         # still recoverable manually, and the jobs worker won't claim

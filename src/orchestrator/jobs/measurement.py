@@ -163,11 +163,12 @@ async def record_measurement(
     writes ONLY ``last_measure_attempt_at``, so the game rotates to the back of
     the measurement queue without its status being touched.
 
-    Every truth write is also logged to ``measurement_transitions``, and a write
-    that would drop this game's rank is refused once too many others have dropped
-    inside the window (see :class:`CircuitBreakerTripped`). The breaker is
-    checked BEFORE any write: a tripped breaker persists nothing at all, so the
-    library keeps the last state a trustworthy measurement gave it.
+    Every *observed* truth write is also logged to ``measurement_transitions``,
+    and a write that would drop this game's rank is refused once too many others
+    have dropped inside the window (see :class:`CircuitBreakerTripped`). The
+    breaker is checked BEFORE any write: a tripped breaker persists nothing at
+    all, so the library keeps the last state a trustworthy measurement gave it.
+    ``commanded`` writes are the exception to both, and the next paragraph is why.
 
     ``commanded`` is the exception, and it exists because a purge had already
     unlinked the files by the time it called this (security audit SEV-2): a
@@ -288,7 +289,15 @@ async def record_measurement(
 async def record_job_outcome(
     pool: Pool, game_id: int, outcome: str, *, tx: WriteTx | None = None
 ) -> None:
-    """Record how a job ended. Never touches cache truth.
+    """Record how the last job FAILED. Never touches cache truth.
+
+    Every caller is a failure path — both prefill handlers, the worker's job
+    timeout, and the boot reaper — and nothing clears the column on success. So
+    ``last_job_outcome`` does not mean "how the last job ended"; it means "how
+    the last job that failed, failed", and it stays set until the next failure
+    overwrites it. Read it that way: it is a lingering fault description, not a
+    status. ``last_job_outcome_at`` dates that failure, and a caller wanting "did
+    the most recent job succeed?" must ask the ``jobs`` table instead.
 
     The text is also mirrored into the legacy ``last_error`` column until that
     column is removed: the games API, the CLI and Game_shelf all still read it,
@@ -299,7 +308,7 @@ async def record_job_outcome(
     Args:
         pool: DB pool. Used directly unless ``tx`` is given.
         game_id: games.id to record against.
-        outcome: operator-facing description of how the job ended. Truncated to
+        outcome: operator-facing description of how the job failed. Truncated to
             ``_ERROR_TRUNCATE`` chars, like every other error string persisted
             here.
         tx: an already-open write transaction to write inside, if the caller has

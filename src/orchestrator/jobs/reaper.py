@@ -70,6 +70,12 @@ async def reap_orphaned_game_status(pool: Pool) -> int:
 
     ``last_error`` carries the same text, mirroring ``record_job_outcome`` for
     the API/CLI readers that still consume that legacy column.
+
+    The ``WHERE status='downloading'`` predicate does NOT self-clear: leaving
+    status alone is the point, so the same rows match again on the next boot and
+    are re-stamped with the same text. The set therefore decays only as the sweep
+    measures each row onto a real cache status — expect this to fire on every
+    boot until then, which is why it logs at INFO rather than WARNING.
     """
     rowcount = await pool.execute_write(
         "UPDATE games SET last_job_outcome=?, last_job_outcome_at=CURRENT_TIMESTAMP, "
@@ -77,5 +83,7 @@ async def reap_orphaned_game_status(pool: Pool) -> int:
         (GAME_REAPER_ERROR_MESSAGE, GAME_REAPER_ERROR_MESSAGE),
     )
     if rowcount > 0:
-        _log.warning("jobs.reaper.reaped_orphan_downloading_games", count=rowcount)
+        # INFO, not WARNING: these rows keep their 'downloading' status, so they
+        # match again every boot until a measurement moves them. See the docstring.
+        _log.info("jobs.reaper.reaped_orphan_downloading_games", count=rowcount)
     return rowcount

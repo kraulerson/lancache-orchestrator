@@ -281,8 +281,11 @@ async def test_full_payload_selects_all_platforms(pool, monkeypatch):
     assert "status IN" not in captured["sql"]
 
 
-async def test_default_payload_keeps_status_gated(pool, monkeypatch):
-    """A null payload keeps the owned-gated (not full) weekly-cron candidate SQL."""
+async def test_default_payload_keeps_owned_gated(pool, monkeypatch):
+    """A null payload keeps the owned-gated (not full) weekly-cron candidate SQL.
+
+    "Gated" here means owned-gated only: since Task 5 the default SQL carries no
+    status filter at all, so no status value can be excluded from measurement."""
     import orchestrator.jobs.handlers.sweep as sweep_mod
 
     _healthy(monkeypatch)
@@ -313,9 +316,10 @@ async def test_malformed_payload_falls_back_to_gated(pool, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_sweep_includes_epic_games_status_gated(pool, monkeypatch):
-    """Status-gated sweep must validate Epic games (up_to_date / validation_failed)
-    alongside Steam games — not just Steam (Task 8, epic-validation-parity)."""
+async def test_sweep_includes_epic_games_owned_gated(pool, monkeypatch):
+    """The owned-gated sweep must validate Epic games (up_to_date /
+    validation_failed) alongside Steam games — not just Steam (Task 8,
+    epic-validation-parity). The gate is `owned = 1`, not a status list."""
     _healthy(monkeypatch)
     steam_id = await _seed(pool, platform="steam", status="up_to_date", app_id="1")
     epic_id = await _seed(pool, platform="epic", status="up_to_date", app_id="fortnite")

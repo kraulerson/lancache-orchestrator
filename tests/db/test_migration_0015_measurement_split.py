@@ -69,6 +69,16 @@ async def test_0015_repairs_only_corrupted_rows() -> None:
 
     Epic up_to_date rows run from 03:30:09 — inside 03:00-03:47 — so a naive
     time-window reset would discard them for no gain.
+
+    Rows 6 and 7 pin the window's edges: the predicate is
+    ``>= '2026-09-01 03:00:00' AND <= '2026-09-01 03:47:59'``, so 03:00:00
+    exactly is inside it and 03:48:00 is outside. Widening or narrowing either
+    bound by a second now fails visibly instead of silently re-scoping a repair
+    that runs once, against production, and cannot be undone.
+
+    ``status_measured_at`` is asserted alongside ``status`` because the two must
+    agree: a repaired row has no trustworthy measurement time (NULL), and a row
+    the repair spared keeps the timestamp it was measured at.
     """
     async with aiosqlite.connect(":memory:") as conn:
         await _through_0014(conn)
@@ -80,22 +90,41 @@ async def test_0015_repairs_only_corrupted_rows() -> None:
               (2, 'epic', 'b', 'Damaged failed',  'failed',            '2026-09-01 03:44:50'),
               (3, 'epic', 'c', 'Good in window',  'up_to_date',        '2026-09-01 03:30:09'),
               (4, 'steam', 'd', 'Old not_dl',     'not_downloaded',    '2026-06-18 23:46:33'),
-              (5, 'epic', 'e', 'Outside window',  'validation_failed', '2026-08-30 12:00:00');
+              (5, 'epic', 'e', 'Outside window',  'validation_failed', '2026-08-30 12:00:00'),
+              (6, 'epic', 'f', 'Window opens',    'validation_failed', '2026-09-01 03:00:00'),
+              (7, 'epic', 'g', 'Window closed',   'validation_failed', '2026-09-01 03:48:00');
             """
         )
         await conn.commit()
 
         await conn.executescript(_sql(_MIGRATION))
 
-        cur = await conn.execute("SELECT id, status FROM games ORDER BY id")
-        rows = dict(await cur.fetchall())
+        cur = await conn.execute(
+            "SELECT id, status, status_measured_at, last_validated_at FROM games ORDER BY id"
+        )
+        rows = {r[0]: r for r in await cur.fetchall()}
         await cur.close()
 
-        assert rows[1] == "unknown", "damaged validation_failed in window must reset"
-        assert rows[2] == "unknown", "damaged failed in window must reset"
-        assert rows[3] == "up_to_date", "a good measurement in the window must survive"
-        assert rows[4] == "not_downloaded", "a genuine stale measurement must survive"
-        assert rows[5] == "validation_failed", "outside the window must be untouched"
+        status = {i: r[1] for i, r in rows.items()}
+        assert status[1] == "unknown", "damaged validation_failed in window must reset"
+        assert status[2] == "unknown", "damaged failed in window must reset"
+        assert status[3] == "up_to_date", "a good measurement in the window must survive"
+        assert status[4] == "not_downloaded", "a genuine stale measurement must survive"
+        assert status[5] == "validation_failed", "outside the window must be untouched"
+        assert status[6] == "unknown", "03:00:00 exactly is inside the window (>=)"
+        assert status[7] == "validation_failed", "03:48:00 is past the window's 03:47:59 close"
+
+        # A repaired row's measurement time is cleared: there is no trustworthy
+        # moment at which its status was established.
+        for gid in (1, 2, 6):
+            assert rows[gid][2] is None, f"repaired row {gid} must have status_measured_at NULL"
+
+        # A spared truth row keeps its measurement time, back-seeded from
+        # last_validated_at so the split starts with the history it already had.
+        for gid in (3, 4, 5, 7):
+            assert rows[gid][2] == rows[gid][3], (
+                f"untouched truth row {gid} must keep status_measured_at == last_validated_at"
+            )
 
 
 async def test_0015_backfills_attempt_from_last_validated() -> None:
