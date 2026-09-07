@@ -24,6 +24,7 @@ import pytest
 
 from orchestrator.clients.agent_client import AgentError
 from orchestrator.jobs.handlers.purge import purge_handler
+from orchestrator.jobs.measurement import record_measurement
 from orchestrator.jobs.worker import Deps
 
 pytestmark = pytest.mark.asyncio
@@ -200,5 +201,54 @@ async def test_the_status_and_the_observation_land_together(pool):
     # The flip now runs through record_measurement inside the same transaction,
     # so its timestamp and its transition row roll back with it.
     assert g["status_measured_at"] is None
+    rows = await pool.read_all("SELECT id FROM measurement_transitions WHERE game_id=?", (game_id,))
+    assert rows == []
+
+
+async def _prime_breaker(pool, n: int = 24) -> None:
+    """Leave the measurement circuit breaker one transition short of tripping.
+
+    Not a synthetic seed: these are real downward measurements, exactly what a
+    lancache eviction event produces — the incident this feature exists to
+    detect. The default 24 sits one below the default threshold of 25.
+    """
+    for i in range(n):
+        gid = await _seed_game(pool, app_id=f"prime{i}", status="up_to_date")
+        await record_measurement(pool, gid, "missing")
+
+
+async def test_a_purge_is_never_refused_by_the_circuit_breaker(pool):
+    """Security audit SEV-2. The files are already gone when the record is written.
+
+    The breaker counts downward transitions globally, so 24 evictions plus one
+    operator purge reached the threshold: record_measurement raised, the purge's
+    transaction rolled back, and the game kept status='up_to_date' with its
+    pre-purge 337/337 history row on top — a green "Cached 337/337" badge over an
+    empty cache. Worse, the correction path was disabled by the same breaker (the
+    next sweep's downward write is refused too) and the row stayed ineligible for
+    re-prefill because its status never moved.
+
+    A purge is a COMMANDED change with an authoritative cause. The breaker exists
+    to veto an agent that may be lying about what it read; it must not veto a
+    record of files this system itself deleted.
+    """
+    game_id = await _seed_game(pool, app_id="440")
+    await _seed_validation(pool, game_id, total=337, cached=337)
+    await _prime_breaker(pool)
+
+    agent = _StubPurgeAgent(steam={"deleted": 337, "failed": 0, "bytes_freed": 999})
+    await purge_handler(_job(game_id), Deps(pool=pool, agent_client=agent))
+
+    g = await pool.read_one("SELECT status, status_measured_at FROM games WHERE id=?", (game_id,))
+    assert g["status"] == "validation_failed", (
+        "the purge deleted the files; refusing to record that leaves a green badge "
+        "over an empty cache that no later sweep can correct"
+    )
+    assert g["status_measured_at"] is not None
+    latest = await _latest_validation(pool, game_id)
+    assert latest["chunks_cached"] == 0
+    assert latest["outcome"] == "missing"
+    # A command is not an observation: it neither feeds the mass-loss alarm nor
+    # is vetoed by it. The validation_history row above is the purge's audit trail.
     rows = await pool.read_all("SELECT id FROM measurement_transitions WHERE game_id=?", (game_id,))
     assert rows == []

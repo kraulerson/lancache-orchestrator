@@ -40,6 +40,18 @@ CACHE_TRUTH_WRITE = re.compile(
     re.IGNORECASE,
 )
 
+# An INSERT needs no UPDATE anywhere to write cache truth: library_sync already
+# inserts into `games`, so adding `status` to one of those column lists would
+# have created a new row with a status nobody measured, invisible to the pattern
+# above (security audit SEV-4). Match the column list only — the VALUES clause
+# is not scanned, so another table's `status` cannot be confused for this one.
+CACHE_TRUTH_INSERT = re.compile(
+    r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+games\s*\("
+    r"[^)\";]*?"
+    r"\b(?:status|status_measured_at)\b",
+    re.IGNORECASE,
+)
+
 
 def strip_comments(source: str) -> str:
     """Blank out `#` comments, leaving every other byte (and all line numbers) in place.
@@ -69,7 +81,8 @@ def normalise(source: str) -> str:
 
 def writes_cache_truth(source: str) -> bool:
     """True if ``source`` contains a statement assigning games.status(_measured_at)."""
-    return CACHE_TRUTH_WRITE.search(normalise(source)) is not None
+    text = normalise(source)
+    return CACHE_TRUTH_WRITE.search(text) is not None or CACHE_TRUTH_INSERT.search(text) is not None
 
 
 def test_only_measurement_module_writes_cache_truth() -> None:
@@ -129,6 +142,15 @@ _MUST_MATCH = {
         '    "WHERE id=?"\n'
         ")"
     ),
+    # Security audit SEV-4: an INSERT needs no UPDATE anywhere to write cache
+    # truth for a new row, and library_sync already inserts into `games` — adding
+    # `status` to one of those column lists was invisible to the first pattern.
+    "insert with a status column": (
+        '"INSERT INTO games (platform, app_id, title, status) "\n"VALUES (?, ?, ?, \'up_to_date\')"'
+    ),
+    "insert or replace with a status column": (
+        '"INSERT OR REPLACE INTO games (id, status) VALUES (?, ?)"'
+    ),
 }
 
 _MUST_NOT_MATCH = {
@@ -146,6 +168,21 @@ _MUST_NOT_MATCH = {
         '"UPDATE games SET last_measure_attempt_at=CURRENT_TIMESTAMP WHERE id=?"'
     ),
     "size write": '"UPDATE games SET size_bytes=? WHERE id=?"',
+    # library_sync's real insert: it enumerates ownership, never cache truth.
+    # Flagging it would make the guard un-greenable and get it deleted.
+    "library_sync's ownership insert": (
+        "\"INSERT INTO games (platform, app_id, title) VALUES ('steam', ?, ?)\""
+    ),
+    # Another table's `outcome`/`error` columns are not games.status.
+    "validation_history insert": (
+        '"INSERT INTO validation_history (game_id, method, outcome, error) "\n'
+        "\"VALUES (?, 'disk_stat', ?, ?)\""
+    ),
+    # `state` on jobs, and a `status` word nowhere in sight.
+    "jobs insert-select": (
+        '"INSERT INTO jobs (kind, game_id, platform, state, source) "\n'
+        "\"SELECT 'validate', id, platform, 'queued', 'sweep' FROM games\""
+    ),
 }
 
 

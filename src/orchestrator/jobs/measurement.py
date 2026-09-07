@@ -154,9 +154,9 @@ async def _notify_breaker(count: int) -> None:
 
 
 async def record_measurement(
-    pool: Pool, game_id: int, outcome: str, *, tx: WriteTx | None = None
+    pool: Pool, game_id: int, outcome: str, *, tx: WriteTx | None = None, commanded: bool = False
 ) -> None:
-    """Record the result of a cache measurement.
+    """Record the result of a cache measurement, or a commanded cache change.
 
     A real result (``cached`` / ``partial`` / ``missing``) writes cache truth and
     both timestamps. Any other outcome — ``error``, or anything unrecognised —
@@ -169,16 +169,32 @@ async def record_measurement(
     checked BEFORE any write: a tripped breaker persists nothing at all, so the
     library keeps the last state a trustworthy measurement gave it.
 
+    ``commanded`` is the exception, and it exists because a purge had already
+    unlinked the files by the time it called this (security audit SEV-2): a
+    refusal there did not preserve truth, it destroyed the only record of a
+    change that really happened, leaving a green badge over an empty cache that
+    the halted sweep could not correct. An operator purge is KNOWN cache truth,
+    not an observation whose trustworthiness is in question — the breaker exists
+    to catch an agent lying about what it read, and must not veto a write about
+    files this system itself deleted. So a commanded change skips the breaker and
+    writes no transition row: the alarm counts unexplained mass loss, and the
+    purge's own ``validation_history`` row (written by the caller in the same
+    transaction) is its audit trail.
+
     Args:
         pool: DB pool. Used directly unless ``tx`` is given.
         game_id: games.id to record against.
         outcome: one of ``cached``, ``partial``, ``missing``, ``error``.
         tx: an already-open write transaction to write inside, if the caller has
             one. The write then commits (or rolls back) with the caller's.
+        commanded: this system caused the change and knows it happened (a purge),
+            rather than having observed it. Skips the breaker and the transition
+            log. No effect on the ``error`` path — an infrastructure failure is
+            not a measurement whatever commanded it.
 
     Raises:
         CircuitBreakerTripped: too many games lost cache state inside the window.
-            Nothing was written for this game.
+            Nothing was written for this game. Never raised when ``commanded``.
     """
     write = _writer(pool, tx)
     new_status = _STATUS_FOR.get(outcome)
@@ -200,7 +216,7 @@ async def record_measurement(
     prior = str(prior_row["status"]) if prior_row else None
     downward = _is_downward(prior, new_status)
 
-    if downward:
+    if downward and not commanded:
         settings = get_settings()
         window = settings.measurement_breaker_window_minutes
         recent = await read(
@@ -246,6 +262,12 @@ async def record_measurement(
         "WHERE id=?",
         (new_status, game_id),
     )
+    if commanded:
+        # No transition row: the log counts unexplained loss, and a batch of
+        # deliberate purges arming the alarm against the next sweep would be a
+        # false positive. This line is the operator trail in its place.
+        _log.info("measurement.commanded", game_id=game_id, prior=prior, new_status=new_status)
+        return
     # Durable, because the breaker must survive a restart — a restart is exactly
     # the scenario that produced the 2026-09-01 corruption.
     await write(

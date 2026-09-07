@@ -44,27 +44,40 @@ async def validate_one_game(
 
     result = await validate_game(pool, deps, game_id, settings)
 
-    await pool.execute_write(
-        _INSERT_VH,
-        (
-            game_id,
-            result.manifest_version,
-            started_at,
-            result.chunks_total,
-            result.chunks_cached,
-            result.chunks_missing,
-            result.outcome,
-            (result.error[:200] if result.error else None),
-        ),
-    )
-
+    # ONE transaction (security audit SEV-3). The history row used to be written
+    # outside any transaction, so a breaker-refused measurement left the
+    # observation behind while the status write rolled back: the API serves
+    # chunks_cached/chunks_total from the newest validation_history row alongside
+    # status, so the operator investigating the breaker alarm read a green
+    # up_to_date badge beside '17/337 cached'. Either both land or neither does,
+    # which also makes validate structurally identical to purge.
+    #
+    # A tripped breaker's deduped Kuma push runs inside this transaction and can
+    # hold the single writer for up to ~10s — at most once per window, and only
+    # on the run that trips. Accepted: the alternative is announcing a halt the
+    # database has not yet committed to.
+    #
     # Cache truth is written in exactly one place. An 'error' outcome records the
     # attempt only: the old "unstick a stranded 'downloading' by setting
     # status='failed'" write lived here and is deliberately gone — that is a job
     # outcome, not a cache measurement. Nothing writes 'downloading' any more
     # either, and a legacy row still carrying it is corrected by the next
     # measurement of that row, never by a handler inferring truth from a failure.
-    await record_measurement(pool, game_id, result.outcome)
+    async with pool.write_transaction() as tx:
+        await tx.execute(
+            _INSERT_VH,
+            (
+                game_id,
+                result.manifest_version,
+                started_at,
+                result.chunks_total,
+                result.chunks_cached,
+                result.chunks_missing,
+                result.outcome,
+                (result.error[:200] if result.error else None),
+            ),
+        )
+        await record_measurement(pool, game_id, result.outcome, tx=tx)
     return result
 
 

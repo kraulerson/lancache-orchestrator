@@ -66,8 +66,13 @@ async def _seed_epic_manifest(pool, game_id, *, cdn_base="https://cdn.epicgames.
 
 async def test_steam_purge_sets_validation_failed(pool):
     """The flip goes through the single writer (record_measurement 'partial'), so
-    it stamps status_measured_at — the evidence the Epic prefill re-queues on —
-    and lands as a downward transition, which is what makes a mass purge alarm."""
+    it stamps status_measured_at — the evidence the Epic prefill re-queues on.
+
+    It is recorded as a COMMANDED change (security audit SEV-2): the files are
+    already deleted by the time this runs, so the breaker must not be able to
+    refuse the record, and no transition row is written because a command is not
+    an observation of unexplained loss.
+    """
     game_id = await _seed_game(pool, app_id="440")
     agent = _StubPurgeAgent(steam={"deleted": 3, "failed": 0, "bytes_freed": 999})
     await purge_handler(_job(game_id), Deps(pool=pool, agent_client=agent))
@@ -76,11 +81,11 @@ async def test_steam_purge_sets_validation_failed(pool):
     g = await pool.read_one("SELECT status, status_measured_at FROM games WHERE id=?", (game_id,))
     assert g["status"] == "validation_failed"
     assert g["status_measured_at"] is not None
-    t = await pool.read_one(
+    t = await pool.read_all(
         "SELECT prior, new_status, downward FROM measurement_transitions WHERE game_id=?",
         (game_id,),
     )
-    assert t == {"prior": "up_to_date", "new_status": "validation_failed", "downward": 1}
+    assert t == []
 
 
 async def test_epic_purge_sets_validation_failed(pool):

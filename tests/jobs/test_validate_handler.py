@@ -244,3 +244,55 @@ async def test_validate_never_writes_cached_version(pool, monkeypatch):
     row = await pool.read_one("SELECT status, cached_version FROM games WHERE id=?", (game_id,))
     assert row["status"] == "up_to_date"  # status still updates
     assert row["cached_version"] == "OLD"  # cached_version untouched by validate
+
+
+async def _prime_breaker(pool, n: int = 24) -> None:
+    """Leave the measurement circuit breaker one transition short of tripping.
+
+    Real downward measurements, not synthetic rows: this is the shape a lancache
+    eviction event has, and the default 24 sits one below the default threshold.
+    """
+    from orchestrator.jobs.measurement import record_measurement
+
+    for i in range(n):
+        await pool.execute_write(
+            "INSERT INTO games (platform, app_id, title, owned, status) "
+            "VALUES ('steam', ?, 't', 1, 'up_to_date')",
+            (f"prime{i}",),
+        )
+        row = await pool.read_one(
+            "SELECT id FROM games WHERE platform='steam' AND app_id=?", (f"prime{i}",)
+        )
+        await record_measurement(pool, int(row["id"]), "missing")
+
+
+async def test_a_refused_measurement_leaves_no_validation_history_row(pool):
+    """Security audit SEV-3: the observation and the status must land together.
+
+    The history row used to be written outside any transaction, so a tripped
+    breaker refused the status write and left the observation behind. The API
+    serves chunks_cached/chunks_total from the newest validation_history row
+    alongside status, so the operator investigating the breaker alarm read a
+    green up_to_date badge next to '0/337 cached' — on the very surface they were
+    using to diagnose the alarm.
+    """
+    from orchestrator.core.settings import get_settings
+    from orchestrator.jobs.handlers.validate import validate_one_game
+    from orchestrator.jobs.measurement import CircuitBreakerTripped
+
+    game_id = await _seed_game(pool, app_id="440")
+    await pool.execute_write("UPDATE games SET status='up_to_date' WHERE id=?", (game_id,))
+    await _prime_breaker(pool)
+
+    deps = Deps(pool=pool, agent_client=_StubAgent(_vresp(337, 0, 337, "missing")))
+    with pytest.raises(CircuitBreakerTripped):
+        await validate_one_game(pool, deps, game_id, get_settings())
+
+    rows = await pool.read_all("SELECT id FROM validation_history WHERE game_id=?", (game_id,))
+    assert rows == [], (
+        "a refused measurement must persist nothing: the history row it left behind "
+        "made the API report status='up_to_date' beside 0/337 cached"
+    )
+    g = await pool.read_one("SELECT status, status_measured_at FROM games WHERE id=?", (game_id,))
+    assert g["status"] == "up_to_date"
+    assert g["status_measured_at"] is None

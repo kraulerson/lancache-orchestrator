@@ -369,3 +369,71 @@ async def test_breaker_counts_inside_an_open_transaction(pool):
     row = await pool.read_one("SELECT COUNT(*) AS n FROM games WHERE status='not_downloaded'")
     assert row["n"] == 0
     assert await _downward_count(pool) == 0
+
+
+async def test_a_commanded_change_is_never_refused(pool):
+    """Security audit SEV-2: the breaker vetoes observations, never commands.
+
+    An operator purge has already deleted the files by the time the record is
+    written. Refusing it does not preserve truth — it destroys the only record of
+    a change that really happened, and the sweep that is supposed to correct the
+    divergence is halted by the same breaker.
+    """
+    ids = await _seed_games(pool, 30, status="up_to_date")
+    for gid in ids[:24]:
+        await record_measurement(pool, gid, "missing")
+    assert await _downward_count(pool) == 24  # one short of the threshold
+
+    await record_measurement(pool, ids[24], "missing", commanded=True)
+
+    row = await pool.read_one("SELECT status, status_measured_at FROM games WHERE id=?", (ids[24],))
+    assert row["status"] == "not_downloaded"
+    assert row["status_measured_at"] is not None
+
+
+async def test_a_commanded_change_writes_no_transition_row(pool):
+    """Known cache truth is not evidence of unexplained mass loss.
+
+    Counting commands would let a legitimate batch of purges arm the alarm
+    against the sweep that follows them; the commanded write's own audit trail
+    lives in validation_history, written by the caller in the same transaction.
+    """
+    ids = await _seed_games(pool, 30, status="up_to_date")
+    for gid in ids[:24]:
+        await record_measurement(pool, gid, "missing")
+
+    await record_measurement(pool, ids[24], "missing", commanded=True)
+
+    assert await _downward_count(pool) == 24  # unchanged: the command did not count
+    rows = await pool.read_all("SELECT id FROM measurement_transitions WHERE game_id=?", (ids[24],))
+    assert rows == []
+
+
+async def test_a_commanded_change_logs_itself(pool):
+    """The transition row is skipped, so the log line is the operator's trail."""
+    game_id = (await _seed_games(pool, 1, status="up_to_date"))[0]
+
+    with capture_logs() as logs:
+        await record_measurement(pool, game_id, "missing", commanded=True)
+
+    commanded = [e for e in logs if e["event"] == "measurement.commanded"]
+    assert len(commanded) == 1
+    assert commanded[0]["log_level"] == "info"
+    assert commanded[0]["game_id"] == game_id
+    assert commanded[0]["prior"] == "up_to_date"
+    assert commanded[0]["new_status"] == "not_downloaded"
+
+
+async def test_commanded_does_not_change_the_error_path(pool):
+    """'error' is not a measurement whatever commanded it — still attempt-only."""
+    game_id = (await _seed_games(pool, 1, status="up_to_date"))[0]
+
+    await record_measurement(pool, game_id, "error", commanded=True)
+
+    row = await pool.read_one(
+        "SELECT status, status_measured_at, last_measure_attempt_at FROM games WHERE id=?",
+        (game_id,),
+    )
+    assert row["status"] == "up_to_date"
+    assert row["status_measured_at"] is None
+    assert row["last_measure_attempt_at"] is not None
