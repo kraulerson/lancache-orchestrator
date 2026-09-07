@@ -89,12 +89,14 @@ async def test_validate_one_game_returns_result_and_records(pool):
     assert vh["outcome"] == "cached"
 
 
-async def test_missing_marks_validation_failed(pool):
+async def test_missing_marks_not_downloaded(pool):
+    """Nothing on disk is 'not_downloaded', not 'validation_failed' — the two are
+    distinct measurements and are ranked differently downstream."""
     game_id = await _seed_game(pool)
     deps = Deps(pool=pool, agent_client=_StubAgent(_vresp(1, 0, 1, "missing")))
     await validate_handler(_job(game_id), deps)
     g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
-    assert g["status"] == "validation_failed"
+    assert g["status"] == "not_downloaded"
     vh = await pool.read_one("SELECT outcome FROM validation_history WHERE game_id=?", (game_id,))
     assert vh["outcome"] == "missing"
 
@@ -125,10 +127,12 @@ async def test_error_does_not_clobber_classified_status(pool):
     assert vh["outcome"] == "error"
 
 
-async def test_error_unsticks_transient_downloading(pool):
-    """A post-prefill validate that hits an infra error must resolve the transient
-    'downloading' state to 'failed', not leave it stuck (UAT-10 #3). It still must
-    not clobber a real classified status (above)."""
+async def test_error_leaves_downloading_untouched(pool):
+    """An infra error writes NO status at all — not even for the transient
+    'downloading' state. The old write (status='failed' where status='downloading',
+    UAT-10 #3) recorded a job outcome as a cache finding, which is exactly the
+    conflation the 2026-09-04 design removes. The startup job reaper resolves
+    stranded 'downloading' rows instead."""
     game_id = await _seed_game(pool)
     await pool.execute_write("UPDATE games SET status='downloading' WHERE id=?", (game_id,))
     deps = Deps(
@@ -136,8 +140,13 @@ async def test_error_unsticks_transient_downloading(pool):
         agent_client=_StubAgent(_vresp(0, 0, 0, "error", versions="", error="agent unreachable")),
     )
     await validate_handler(_job(game_id), deps)
-    g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
-    assert g["status"] == "failed"  # transient 'downloading' resolved, not stuck
+    g = await pool.read_one(
+        "SELECT status, status_measured_at, last_measure_attempt_at FROM games WHERE id=?",
+        (game_id,),
+    )
+    assert g["status"] == "downloading"  # unchanged: an error is not a measurement
+    assert g["status_measured_at"] is None
+    assert g["last_measure_attempt_at"] is not None  # the attempt is still recorded
 
 
 async def test_unknown_platform_raises(pool):

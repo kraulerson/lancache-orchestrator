@@ -13,11 +13,11 @@ Epic manifest with an empty ``ChunkHashList`` all land in the second case, and a
 came back ``outcome="cached", chunks_total=0`` — which ``validate.py`` maps to
 ``games.status='up_to_date'``. A game went green on the strength of a zero-byte file.
 
-``error`` is the honest answer, and it is also the SAFE one: ``validate.py``'s
-``_STATUS_FOR`` map deliberately omits ``error``, so an unreadable manifest leaves
-``games.status`` untouched rather than flipping it green OR falsely failing a healthy
-game. The fault is recorded in validation_history and nothing is asserted that cannot
-be backed up.
+``error`` is the honest answer, and it is also the SAFE one: the ``_STATUS_FOR`` map in
+``orchestrator.jobs.measurement`` deliberately omits ``error``, so an unreadable manifest
+leaves ``games.status`` untouched rather than flipping it green OR falsely failing a
+healthy game. The fault is recorded in validation_history and nothing is asserted that
+cannot be backed up.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ class TestErrorDoesNotChangeGameStatus:
     """Why 'error' is the safe answer as well as the honest one."""
 
     def test_the_status_map_has_no_entry_for_error(self) -> None:
-        from orchestrator.jobs.handlers.validate import _STATUS_FOR
+        from orchestrator.jobs.measurement import _STATUS_FOR
 
         assert "error" not in _STATUS_FOR, (
             "an unreadable manifest must leave games.status alone. If 'error' ever "

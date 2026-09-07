@@ -332,9 +332,9 @@ def _classify(total: int, cached: int) -> str:
     # maps to up_to_date. A game went green on the strength of a zero-byte file, and
     # the 6-hourly sweep re-confirmed it forever.
     #
-    # 'error' is both the honest answer and the safe one: validate.py's _STATUS_FOR
-    # has no entry for it, so an unreadable manifest leaves games.status untouched
-    # rather than flipping it green or falsely failing a healthy game.
+    # 'error' is both the honest answer and the safe one: jobs/measurement.py's
+    # _STATUS_FOR has no entry for it, so an unreadable manifest leaves games.status
+    # untouched rather than flipping it green or falsely failing a healthy game.
     if total == 0:
         return "error"
     if cached == total:
