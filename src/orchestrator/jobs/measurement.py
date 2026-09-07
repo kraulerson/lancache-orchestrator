@@ -13,6 +13,7 @@ columns.
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -34,6 +35,9 @@ _log = structlog.get_logger(__name__)
 
 # Truncation for operator-facing strings persisted or logged from here.
 _ERROR_TRUNCATE = 200
+
+# When the open breaker was last announced (monotonic seconds), or None.
+_last_breaker_notice_at: float | None = None
 
 # outcome -> games.status. 'error' is absent by design: an infrastructure failure
 # is not a measurement and must never overwrite cache truth. 'missing' and
@@ -95,6 +99,33 @@ def _is_downward(prior: str | None, new: str) -> bool:
     if p is None or n is None:
         return False
     return n < p
+
+
+def _breaker_notice_due(window_minutes: int) -> bool:
+    """True at most once per window; stamps the clock when it says yes.
+
+    A refused write records no transition row, so the count stays frozen at the
+    threshold and EVERY later downward measurement recomputes the same trip. The
+    only production caller keeps going after the exception (the sweep catches it
+    per game), so without this an incident-scale sweep would emit one ERROR line
+    and one 10-second-timeout Kuma GET per remaining game — on the order of a
+    thousand, and ~20 minutes of pure timeout if Kuma is unreachable.
+
+    Time-boxed rather than latched: a breaker still open an hour later is still
+    news, and Kuma needs a fresh DOWN to stay red.
+    """
+    global _last_breaker_notice_at
+    now = time.monotonic()
+    if _last_breaker_notice_at is not None and now - _last_breaker_notice_at < window_minutes * 60:
+        return False
+    _last_breaker_notice_at = now
+    return True
+
+
+def reset_breaker_notice() -> None:
+    """Forget that a trip was announced, so the next one notifies. Tests only."""
+    global _last_breaker_notice_at
+    _last_breaker_notice_at = None
 
 
 async def _notify_breaker(count: int) -> None:
@@ -180,15 +211,27 @@ async def record_measurement(
         )
         in_window = (int(recent["n"]) if recent else 0) + 1
         if in_window >= settings.measurement_breaker_threshold:
-            _log.error(
-                "measurement.breaker_tripped",
-                game_id=game_id,
-                prior=prior,
-                new_status=new_status,
-                downward_in_window=in_window,
-                threshold=settings.measurement_breaker_threshold,
-            )
-            await _notify_breaker(in_window)
+            if _breaker_notice_due(window):
+                _log.error(
+                    "measurement.breaker_tripped",
+                    game_id=game_id,
+                    prior=prior,
+                    new_status=new_status,
+                    downward_in_window=in_window,
+                    threshold=settings.measurement_breaker_threshold,
+                )
+                await _notify_breaker(in_window)
+            else:
+                # Already announced. Still refuse the write — just quietly, so
+                # the scale stays recoverable from the log without a thousand
+                # ERROR lines and a thousand pushes.
+                _log.info(
+                    "measurement.breaker_refused",
+                    game_id=game_id,
+                    prior=prior,
+                    new_status=new_status,
+                    downward_in_window=in_window,
+                )
             raise CircuitBreakerTripped(
                 f"{in_window} games lost cache state within {window} minutes; writing halted"
             )
@@ -229,12 +272,13 @@ async def record_job_outcome(
         pool: DB pool. Used directly unless ``tx`` is given.
         game_id: games.id to record against.
         outcome: operator-facing description of how the job ended. Truncated to
-            200 chars, like every other error string persisted here.
+            ``_ERROR_TRUNCATE`` chars, like every other error string persisted
+            here.
         tx: an already-open write transaction to write inside, if the caller has
             one.
     """
     write = _writer(pool, tx)
-    text = outcome[:200]
+    text = outcome[:_ERROR_TRUNCATE]
     await write(
         "UPDATE games SET last_job_outcome=?, last_job_outcome_at=CURRENT_TIMESTAMP WHERE id=?",
         (text, game_id),

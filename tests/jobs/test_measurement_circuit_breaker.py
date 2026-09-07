@@ -13,13 +13,26 @@ all.
 
 from __future__ import annotations
 
+import time
+
 import pytest
+from structlog.testing import capture_logs
 
 from orchestrator.clients import heartbeat
 from orchestrator.core.settings import get_settings
+from orchestrator.jobs import measurement
 from orchestrator.jobs.measurement import CircuitBreakerTripped, record_measurement
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def _clear_breaker_notice():
+    """The notification dedupe is module-level state, so it outlives a test.
+    Clear it either side of every test or ordering leaks between them."""
+    measurement.reset_breaker_notice()
+    yield
+    measurement.reset_breaker_notice()
 
 
 async def _seed_games(pool, n: int, *, status: str = "up_to_date", prefix: str = "g") -> list[int]:
@@ -45,7 +58,7 @@ async def _downward_count(pool) -> int:
     return int(row["n"])
 
 
-async def test_trips_after_25_downward_transitions(pool):
+async def test_trips_on_the_25th_downward_transition(pool):
     """The 25th downward transition raises, and writes nothing at all."""
     ids = await _seed_games(pool, 30, status="up_to_date")
 
@@ -170,6 +183,89 @@ async def test_trip_pushes_down_to_kuma(pool, monkeypatch):
     assert "25" in str(calls[0]["msg"])
 
 
+async def _refuse_everything(pool, ids) -> int:
+    """Measure every game 'missing', swallowing the trips. Returns the refusal
+    count. This is what production actually does: the sweep's `except Exception`
+    keeps going, so the breaker sees hundreds of refused writes in a row, not one."""
+    refused = 0
+    for gid in ids:
+        try:
+            await record_measurement(pool, gid, "missing")
+        except CircuitBreakerTripped:
+            refused += 1
+    return refused
+
+
+async def test_repeated_refusals_notify_once(pool, monkeypatch):
+    """One trip, one push. The count is frozen once the breaker is open (a
+    refused write records no transition), so every later downward call
+    recomputes the same number — that must not become one Kuma GET per game."""
+    monkeypatch.setenv("ORCH_KUMA_PUSH_MEASUREMENT_BREAKER", "http://kuma.test/api/push/abc123")
+    get_settings.cache_clear()
+
+    calls: list[str] = []
+
+    async def _record(url, *, status, msg="", transport=None):
+        calls.append(status)
+
+    monkeypatch.setattr(heartbeat, "push", _record)
+
+    ids = await _seed_games(pool, 30, status="up_to_date")
+    refused = await _refuse_everything(pool, ids)
+
+    assert refused == 6  # 24 written, 6 refused — every one of them raised
+    assert calls == ["down"]  # ...and exactly one of them notified
+
+
+async def test_repeated_refusals_log_error_once_then_info(pool, monkeypatch):
+    """The ERROR line is the operator's page; it fires once per open trip.
+    Later refusals stay visible at INFO so the scale is still recoverable from
+    the log, without a thousand ERROR lines."""
+    ids = await _seed_games(pool, 30, status="up_to_date")
+
+    with capture_logs() as logs:
+        await _refuse_everything(pool, ids)
+
+    tripped = [e for e in logs if e["event"] == "measurement.breaker_tripped"]
+    assert len(tripped) == 1
+    assert tripped[0]["log_level"] == "error"
+    assert tripped[0]["downward_in_window"] == 25
+
+    refused = [e for e in logs if e["event"] == "measurement.breaker_refused"]
+    assert len(refused) == 5
+    assert {e["log_level"] for e in refused} == {"info"}
+    assert refused[0]["game_id"] == ids[25]
+    assert refused[0]["prior"] == "up_to_date"
+    assert refused[0]["new_status"] == "not_downloaded"
+    assert refused[0]["downward_in_window"] == 25
+
+
+async def test_notification_repeats_once_the_dedupe_window_elapses(pool, monkeypatch):
+    """Suppression is time-boxed, not permanent: a breaker still open an hour
+    later is still news, and Kuma needs a fresh DOWN to stay red."""
+    monkeypatch.setenv("ORCH_KUMA_PUSH_MEASUREMENT_BREAKER", "http://kuma.test/api/push/abc123")
+    get_settings.cache_clear()
+
+    calls: list[str] = []
+
+    async def _record(url, *, status, msg="", transport=None):
+        calls.append(status)
+
+    monkeypatch.setattr(heartbeat, "push", _record)
+
+    ids = await _seed_games(pool, 30, status="up_to_date")
+    await _refuse_everything(pool, ids)
+    assert len(calls) == 1
+
+    # 61 minutes since the notice, against the 60-minute default window.
+    monkeypatch.setattr(measurement, "_last_breaker_notice_at", time.monotonic() - 61 * 60)
+
+    with pytest.raises(CircuitBreakerTripped):
+        await record_measurement(pool, ids[25], "missing")
+
+    assert calls == ["down", "down"]
+
+
 async def test_no_push_when_no_url_configured(pool, monkeypatch):
     """Unset is the documented way to disable a Kuma monitor."""
     calls: list[str] = []
@@ -206,17 +302,38 @@ async def test_failed_push_does_not_suppress_the_trip(pool, monkeypatch):
 async def test_threshold_and_window_are_configurable(pool, monkeypatch):
     """Operators tune both without a code change."""
     monkeypatch.setenv("ORCH_MEASUREMENT_BREAKER_THRESHOLD", "3")
+    monkeypatch.setenv("ORCH_MEASUREMENT_BREAKER_WINDOW_MINUTES", "5")
     get_settings.cache_clear()
+    assert get_settings().measurement_breaker_window_minutes == 5  # the env var binds
 
     ids = await _seed_games(pool, 10, status="up_to_date")
     written = 0
-    with pytest.raises(CircuitBreakerTripped):
+    with pytest.raises(CircuitBreakerTripped) as excinfo:
         for gid in ids:
             await record_measurement(pool, gid, "missing")
             written += 1
 
     assert written == 2
-    assert get_settings().measurement_breaker_window_minutes == 60
+    assert "within 5 minutes" in str(excinfo.value)  # the configured window, not the default
+
+
+async def test_transitions_outside_a_shortened_window_stop_counting(pool, monkeypatch):
+    """The window setting really drives the count, not just the message."""
+    monkeypatch.setenv("ORCH_MEASUREMENT_BREAKER_THRESHOLD", "3")
+    monkeypatch.setenv("ORCH_MEASUREMENT_BREAKER_WINDOW_MINUTES", "5")
+    get_settings.cache_clear()
+
+    ids = await _seed_games(pool, 10, status="up_to_date")
+    for gid in ids[:2]:
+        await record_measurement(pool, gid, "missing")
+    # 6 minutes old: inside the 60-minute default, outside the configured 5.
+    await pool.execute_write(
+        "UPDATE measurement_transitions SET occurred_at = datetime('now', '-6 minutes')"
+    )
+
+    await record_measurement(pool, ids[2], "missing")
+    row = await pool.read_one("SELECT status FROM games WHERE id=?", (ids[2],))
+    assert row["status"] == "not_downloaded"
 
 
 async def test_transition_rows_record_the_move(pool):
