@@ -64,7 +64,9 @@ async def reap_orphaned_game_status(pool: Pool) -> int:
     It therefore stamps the job outcome and leaves status alone. Cache truth is
     restored by the next measurement of the row
     (``jobs.measurement.record_measurement``), never by this code guessing from a
-    job's fate. Run at boot AFTER ``reap_running_jobs``. Returns rows touched.
+    job's fate — and the scheduled sweep now reaches every such row unconditionally,
+    since its candidate SQL (Task 5) carries no status filter. Run at boot AFTER
+    ``reap_running_jobs``. Returns rows touched.
 
     ``last_error`` carries the same text, mirroring ``record_job_outcome`` for
     the API/CLI readers that still consume that legacy column.

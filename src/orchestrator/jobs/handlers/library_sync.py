@@ -40,7 +40,8 @@ _log = structlog.get_logger(__name__)
 # Killing Floor 2 and Total War: PHARAOH DYNASTIES were fully cached yet
 # permanently stuck). Correcting such a row is the next measurement's job
 # (``record_measurement``), and widening the sweep's candidate filter so it
-# reaches those rows is a separate step of this design. Guessing a status from
+# reaches those rows is a separate step of this design — done in Task 5, whose
+# candidate SQL now carries no status filter at all. Guessing a status from
 # "it appeared in an enumeration" is exactly the conflation being removed here.
 _NAMED_UPSERT_SQL = (
     "INSERT INTO games (platform, app_id, title) VALUES ('steam', ?, ?) "

@@ -1,8 +1,11 @@
 """F13 — scheduled validation sweep handler.
 
-Re-runs F7 disk-stat validation across the cached Steam library (status
-up_to_date + validation_failed) in batches, to catch LRU eviction drift and
-recovery. Pre-flight-skips on validator-unhealthy; per-game errors are isolated.
+Re-runs F7 disk-stat validation across every owned game (Steam and Epic), least-
+recently-attempted first, in batches — there is no status filter: selecting on
+status was defect D2 (1357 Steam games at 'not_downloaded' were invisible to
+every sweep from 2026-06-18 onward). Ordering by last_measure_attempt_at means
+an interrupted sweep resumes by construction on its next run, with no persisted
+cursor. Pre-flight-skips on validator-unhealthy; per-game errors are isolated.
 """
 
 from __future__ import annotations
@@ -22,25 +25,30 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
-# Includes 'unknown' so a newly-purchased game (inserted at the default 'unknown'
-# by library_sync, then cached by the host SteamPrefill cron) is auto-validated by
-# the scheduled gated sweep — there is no scheduled FULL sweep, so without this an
-# 'unknown' game would never be validated. `owned = 1` bounds the churn; an
-# uncovered 'unknown' game returns outcome='error' which validate leaves untouched.
+# Gated sweep: every owned game, least-recently-attempted first.
+#
+# There is deliberately NO `status IN (...)` filter. The previous filter omitted
+# 'not_downloaded', which made 1357 Steam games invisible to every sweep from
+# 2026-06-18 onward. Selecting on status at all is the bug class; removing the
+# filter removes it permanently rather than adding one more value to a list.
+#
+# Ordering by last_measure_attempt_at (NULLS FIRST) replaces the old ORDER BY id.
+# It needs no persisted cursor: games already attempted sort to the back, so an
+# interrupted sweep resumes correctly on its next run by construction.
 _CANDIDATE_SQL = (
     "SELECT id, status FROM games "
-    "WHERE status IN ('unknown','up_to_date','validation_failed') AND owned = 1 "
-    "ORDER BY id"
+    "WHERE owned = 1 "
+    "ORDER BY last_measure_attempt_at ASC NULLS FIRST, id ASC"
 )
 
-# `full` mode (validate-all backfill, 2026-06-24): validate EVERY game across
-# all platforms, not just the already-cached subset. Carried on jobs.payload
-# `{"full": true}`.
-_CANDIDATE_SQL_FULL = "SELECT id, status FROM games ORDER BY id"
+# `full` mode additionally includes unowned games.
+_CANDIDATE_SQL_FULL = (
+    "SELECT id, status FROM games ORDER BY last_measure_attempt_at ASC NULLS FIRST, id ASC"
+)
 
 
 async def sweep_handler(job: dict[str, Any], deps: Deps) -> None:
-    """Validate every cached, non-blocked game (Steam or Epic) in batches (F13).
+    """Validate every owned game (Steam or Epic), in batches (F13).
 
     Best-effort: an unhealthy validator or a missing agent client is a SKIP (the
     job succeeds — nothing to do), and a per-game failure never aborts the sweep.
@@ -97,7 +105,14 @@ async def sweep_handler(job: dict[str, Any], deps: Deps) -> None:
                 # must NOT inflate the drift metric (adversarial finding 1).
                 if prior == "up_to_date" and result.outcome in ("partial", "missing"):
                     evicted += 1
-                elif prior == "validation_failed" and result.outcome == "cached":
+                # 'not_downloaded' counts as a recovery too: the sweep now reaches
+                # it (no status filter), and measurement.py maps outcome='missing'
+                # to status='not_downloaded' — so a game that was truly absent and
+                # is now found cached is exactly as much a recovery as one that
+                # was merely partial.
+                elif (
+                    prior in ("validation_failed", "not_downloaded") and result.outcome == "cached"
+                ):
                     recovered += 1
 
     await asyncio.gather(*(_one(int(r["id"]), str(r["status"])) for r in rows))

@@ -61,13 +61,13 @@ async def test_sweep_skips_when_no_agent_client(pool):
 
 
 async def test_sweep_validates_candidate_games_all_platforms(pool, monkeypatch):
-    # candidates: up_to_date + validation_failed, any platform.
-    # NOT: blocked, not_downloaded (regardless of platform).
+    # Candidates: every OWNED game regardless of status or platform (Task 5 —
+    # there is no status filter at all; selecting on status was the bug class).
     _healthy(monkeypatch)
     g_ok = await _seed(pool, status="up_to_date", app_id="1")
     g_vf = await _seed(pool, status="validation_failed", app_id="2")
-    await _seed(pool, status="blocked", app_id="3")
-    await _seed(pool, status="not_downloaded", app_id="4")
+    g_blocked = await _seed(pool, status="blocked", app_id="3")
+    g_nd = await _seed(pool, status="not_downloaded", app_id="4")
     g_epic = await _seed(pool, platform="epic", status="up_to_date", app_id="5")
 
     seen: list[int] = []
@@ -87,8 +87,9 @@ async def test_sweep_validates_candidate_games_all_platforms(pool, monkeypatch):
 
     monkeypatch.setattr("orchestrator.jobs.handlers.sweep.validate_one_game", fake_validate_one)
     await sweep_handler(_job(), Deps(pool=pool, agent_client=_Agent()))
-    # Steam + epic both swept; blocked / not_downloaded excluded regardless of platform.
-    assert sorted(seen) == sorted([g_ok, g_vf, g_epic])
+    # Steam + epic, every status, all swept — measuring a blocked or
+    # not_downloaded game is harmless; excluding on status was the D2 bug.
+    assert sorted(seen) == sorted([g_ok, g_vf, g_blocked, g_nd, g_epic])
 
 
 async def test_gated_sweep_includes_unknown_owned_game(pool, monkeypatch):
@@ -166,6 +167,32 @@ async def test_sweep_error_outcome_not_counted_as_evicted(pool, monkeypatch):
     assert done, "sweep.completed not logged"
     assert done[0].kwargs["evicted"] == 0  # error != eviction
     assert done[0].kwargs["validation_error"] == 1  # surfaced, not silently absent
+
+
+async def test_sweep_not_downloaded_to_cached_counted_as_recovered(pool, monkeypatch):
+    """Task 5: since the sweep now reaches 'not_downloaded' games at all (D2),
+    a 'not_downloaded' game that measures back to 'cached' is a recovery exactly
+    like a 'validation_failed' one — not just a fresh discovery."""
+    import structlog.testing as st
+
+    import orchestrator.jobs.handlers.sweep as sweep_mod
+
+    _healthy(monkeypatch)
+    await _seed(pool, status="not_downloaded", app_id="1")
+
+    async def cached_validate_one(pool_, deps_, game_id, settings):
+        from orchestrator.validator.disk_stat import ValidationResult
+
+        return ValidationResult(1, 1, 0, "cached", "100", None)
+
+    cap = st.CapturingLogger()
+    monkeypatch.setattr(sweep_mod, "validate_one_game", cached_validate_one)
+    monkeypatch.setattr(sweep_mod, "_log", cap)
+    await sweep_handler(_job(), Deps(pool=pool, agent_client=_Agent()))
+
+    done = [c for c in cap.calls if c.args and c.args[0] == "sweep.completed"]
+    assert done, "sweep.completed not logged"
+    assert done[0].kwargs["recovered"] == 1
 
 
 async def test_sweep_skips_when_agent_reports_validator_unhealthy(pool, monkeypatch, tmp_path):
@@ -255,7 +282,7 @@ async def test_full_payload_selects_all_platforms(pool, monkeypatch):
 
 
 async def test_default_payload_keeps_status_gated(pool, monkeypatch):
-    """A null payload keeps the status-gated weekly-cron candidate SQL."""
+    """A null payload keeps the owned-gated (not full) weekly-cron candidate SQL."""
     import orchestrator.jobs.handlers.sweep as sweep_mod
 
     _healthy(monkeypatch)
@@ -264,13 +291,13 @@ async def test_default_payload_keeps_status_gated(pool, monkeypatch):
     job = {"id": 1, "kind": "sweep", "payload": None}
     await sweep_handler(job, Deps(pool=pool, agent_client=_Agent()))
     assert captured["sql"] == sweep_mod._CANDIDATE_SQL
-    # Gated (not full) SQL: status-scoped incl. 'unknown' (new-purchase auto-cover), owned-guarded.
-    assert "status IN ('unknown','up_to_date','validation_failed')" in captured["sql"]
+    # Gated (not full) SQL: owned-guarded, no status filter at all (Task 5 — D2).
+    assert "status IN" not in captured["sql"]
     assert "owned = 1" in captured["sql"]
 
 
 async def test_malformed_payload_falls_back_to_gated(pool, monkeypatch):
-    """A non-JSON payload must not raise — fall back to the status-gated sweep."""
+    """A non-JSON payload must not raise — fall back to the owned-gated sweep."""
     import orchestrator.jobs.handlers.sweep as sweep_mod
 
     _healthy(monkeypatch)
