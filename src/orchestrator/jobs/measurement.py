@@ -291,13 +291,15 @@ async def record_job_outcome(
 ) -> None:
     """Record how the last job FAILED. Never touches cache truth.
 
-    Every caller is a failure path — both prefill handlers, the worker's job
-    timeout, and the boot reaper — and nothing clears the column on success. So
-    ``last_job_outcome`` does not mean "how the last job ended"; it means "how
-    the last job that failed, failed", and it stays set until the next failure
-    overwrites it. Read it that way: it is a lingering fault description, not a
-    status. ``last_job_outcome_at`` dates that failure, and a caller wanting "did
-    the most recent job succeed?" must ask the ``jobs`` table instead.
+    Every caller is a failure path — both prefill handlers and the worker's job
+    timeout — and nothing clears the column on success. (The boot reaper records
+    the same interruption, but mirrors this three-column write inline rather than
+    calling here.) So ``last_job_outcome`` does not mean "how the last job
+    ended"; it means "how the last job that failed, failed", and it stays set
+    until the next failure overwrites it. Read it that way: it is a lingering
+    fault description, not a status. ``last_job_outcome_at`` dates that failure,
+    and a caller wanting "did the most recent job succeed?" must ask the ``jobs``
+    table instead.
 
     The text is also mirrored into the legacy ``last_error`` column until that
     column is removed: the games API, the CLI and Game_shelf all still read it,

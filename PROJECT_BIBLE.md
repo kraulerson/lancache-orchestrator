@@ -220,21 +220,22 @@ Full matrix in `docs/phase-1/threat-model.md` §5 cross-references every TM to i
 
 ## 5. Data Model
 
-<!-- Last Updated: 2026-04-26 -->
+<!-- Last Updated: 2026-09-07 -->
 
 Full artifact: `docs/phase-1/data-model.md`. Canonical SQL lives at `src/orchestrator/db/migrations/0001_initial.sql` (packaged as Python package-data per ADR-0008, loaded via `importlib.resources`).
 
 ### 5.1 Entity inventory
 
-Seven entity tables + one meta table:
+Eight entity tables + one meta table:
 
 - `platforms` — enum-like with 2 rows (seeded by 0001).
-- `games` — one row per `(platform, app_id)`.
+- `games` — one row per `(platform, app_id)`. Since migration 0015 the row carries **cache truth** (`status`, `status_measured_at`, `last_measure_attempt_at`) and **job outcome** (`last_job_outcome`, `last_job_outcome_at`) as separate, disjoint sets of columns — see §5.7.
 - `manifests` — one row per `(game_id, version)`, `raw BLOB` compressed.
 - `block_list` — independent; no FK to games (allows pre-blocking unknown app_ids).
 - `validation_history` — one row per F7 run.
 - `jobs` — one row per enqueued operation (prefill / validate / library_sync / auth_refresh / sweep).
 - `cache_observations` — populated only when Post-MVP access-log tail ships (DQ2 — schema ships in 0001).
+- `measurement_transitions` — one row per *observed* cache-truth write (commanded changes excepted — see §5.7) (migration 0015): `game_id`, `prior`, `new_status`, `downward`, `occurred_at`. Durable rather than in-memory because the circuit breaker that reads it must survive a restart, and a restart is exactly what produced the 2026-09-01 corruption.
 - `schema_migrations` — migration runner meta; created by runner if missing.
 
 ### 5.2 Key constraints
@@ -242,6 +243,7 @@ Seven entity tables + one meta table:
 - `games.platform REFERENCES platforms(name) ON DELETE RESTRICT` (DQ8).
 - `manifests.game_id REFERENCES games(id) ON DELETE CASCADE`.
 - `validation_history.game_id REFERENCES games(id) ON DELETE CASCADE`.
+- `measurement_transitions.game_id REFERENCES games(id) ON DELETE CASCADE`, plus `CHECK (downward IN (0, 1))`.
 - `jobs.game_id REFERENCES games(id) ON DELETE SET NULL` — job history preserved even if a game row is later removed.
 - `UNIQUE(platform, app_id)` on `games` and `block_list`.
 - `CHECK` enumerations on `platforms.name`, `platforms.auth_status`, `games.status`, `jobs.state`, `jobs.kind`, `validation_history.outcome`, `cache_observations.event`.
@@ -266,11 +268,24 @@ Numbered `.sql` files in `src/orchestrator/db/migrations/` (ships as Python pack
 - `jobs`: 90-day prune for non-error rows, daily. Error rows kept indefinitely.
 - `manifests`: keep latest 3 versions per game, weekly prune.
 - `cache_observations`: 30-day prune, weekly (no-op in MVP).
+- `measurement_transitions`: **no retention policy yet** — one row per *observed* cache-truth write (commanded changes excepted), on the order of 1.7M rows/year at current sweep rates. Only rows inside the breaker window are ever read; a periodic prune is a known follow-up.
 - `platforms`, `games`, `block_list`: never auto-pruned.
 
 ### 5.6 Concurrency model
 
 Single-process, single-writer-lock application-side. Implemented in BL4 as a hybrid `aiosqlite` pool: 1 dedicated writer connection + N reader connections (default 8, configurable via `ORCH_POOL_READERS` 1..32). WAL handles reader concurrency; application `asyncio.Lock` serializes all writes; `BEGIN IMMEDIATE` provides engine-level serialization; `busy_timeout=5000ms` absorbs transient contention. Defense-in-depth eliminates SQLITE_BUSY under F12×F13 overlap (threat-model §4.3.2 mitigation). Reader connections enforce read-only at the SQLite layer via `PRAGMA query_only=ON`. Connection-replacement state machine on disk-I/O errors with per-role storm guard (>3 in 60s → degraded). See ADR-0011 for full architecture.
+
+### 5.7 Cache truth vs job outcome (migration 0015, design 2026-09-04)
+
+Design artifact: `docs/superpowers/specs/2026-09-04-cache-validation-integrity-design.md`.
+
+`games.status` used to carry two unrelated meanings — what a measurement found on disk, and how the last job ended. On 2026-09-01 an interrupted prefill batch stamped 1769 games with a dead job's outcome, and Epic's scheduled prefill (which reads status) would have re-downloaded 655 already-cached titles. The two meanings now live in disjoint columns, and the split is enforced rather than merely documented.
+
+- **One writer.** `games.status` and `games.status_measured_at` are written by exactly one function: `orchestrator.jobs.measurement.record_measurement()`. Every other module — the validate handler, both prefill handlers, the jobs worker, the boot reaper, purge, library_sync — records how a job ended through `record_job_outcome()`, which writes `last_job_outcome` / `last_job_outcome_at` (and mirrors the text into the legacy `last_error` column until that column is retired) and has no access to the truth columns. **The rule is enforced by a build-breaking source scan** (`tests/test_measurement_writer_guard.py`), which fails CI if any other module under `src/orchestrator` contains a statement assigning `status` or `status_measured_at` on `games`. A source scan rather than a runtime test, because the regression it prevents is a new `UPDATE games SET status=…` typed into a handler that no existing test would execute.
+- **The four columns.** `status_measured_at` moves only on a successful measurement; `last_measure_attempt_at` moves on **every** attempt, success or failure; `last_job_outcome` / `last_job_outcome_at` record the last job's fate and are never consulted for a download decision. The `status` vocabulary itself is unchanged (renaming it would have forced a snapshot/drop/recreate of the whole table, since SQLite cannot alter a `CHECK` constraint in place). `downloading` and `failed` are no longer written by anything — in-flight state is the `jobs` row (`state='running'`).
+- **Measurement before download.** Epic's scheduled prefill (`scheduler/jobs.py::enqueue_scheduled_prefill`) selects `status IN ('validation_failed','not_downloaded') AND status_measured_at IS NOT NULL`. Previously `status <> 'up_to_date'`, i.e. "not proven cached" meant "download it". Nothing is downloaded without a measurement that actually looked and found the game absent or incomplete; `unknown` triggers measurement, never traffic. (Steam downloading stays driven by the host SteamPrefill cron and is out of this scope.)
+- **Ordering is the resume cursor.** The F13 sweep selects owned games `ORDER BY last_measure_attempt_at ASC NULLS FIRST, id ASC` and carries **no status filter at all**. A persisted cursor would go stale on every insert or delete and need its own repair path; ordering needs no persisted state, because an attempted game sorts to the back and an interrupted sweep therefore resumes by construction. Removing the status filter removes a whole bug class — no status value can ever be excluded from measurement again. Supported by `idx_games_measure_attempt`.
+- **Circuit breaker.** `record_measurement()` ranks the four cache-truth states (`up_to_date` 3, `validation_failed` 2, `not_downloaded` 1, `unknown` 0; every other value carries no rank and takes no part) and refuses to write once `ORCH_MEASUREMENT_BREAKER_THRESHOLD` games have dropped a rank inside `ORCH_MEASUREMENT_BREAKER_WINDOW_MINUTES`, raising `CircuitBreakerTripped` and pushing DOWN to `ORCH_KUMA_PUSH_MEASUREMENT_BREAKER` once per window. Upward moves are ignored at any volume, so a recovery sweep over repaired `unknown` rows stays silent. The sweep stops on a trip and logs `sweep.aborted` rather than `sweep.completed`. **`commanded` is the one exception to all of it:** `record_measurement(..., commanded=True)` — passed only by purge, whose files are already unlinked by the time it records — skips the breaker and writes no transition row, because a purge is cache truth this system *caused* rather than an observation whose trustworthiness is in question, and refusing it would leave a green badge over an empty cache (security audit finding 1, SEV-2). The trade is that a purge storm cannot trip the alarm; it is visible instead in the `jobs` table and in the per-game `measurement.commanded` log line.
 
 ---
 
@@ -466,7 +481,7 @@ Game_shelf commits to:
 
 ## 10. Coding Standards
 
-<!-- Last Updated: 2026-04-20 -->
+<!-- Last Updated: 2026-09-07 -->
 
 ### 10.1 Formatting & linting
 
@@ -517,6 +532,7 @@ Mandatory rules (failing CI on match):
 6. Never use `--no-verify` on commits; CI-blocked.
 7. Never stash uncommitted session-artifact files mixed with source changes (per established workflow pattern).
 8. Never assume a platform adapter's protocol surface — always validate upstream response shape with Pydantic.
+9. Never write `games.status` or `games.status_measured_at` outside `jobs/measurement.py::record_measurement()` — cache truth has exactly one writer, and `tests/test_measurement_writer_guard.py` fails the build on any other `UPDATE games SET … status =` / `DO UPDATE SET … status =`. How a job ended goes to `record_job_outcome()` (§5.7).
 
 ---
 

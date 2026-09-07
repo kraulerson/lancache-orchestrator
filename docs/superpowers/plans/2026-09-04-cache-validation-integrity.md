@@ -849,7 +849,13 @@ Do not merge. Karl merges.
 
 1. Deploy to LXC 1105 with a `dpa-pre-N` rollback tag on both hosts first.
 2. Let the sweep run. It now reaches every owned game, oldest-attempt first, and survives interruption. Expect days.
-3. Watch for `measurement.breaker_tripped`. If it fires during the recovery, something is genuinely wrong — investigate before clearing it.
+3. Watch for `measurement.breaker_tripped`. Explain every trip before clearing it — never raise the threshold on one you have not accounted for.
+
+   > **Note (added at final review):** the first convergence sweeps are *expected* to trip it, and those trips are not false positives. Every downward move they record is real — months of genuine lancache eviction landing on rows still stamped green, plus the `validation_failed` → `not_downloaded` reclassification on first re-measurement — so with the default threshold of 25 you should expect roughly 24 corrections to land per run, each ending in `sweep.aborted`, a failed sweep job and a Kuma DOWN.
+   >
+   > The response is not to clear the alarm blind. **First confirm the agent is healthy**: the 2026-08-31 failure signature was ~8% cached reported on *every* game, after the agent lost read access to most of the 256 cache buckets and had to be pinned to `--user 0:0`. A trip that looks like a uniform low percentage across the whole library is the agent, not the cache. (See `docs/security-audits/cache-validation-integrity-security-audit.md`.)
+   >
+   > Once the agent is proven good, raise `ORCH_MEASUREMENT_BREAKER_THRESHOLD` in `/root/orch-lxc.env` for the convergence passes, and **restore it to 25 as soon as one sweep completes clean** — the raised value is a convergence measure, not a new default. Step 4 does not begin until that clean sweep has run.
 4. Once measurement has converged, re-enable Epic prefill by setting `ORCH_SCHEDULED_PREFILL_ENABLED=true` in `/root/orch-lxc.env`. It will then queue only games measurement proved absent — the real number, not 655.
 
 ## Deferred to Game_shelf (separate repo)
