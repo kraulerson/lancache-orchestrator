@@ -137,16 +137,21 @@ async def test_epic_prefill_failed_chunks_records_job_outcome(pool, monkeypatch)
 
     with pytest.raises(RuntimeError):
         await prefill_handler(_job("prefill", gid), Deps(pool=pool, epic_client=stub))
-    g = await pool.read_one("SELECT status, last_job_outcome FROM games WHERE id=?", (gid,))
+    g = await pool.read_one(
+        "SELECT status, last_job_outcome, last_error FROM games WHERE id=?", (gid,)
+    )
     assert g["status"] == "up_to_date"
-    # The chunk-failure path records its tally, then the handler's outer guard
-    # records the raised error over it — both are job outcomes, neither is truth.
-    assert "1/1 chunks" in (g["last_job_outcome"] or "")
+    # The chunk-failure path's tally is the SPECIFIC reason and must survive: the
+    # outer guard records only when nothing more specific was recorded.
+    assert g["last_job_outcome"] == "prefill: 1/1 chunks failed"
+    assert g["last_error"] == g["last_job_outcome"]  # legacy mirror
 
 
 async def test_epic_prefill_manifest_error_records_job_outcome_not_status(pool):
     """A manifest failure never writes cache truth — the game keeps its measured
-    status and the reason lands in last_job_outcome."""
+    status and the reason lands in last_job_outcome. Nothing more specific was
+    recorded here (the failure predates any chunk work), so this is the outer
+    guard's own reason."""
     gid = await _seed_epic_game(pool, app_id="AppD")
 
     class _BadEpic:

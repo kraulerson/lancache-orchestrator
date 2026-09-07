@@ -268,6 +268,12 @@ async def record_job_outcome(
 ) -> None:
     """Record how a job ended. Never touches cache truth.
 
+    The text is also mirrored into the legacy ``last_error`` column until that
+    column is removed: the games API, the CLI and Game_shelf all still read it,
+    and the writers that used to maintain it were the same ``status='failed'``
+    statements this design deleted. Mirroring keeps those surfaces accurate
+    without giving anything but this module a reason to UPDATE ``games``.
+
     Args:
         pool: DB pool. Used directly unless ``tx`` is given.
         game_id: games.id to record against.
@@ -280,7 +286,8 @@ async def record_job_outcome(
     write = _writer(pool, tx)
     text = outcome[:_ERROR_TRUNCATE]
     await write(
-        "UPDATE games SET last_job_outcome=?, last_job_outcome_at=CURRENT_TIMESTAMP WHERE id=?",
-        (text, game_id),
+        "UPDATE games SET last_job_outcome=?, last_job_outcome_at=CURRENT_TIMESTAMP, "
+        "last_error=? WHERE id=?",
+        (text, text, game_id),
     )
     _log.info("job_outcome.recorded", game_id=game_id, outcome=text)

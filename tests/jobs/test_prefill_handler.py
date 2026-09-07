@@ -125,18 +125,21 @@ async def test_steam_success_enqueues_validate_and_marks_cached(pool):
 async def test_steam_failure_records_job_outcome_leaves_status_no_validate(pool):
     """A non-zero SteamPrefill exit is a JOB outcome, not a cache finding: it is
     recorded in last_job_outcome and games.status keeps whatever the last real
-    measurement left there (2026-09-04 split)."""
+    measurement left there (2026-09-04 split). The exit path's reason carries
+    SteamPrefill's output tail and must survive the outer guard's re-raise."""
     game_id = await _seed_game(pool, app_id="730")
     await pool.execute_write("UPDATE games SET status='up_to_date' WHERE id=?", (game_id,))
     driver = _StubDriver(ok=False)
     with pytest.raises(RuntimeError):
         await prefill_handler(_job(game_id), _steam_deps(pool, driver))
     g = await pool.read_one(
-        "SELECT status, last_job_outcome, last_job_outcome_at FROM games WHERE id=?", (game_id,)
+        "SELECT status, last_job_outcome, last_job_outcome_at, last_error FROM games WHERE id=?",
+        (game_id,),
     )
     assert g["status"] == "up_to_date"
-    assert "prefill" in g["last_job_outcome"]
+    assert g["last_job_outcome"] == "prefill: SteamPrefill exited non-zero: stub output"
     assert g["last_job_outcome_at"] is not None
+    assert g["last_error"] == g["last_job_outcome"]  # legacy mirror
     vj = await pool.read_one("SELECT id FROM jobs WHERE kind='validate' AND game_id=?", (game_id,))
     assert vj is None
 
@@ -144,7 +147,8 @@ async def test_steam_failure_records_job_outcome_leaves_status_no_validate(pool)
 async def test_steam_driver_error_records_job_outcome_not_status(pool):
     """A driver exception (subprocess crash) records the outcome and leaves cache
     truth alone — the game is never written 'downloading' or 'failed' (the
-    UAT-10 #2 stuck-'downloading' failure mode is gone with the status write)."""
+    UAT-10 #2 stuck-'downloading' failure mode is gone with the status write).
+    Nothing more specific was recorded, so this is the outer guard's own reason."""
     game_id = await _seed_game(pool, app_id="730")
     await pool.execute_write("UPDATE games SET status='up_to_date' WHERE id=?", (game_id,))
 
@@ -255,8 +259,9 @@ async def test_steam_agent_success_same_db_writes(pool, monkeypatch):
 
 
 async def test_steam_agent_failure_records_job_outcome_no_validate(pool, monkeypatch):
-    """agent returns ok=False → last_job_outcome recorded, status untouched,
-    RuntimeError raised, and no validate job enqueued (mirrors the driver path)."""
+    """agent returns ok=False → the agent's output tail is recorded as
+    last_job_outcome, status untouched, RuntimeError raised, and no validate job
+    enqueued (mirrors the driver path)."""
     _agent_enabled(monkeypatch)
     game_id = await _seed_game(pool, app_id="730")
     await pool.execute_write("UPDATE games SET status='up_to_date' WHERE id=?", (game_id,))
@@ -270,7 +275,7 @@ async def test_steam_agent_failure_records_job_outcome_no_validate(pool, monkeyp
         await prefill_handler(_job(game_id), deps)
     g = await pool.read_one("SELECT status, last_job_outcome FROM games WHERE id=?", (game_id,))
     assert g["status"] == "up_to_date"
-    assert g["last_job_outcome"] is not None
+    assert g["last_job_outcome"] == "prefill: SteamPrefill exited non-zero: boom: exited 1"
     vj = await pool.read_one("SELECT id FROM jobs WHERE kind='validate' AND game_id=?", (game_id,))
     assert vj is None
 
@@ -455,7 +460,9 @@ async def test_epic_agent_failed_chunks_records_job_outcome(pool, monkeypatch):
         await prefill_handler(_job(gid, platform="epic"), deps)
     g = await pool.read_one("SELECT status, last_job_outcome FROM games WHERE id=?", (gid,))
     assert g["status"] == "up_to_date"
-    assert g["last_job_outcome"] is not None
+    # The #169 failure-reason tally is the whole point of this reason string, so
+    # it must be what survives — not the generic RuntimeError the guard sees.
+    assert g["last_job_outcome"] == "prefill: 1/1 chunks failed (http 403: 1)"
     assert _unreachable_verify.called is False  # verify is skipped on the failure path
 
 

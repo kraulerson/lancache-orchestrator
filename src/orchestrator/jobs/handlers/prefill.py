@@ -48,6 +48,22 @@ def _failure_suffix(failure_reasons: dict[str, int]) -> str:
     return " (" + ", ".join(f"{r}: {n}" for r, n in failure_reasons.items()) + ")"
 
 
+class _OutcomeRecorded:
+    """Whether the inner prefill already recorded a specific failure reason.
+
+    The two known-failure paths (Epic's chunk tally, SteamPrefill's output tail)
+    say far more than the exception the outer guard sees, so the guard records
+    only when this is still unset. Before the 2026-09-04 split the old
+    ``WHERE ... AND status='downloading'`` clause did the same job implicitly, by
+    no-oping once the inner path had already moved the row.
+    """
+
+    __slots__ = ("recorded",)
+
+    def __init__(self) -> None:
+        self.recorded = False
+
+
 # Epic manifest upsert (depot_id is NULL — Epic has no depots). Keyed on
 # (game_id, version); a re-fetch updates the existing row.
 # cdn_base (migration 0010) is required by the Epic disk-stat validator to
@@ -97,17 +113,19 @@ async def _epic_prefill(job: dict[str, Any], deps: Deps) -> None:
 
     job_id = job.get("id")
     _log.info("prefill.epic.started", job_id=job_id, game_id=game_id)
+    outcome = _OutcomeRecorded()
     try:
-        await _epic_prefill_inner(job_id, game_id, game, deps, epic_client)
+        await _epic_prefill_inner(job_id, game_id, game, deps, epic_client, outcome=outcome)
     except Exception as e:
         # How the JOB ended, never what the cache holds: recorded as a job
         # outcome, so the game keeps the status its last real measurement gave
         # it. Nothing has to be un-stuck afterwards either — the in-flight signal
         # is the jobs row (state='running'), not a 'downloading' status. The
-        # chunk-failure path records its own tally first; this overwrites it with
-        # the raised error (the tally stays in the log and in jobs.error).
-        with contextlib.suppress(Exception):
-            await record_job_outcome(deps.pool, game_id, f"prefill: {type(e).__name__}: {e}")
+        # chunk-failure path's tally is more specific than this exception, so it
+        # is left in place when it already recorded one.
+        if not outcome.recorded:
+            with contextlib.suppress(Exception):
+                await record_job_outcome(deps.pool, game_id, f"prefill: {type(e).__name__}: {e}")
         raise
 
 
@@ -117,6 +135,8 @@ async def _epic_prefill_inner(
     game: dict[str, Any],
     deps: Deps,
     epic_client: EpicClient,
+    *,
+    outcome: _OutcomeRecorded,
 ) -> None:
     try:
         meta = json.loads(game["metadata"] or "{}")
@@ -188,6 +208,7 @@ async def _epic_prefill_inner(
             f"{_failure_suffix(failure_reasons)}"
         )[:200]
         await record_job_outcome(deps.pool, game_id, last_error)
+        outcome.recorded = True
         raise RuntimeError(f"epic prefill failed: {chunks_failed}/{chunks_total} chunks")
 
     # Inline header-HIT verification (epic validation; F7-epic disk-stat deferred).
@@ -283,6 +304,7 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
     job_id = job.get("id")
     force = _payload_force(job)
     _log.info("prefill.started", job_id=job_id, game_id=game_id, force=force)
+    outcome = _OutcomeRecorded()
     try:
         await _steam_prefill_inner(
             job_id,
@@ -292,14 +314,16 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
             prefill_driver,
             agent_enabled=settings.agent_enabled,
             force=force,
+            outcome=outcome,
         )
     except Exception as e:
         # How the JOB ended, never what the cache holds (mirrors the Epic path).
-        # The non-ok-exit path records its own, more specific outcome first; this
-        # overwrites it with the raised error (SteamPrefill's output tail stays in
-        # the log). Status is untouched either way.
-        with contextlib.suppress(Exception):
-            await record_job_outcome(deps.pool, game_id, f"prefill: {type(e).__name__}: {e}")
+        # The non-ok-exit path's reason carries SteamPrefill's output tail, which
+        # this exception does not, so it wins when it has already been recorded.
+        # Status is untouched either way.
+        if not outcome.recorded:
+            with contextlib.suppress(Exception):
+                await record_job_outcome(deps.pool, game_id, f"prefill: {type(e).__name__}: {e}")
         raise
 
 
@@ -312,6 +336,7 @@ async def _steam_prefill_inner(
     *,
     agent_enabled: bool,
     force: bool = False,
+    outcome: _OutcomeRecorded,
 ) -> None:
     try:
         app_id_int = int(game["app_id"])
@@ -346,6 +371,7 @@ async def _steam_prefill_inner(
         # operator-facing reason (it never logs token bytes — see the driver).
         last_error = (f"prefill: SteamPrefill exited non-zero: {raw[-150:]}")[:200]
         await record_job_outcome(deps.pool, game_id, last_error)
+        outcome.recorded = True
         raise RuntimeError(f"steam prefill failed for app {app_id_int} (exit non-zero)")
 
     # ID5: success → enqueue a validate job (it sets the final status). The

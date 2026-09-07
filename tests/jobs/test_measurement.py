@@ -122,7 +122,7 @@ async def test_job_outcome_never_touches_status(pool):
     await record_job_outcome(pool, game_id, "prefill interrupted")
 
     row = await pool.read_one(
-        "SELECT status, status_measured_at, last_job_outcome, last_job_outcome_at "
+        "SELECT status, status_measured_at, last_job_outcome, last_job_outcome_at, last_error "
         "FROM games WHERE id=?",
         (game_id,),
     )
@@ -130,6 +130,9 @@ async def test_job_outcome_never_touches_status(pool):
     assert row["status_measured_at"] is None
     assert row["last_job_outcome"] == "prefill interrupted"
     assert row["last_job_outcome_at"] is not None
+    # Legacy mirror: the API, the CLI and Game_shelf still read last_error, so it
+    # must carry the same text until that column is retired.
+    assert row["last_error"] == row["last_job_outcome"]
 
 
 async def test_job_outcome_is_truncated(pool):
