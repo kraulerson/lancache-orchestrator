@@ -5,7 +5,16 @@ recently-attempted first, in batches — there is no status filter: selecting on
 status was defect D2 (1357 Steam games at 'not_downloaded' were invisible to
 every sweep from 2026-06-18 onward). Ordering by last_measure_attempt_at means
 an interrupted sweep resumes by construction on its next run, with no persisted
-cursor. Pre-flight-skips on validator-unhealthy; per-game errors are isolated.
+cursor. Pre-flight-skips on validator-unhealthy.
+
+Three per-game failures, three different answers (Task 6):
+
+* cancellation (the worker's runtime budget expired) — record the ATTEMPT, write
+  no cache truth, re-raise so the job actually ends;
+* any other exception (including the agent's httpx read timeouts, which surface
+  as ``AgentError``) — record the attempt, count the error, carry on;
+* ``CircuitBreakerTripped`` — stop the whole sweep, because the breaker means
+  writing has halted.
 """
 
 from __future__ import annotations
@@ -18,6 +27,7 @@ import structlog
 
 from orchestrator.core.settings import get_settings
 from orchestrator.jobs.handlers.validate import validate_one_game
+from orchestrator.jobs.measurement import CircuitBreakerTripped, record_measurement
 from orchestrator.validator.self_test import validator_self_test
 
 if TYPE_CHECKING:
@@ -80,13 +90,68 @@ async def sweep_handler(job: dict[str, Any], deps: Deps) -> None:
     evicted = 0
     recovered = 0
     lock = asyncio.Lock()
+    # The breaker that stopped this sweep, once one game has hit it.
+    tripped: CircuitBreakerTripped | None = None
+
+    async def _record_attempt(game_id: int) -> None:
+        """Stamp last_measure_attempt_at and nothing else.
+
+        An outcome of 'error' is not a measurement, so measurement.py writes no
+        cache truth for it — the game just rotates to the back of the queue. The
+        guard is here because this runs on the failure path, including during
+        shutdown: a DB write that fails while the process is going down must not
+        mask the failure (or the cancellation) that brought us here.
+        """
+        try:
+            await record_measurement(deps.pool, game_id, "error")
+        except Exception as e:
+            _log.warning(
+                "sweep.attempt_record_failed",
+                job_id=job_id,
+                game_id=game_id,
+                error=type(e).__name__,
+                reason=str(e)[:200],
+            )
 
     async def _one(game_id: int, prior: str) -> None:
-        nonlocal errors, evicted, recovered
+        nonlocal errors, evicted, recovered, tripped
         async with sem:
+            # Short-circuit once the breaker has tripped: no validation, and no
+            # attempt stamp either — this game was never measured.
+            if tripped is not None:
+                return
             try:
                 result = await validate_one_game(deps.pool, deps, game_id, settings)
+            except asyncio.CancelledError:
+                # The 6h runtime budget expired, or the job was cancelled. Record
+                # the ATTEMPT so the game rotates to the back, write no cache
+                # truth, then re-raise so the job actually ends. This is the
+                # 2026-09-01 replay: a cancelled sweep must corrupt nothing.
+                await _record_attempt(game_id)
+                raise
+            except CircuitBreakerTripped as e:
+                # Not a per-game error — the breaker is a global stop. The spec
+                # says a tripped breaker STOPS writing, and a sweep that keeps
+                # issuing refused writes for hours is not stopped. Abandoning the
+                # remaining games costs nothing: they keep their older
+                # last_measure_attempt_at, so the next run picks them up first.
+                async with lock:
+                    already = tripped is not None
+                    if not already:
+                        tripped = e
+                if not already:
+                    _log.error(
+                        "sweep.breaker_tripped",
+                        job_id=job_id,
+                        game_id=game_id,
+                        reason=str(e)[:200],
+                    )
+                return
             except Exception as e:  # isolate — one bad game never aborts the sweep
+                # Includes the agent's httpx read timeouts (AgentError). A
+                # RETURNED 'error' outcome is already stamped inside
+                # validate_one_game; only the raised path needs stamping here.
+                await _record_attempt(game_id)
                 async with lock:
                     errors += 1
                 _log.warning(
@@ -116,6 +181,24 @@ async def sweep_handler(job: dict[str, Any], deps: Deps) -> None:
                     recovered += 1
 
     await asyncio.gather(*(_one(int(r["id"]), str(r["status"])) for r in rows))
+
+    if tripped is not None:
+        # Fail the job with the breaker's own message: an operator reading the
+        # jobs table has to see WHY the sweep stopped, not a truncated run that
+        # looks like a success.
+        _log.error(
+            "sweep.aborted",
+            job_id=job_id,
+            total=len(rows),
+            cached=counts["cached"],
+            validation_failed=counts["partial"] + counts["missing"],
+            validation_error=counts["error"],
+            evicted=evicted,
+            recovered=recovered,
+            errors=errors,
+            reason=str(tripped)[:200],
+        )
+        raise tripped
 
     _log.info(
         "sweep.completed",
