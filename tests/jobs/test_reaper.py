@@ -126,7 +126,7 @@ class TestGameStatusReaper:
         n = await reap_orphaned_game_status(pool)
         assert n == 1
         row = await pool.read_one(
-            "SELECT status, last_job_outcome, last_job_outcome_at, status_measured_at "
+            "SELECT status, last_job_outcome, last_job_outcome_at, status_measured_at, last_error "
             "FROM games WHERE id=?",
             (gid,),
         )
@@ -134,6 +134,8 @@ class TestGameStatusReaper:
         assert row["last_job_outcome"] == GAME_REAPER_ERROR_MESSAGE
         assert row["last_job_outcome_at"] is not None
         assert row["status_measured_at"] is None
+        # Same legacy mirror record_job_outcome() maintains, for the API/CLI readers.
+        assert row["last_error"] == GAME_REAPER_ERROR_MESSAGE
 
     async def test_leaves_non_transient_statuses_untouched(self, pool):
         from orchestrator.jobs.reaper import reap_orphaned_game_status

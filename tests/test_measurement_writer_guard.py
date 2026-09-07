@@ -11,7 +11,9 @@ exercises today's code paths would ever run it.
 
 from __future__ import annotations
 
+import io
 import re
+import tokenize
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "orchestrator"
@@ -20,24 +22,49 @@ ALLOWED = {SRC / "jobs" / "measurement.py"}
 # Python joins adjacent string literals, so one SQL statement is routinely spelled
 # as `"... owned = 1, " "status = CASE ..."`. Collapse the seam before matching or
 # the assignment hides behind a quote (this is exactly how library_sync's
-# not_downloaded reset escaped the first draft of this guard).
+# not_downloaded reset escaped the first draft of this guard). Comments are
+# stripped first, because this repo's dominant idiom interleaves `#` notes
+# BETWEEN the literals of one statement.
 _LITERAL_SEAM = re.compile(r"(['\"])\s*\1")
 
 # Both heads that assign columns: a plain UPDATE and the ON CONFLICT upsert form.
-# The body stops at WHERE so a legitimate `UPDATE games SET last_job_outcome=?
-# WHERE status='downloading'` (the boot reaper) is not a hit — only an assignment
-# to the truth columns is. Quotes and `;` bound the body to a single statement.
+# The body stops at WHERE, which is what spares a legitimate `UPDATE games SET
+# last_job_outcome=? WHERE status='downloading'` (the boot reaper) — only an
+# assignment to a truth column is a hit. `'` is deliberately NOT excluded from
+# the body: an inline SQL literal earlier in the same SET clause
+# (`SET last_error='boom', status='failed'`) must not hide what follows it.
 CACHE_TRUTH_WRITE = re.compile(
     r"(?:UPDATE\s+games\s+SET|DO\s+UPDATE\s+SET)"
-    r"(?:(?!\bWHERE\b)[^\"';])*?"
+    r"(?:(?!\bWHERE\b)[^\";])*?"
     r"\b(?:status|status_measured_at)\s*=",
     re.IGNORECASE,
 )
 
 
+def strip_comments(source: str) -> str:
+    """Blank out `#` comments, leaving every other byte (and all line numbers) in place.
+
+    Tokenizing rather than regexing is the point: a `#` inside a string literal
+    is not a comment, and an apostrophe inside a comment is not a quote. Source
+    that does not lex (a partial snippet) is returned unchanged — the guard then
+    scans a little less, but never crashes the build for the wrong reason.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return source
+    lines = source.splitlines(keepends=True)
+    for tok in reversed(tokens):  # reversed: earlier offsets stay valid
+        if tok.type == tokenize.COMMENT:
+            (row, start_col), (_, end_col) = tok.start, tok.end
+            line = lines[row - 1]
+            lines[row - 1] = line[:start_col] + line[end_col:]
+    return "".join(lines)
+
+
 def normalise(source: str) -> str:
     """Join implicitly concatenated string literals so one SQL statement is one span."""
-    return _LITERAL_SEAM.sub("", source)
+    return _LITERAL_SEAM.sub("", strip_comments(source))
 
 
 def writes_cache_truth(source: str) -> bool:
@@ -83,6 +110,24 @@ _MUST_MATCH = {
     "guarded downloading reset": (
         "\"UPDATE games SET status='failed', last_error=? \"\n"
         "\"WHERE id=? AND status='downloading'\""
+    ),
+    # The truth column need not come first: an inline SQL literal ahead of it
+    # must not hide it (the deleted prefill write, columns swapped).
+    "truth column after a quoted value": (
+        "\"UPDATE games SET last_error='boom', status='failed' WHERE id=?\""
+    ),
+    "truth column after a quoted version": (
+        "\"UPDATE games SET cached_version='42', status='unknown' WHERE id=?\""
+    ),
+    # This repo's dominant multi-line SQL idiom interleaves `#` comments between
+    # the literals (scheduler/jobs.py, library_sync.py, prefill.py all do it).
+    "literals separated by a comment": (
+        "_SQL = (\n"
+        '    "UPDATE games SET owned = 1, "\n'
+        "    # Keep a known-good status if this enumeration didn't carry one.\n"
+        "    \"status = 'unknown' \"\n"
+        '    "WHERE id=?"\n'
+        ")"
     ),
 }
 

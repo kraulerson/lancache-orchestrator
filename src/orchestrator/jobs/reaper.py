@@ -62,14 +62,17 @@ async def reap_orphaned_game_status(pool: Pool) -> int:
     BEFORE the 2026-09-04 split, which nothing else would ever explain.
 
     It therefore stamps the job outcome and leaves status alone. Cache truth is
-    restored by measurement, not by a reaper guessing: the sweep now measures
-    every owned game, so a stranded row gets a real status the first time it is
-    reached. Run at boot AFTER ``reap_running_jobs``. Returns rows touched.
+    restored by the next measurement of the row
+    (``jobs.measurement.record_measurement``), never by this code guessing from a
+    job's fate. Run at boot AFTER ``reap_running_jobs``. Returns rows touched.
+
+    ``last_error`` carries the same text, mirroring ``record_job_outcome`` for
+    the API/CLI readers that still consume that legacy column.
     """
     rowcount = await pool.execute_write(
-        "UPDATE games SET last_job_outcome=?, last_job_outcome_at=CURRENT_TIMESTAMP "
-        "WHERE status='downloading'",
-        (GAME_REAPER_ERROR_MESSAGE,),
+        "UPDATE games SET last_job_outcome=?, last_job_outcome_at=CURRENT_TIMESTAMP, "
+        "last_error=? WHERE status='downloading'",
+        (GAME_REAPER_ERROR_MESSAGE, GAME_REAPER_ERROR_MESSAGE),
     )
     if rowcount > 0:
         _log.warning("jobs.reaper.reaped_orphan_downloading_games", count=rowcount)

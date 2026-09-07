@@ -131,8 +131,9 @@ async def test_error_leaves_downloading_untouched(pool):
     """An infra error writes NO status at all — not even for the transient
     'downloading' state. The old write (status='failed' where status='downloading',
     UAT-10 #3) recorded a job outcome as a cache finding, which is exactly the
-    conflation the 2026-09-04 design removes. The startup job reaper resolves
-    stranded 'downloading' rows instead."""
+    conflation the 2026-09-04 design removes. A row still carrying the legacy
+    'downloading' value is corrected by its next real measurement; the boot
+    reaper only records that the job was interrupted."""
     game_id = await _seed_game(pool)
     # Seed a real measurement timestamp: asserting a column that was NULL from
     # birth is still NULL would pass even if the error path rewrote truth.

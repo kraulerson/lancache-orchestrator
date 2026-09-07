@@ -62,8 +62,8 @@ async def validate_one_game(
     # attempt only: the old "unstick a stranded 'downloading' by setting
     # status='failed'" write lived here and is deliberately gone — that is a job
     # outcome, not a cache measurement. Nothing writes 'downloading' any more
-    # either, and the sweep re-measures every owned game, so a legacy stranded row
-    # gets a real status the next time it is measured.
+    # either, and a legacy row still carrying it is corrected by the next
+    # measurement of that row, never by a handler inferring truth from a failure.
     await record_measurement(pool, game_id, result.outcome)
     return result
 

@@ -38,10 +38,10 @@ _log = structlog.get_logger(__name__)
 # because the gated sweep's candidate SQL skipped `not_downloaded` rows, so a
 # prefilled one could never correct itself (live 2026-08-16: Half-Life: Alyx,
 # Killing Floor 2 and Total War: PHARAOH DYNASTIES were fully cached yet
-# permanently stuck). The same design drops that filter — the sweep measures
-# every owned game — so those rows are re-measured on their own and the reset has
-# nothing left to fix. Guessing a status from "it appeared in an enumeration" is
-# exactly the conflation this design removes.
+# permanently stuck). Correcting such a row is the next measurement's job
+# (``record_measurement``), and widening the sweep's candidate filter so it
+# reaches those rows is a separate step of this design. Guessing a status from
+# "it appeared in an enumeration" is exactly the conflation being removed here.
 _NAMED_UPSERT_SQL = (
     "INSERT INTO games (platform, app_id, title) VALUES ('steam', ?, ?) "
     "ON CONFLICT(platform, app_id) DO UPDATE SET title = excluded.title, owned = 1"

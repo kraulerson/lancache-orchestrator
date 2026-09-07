@@ -118,8 +118,10 @@ async def test_epic_prefill_low_hit_ratio_is_non_gating(pool, monkeypatch):
     monkeypatch.setattr(ph, "epic_verify_cached", fake_verify)
 
     await prefill_handler(_job("prefill", gid), Deps(pool=pool, epic_client=stub))
-    g = await pool.read_one("SELECT status FROM games WHERE id=?", (gid,))
-    assert g["status"] != "failed"  # non-gating: a low sample ratio doesn't fail prefill
+    g = await pool.read_one("SELECT status, last_job_outcome FROM games WHERE id=?", (gid,))
+    # Non-gating: the seeded status survives untouched and no failure is recorded.
+    assert g["status"] == "not_downloaded"
+    assert g["last_job_outcome"] is None
     vj = await pool.read_one("SELECT id FROM jobs WHERE kind='validate' AND game_id=?", (gid,))
     assert vj is not None  # validate enqueued regardless of the sample hit ratio
 

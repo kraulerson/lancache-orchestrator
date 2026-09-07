@@ -146,7 +146,10 @@ async def purge_handler(job: dict[str, Any], deps: Deps) -> None:
     # goes through the single writer as a 'partial' measurement rather than an
     # out-of-band status write: that stamps status_measured_at (the evidence the
     # Epic prefill uses to re-queue the purged game) and counts the drop as a
-    # level transition, so a mass purge registers as the real alarm it is.
+    # level transition, so a mass purge registers as the real alarm it is. The
+    # shared UPDATE also stamps last_validated_at, which is honest here and not
+    # merely tolerated: _record_cache_emptied inserts a real validation_history
+    # observation in this same transaction, so the two agree by construction.
     # ONE transaction. These were two separate writes, so a crash or PoolError
     # between them left the files deleted, the status flagged, and the newest
     # validation_history row still claiming a full cache — the exact badge #293
