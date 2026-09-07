@@ -1,0 +1,115 @@
+"""Fails the build if any module other than jobs/measurement.py writes cache truth.
+
+This is the structural guarantee behind the 2026-09-04 design: a job outcome can
+never again be recorded as a cache-content finding, because only one function is
+permitted to write ``games.status`` / ``games.status_measured_at``.
+
+The scan is deliberately source-level rather than runtime: a regression is a new
+``UPDATE games SET status=...`` somebody types into a handler, and no test that
+exercises today's code paths would ever run it.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+SRC = Path(__file__).resolve().parents[1] / "src" / "orchestrator"
+ALLOWED = {SRC / "jobs" / "measurement.py"}
+
+# Python joins adjacent string literals, so one SQL statement is routinely spelled
+# as `"... owned = 1, " "status = CASE ..."`. Collapse the seam before matching or
+# the assignment hides behind a quote (this is exactly how library_sync's
+# not_downloaded reset escaped the first draft of this guard).
+_LITERAL_SEAM = re.compile(r"(['\"])\s*\1")
+
+# Both heads that assign columns: a plain UPDATE and the ON CONFLICT upsert form.
+# The body stops at WHERE so a legitimate `UPDATE games SET last_job_outcome=?
+# WHERE status='downloading'` (the boot reaper) is not a hit — only an assignment
+# to the truth columns is. Quotes and `;` bound the body to a single statement.
+CACHE_TRUTH_WRITE = re.compile(
+    r"(?:UPDATE\s+games\s+SET|DO\s+UPDATE\s+SET)"
+    r"(?:(?!\bWHERE\b)[^\"';])*?"
+    r"\b(?:status|status_measured_at)\s*=",
+    re.IGNORECASE,
+)
+
+
+def normalise(source: str) -> str:
+    """Join implicitly concatenated string literals so one SQL statement is one span."""
+    return _LITERAL_SEAM.sub("", source)
+
+
+def writes_cache_truth(source: str) -> bool:
+    """True if ``source`` contains a statement assigning games.status(_measured_at)."""
+    return CACHE_TRUTH_WRITE.search(normalise(source)) is not None
+
+
+def test_only_measurement_module_writes_cache_truth() -> None:
+    offenders = []
+    for path in sorted(SRC.rglob("*.py")):
+        if path in ALLOWED:
+            continue
+        if writes_cache_truth(path.read_text(encoding="utf-8")):
+            offenders.append(str(path.relative_to(SRC)))
+    assert not offenders, (
+        "These modules write games.status directly. Route them through "
+        "orchestrator.jobs.measurement.record_measurement() (cache truth) or "
+        "record_job_outcome() (how a job ended) instead: " + ", ".join(offenders)
+    )
+
+
+_MUST_MATCH = {
+    "single-literal failed write": (
+        "await deps.pool.execute_write(\n"
+        "    \"UPDATE games SET status='failed', last_error=? WHERE id=?\",\n"
+        "    (last_error, game_id),\n"
+        ")"
+    ),
+    "validate's truth write": (
+        '"UPDATE games SET status=?, last_validated_at=CURRENT_TIMESTAMP WHERE id=?"'
+    ),
+    "measurement's own write": (
+        '"UPDATE games SET status=?, status_measured_at=CURRENT_TIMESTAMP, "\n'
+        '"last_measure_attempt_at=CURRENT_TIMESTAMP WHERE id=?"'
+    ),
+    "two-literal upsert reset": (
+        "\"INSERT INTO games (platform, app_id, title) VALUES ('steam', ?, ?) \"\n"
+        '"ON CONFLICT(platform, app_id) DO UPDATE SET title = excluded.title, owned = 1, "\n'
+        "\"status = CASE WHEN games.status = 'not_downloaded' THEN 'unknown' "
+        'ELSE games.status END"'
+    ),
+    "statement split across lines": ('"""UPDATE games\n   SET status = \'unknown\'\n"""'),
+    "guarded downloading reset": (
+        "\"UPDATE games SET status='failed', last_error=? \"\n"
+        "\"WHERE id=? AND status='downloading'\""
+    ),
+}
+
+_MUST_NOT_MATCH = {
+    "reaper's job-outcome stamp": (
+        '"UPDATE games SET last_job_outcome=?, last_job_outcome_at=CURRENT_TIMESTAMP "\n'
+        "\"WHERE status='downloading'\""
+    ),
+    "jobs table": "\"UPDATE jobs SET state='failed', finished_at=CURRENT_TIMESTAMP WHERE id=?\"",
+    "platforms table": "\"UPDATE platforms SET auth_status='expired' WHERE name=?\"",
+    "unrelated upsert": (
+        '"INSERT INTO steam_app_info (app_id, name) VALUES (?, ?) "\n'
+        '"ON CONFLICT(app_id) DO UPDATE SET name = excluded.name"'
+    ),
+    "attempt-only write": (
+        '"UPDATE games SET last_measure_attempt_at=CURRENT_TIMESTAMP WHERE id=?"'
+    ),
+    "size write": '"UPDATE games SET size_bytes=? WHERE id=?"',
+}
+
+
+def test_pattern_catches_the_forms_it_must_and_spares_the_ones_it_must_not() -> None:
+    """The scan is only as good as its regex — pin both edges of it."""
+    missed = [name for name, sample in _MUST_MATCH.items() if not writes_cache_truth(sample)]
+    assert not missed, f"pattern failed to catch cache-truth writes: {missed}"
+
+    false_positives = [
+        name for name, sample in _MUST_NOT_MATCH.items() if writes_cache_truth(sample)
+    ]
+    assert not false_positives, f"pattern flagged legitimate writes: {false_positives}"

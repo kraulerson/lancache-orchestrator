@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from orchestrator.core.settings import get_settings
+from orchestrator.jobs.measurement import record_job_outcome
 from orchestrator.platform.epic.manifest import chunk_path as epic_chunk_path
 from orchestrator.platform.epic.models import EpicLibraryItem
 from orchestrator.prefill.epic_downloader import _full_path
@@ -75,10 +76,11 @@ async def prefill_handler(job: dict[str, Any], deps: Deps) -> None:
 
 
 async def _epic_prefill(job: dict[str, Any], deps: Deps) -> None:
-    """Prefill one Epic game (F6): set downloading → fetch a FRESH manifest
-    (Epic signed URLs expire) → store it → download chunks through the lancache →
-    sample-verify the cache HIT → mark up_to_date. F7-Epic disk-stat validation is
-    a deferred follow-up, so the inline HIT verification is the validation here."""
+    """Prefill one Epic game (F6): fetch a FRESH manifest (Epic signed URLs
+    expire) → store it → download chunks through the lancache → sample-verify the
+    cache HIT → enqueue a validate. It writes no status of its own: cache truth
+    comes from the disk-stat validate, and a failure is recorded as a job
+    outcome."""
     if deps.epic_client is None:
         raise RuntimeError("epic_client is required for epic prefill handler")
     epic_client = deps.epic_client
@@ -94,20 +96,18 @@ async def _epic_prefill(job: dict[str, Any], deps: Deps) -> None:
         raise ValueError(f"game {game_id} platform is {game['platform']!r}, not epic")
 
     job_id = job.get("id")
-    await deps.pool.execute_write("UPDATE games SET status='downloading' WHERE id=?", (game_id,))
     _log.info("prefill.epic.started", job_id=job_id, game_id=game_id)
     try:
         await _epic_prefill_inner(job_id, game_id, game, deps, epic_client)
     except Exception as e:
-        # Never leave the game stuck in 'downloading'. The chunk-failure path
-        # already set 'failed' (the guard then no-ops); any other failure
-        # (auth/manifest/network) is marked here before the re-raise.
+        # How the JOB ended, never what the cache holds: recorded as a job
+        # outcome, so the game keeps the status its last real measurement gave
+        # it. Nothing has to be un-stuck afterwards either — the in-flight signal
+        # is the jobs row (state='running'), not a 'downloading' status. The
+        # chunk-failure path records its own tally first; this overwrites it with
+        # the raised error (the tally stays in the log and in jobs.error).
         with contextlib.suppress(Exception):
-            await deps.pool.execute_write(
-                "UPDATE games SET status='failed', last_error=? "
-                "WHERE id=? AND status='downloading'",
-                (f"prefill: {type(e).__name__}: {e}"[:200], game_id),
-            )
+            await record_job_outcome(deps.pool, game_id, f"prefill: {type(e).__name__}: {e}")
         raise
 
 
@@ -187,10 +187,7 @@ async def _epic_prefill_inner(
             f"prefill: {chunks_failed}/{chunks_total} chunks failed"
             f"{_failure_suffix(failure_reasons)}"
         )[:200]
-        await deps.pool.execute_write(
-            "UPDATE games SET status='failed', last_error=? WHERE id=?",
-            (last_error, game_id),
-        )
+        await record_job_outcome(deps.pool, game_id, last_error)
         raise RuntimeError(f"epic prefill failed: {chunks_failed}/{chunks_total} chunks")
 
     # Inline header-HIT verification (epic validation; F7-epic disk-stat deferred).
@@ -249,15 +246,15 @@ def _payload_force(job: dict[str, Any]) -> bool:
 async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
     """Prefill one Steam game through the host-installed SteamPrefill binary (F5).
 
-    Sets the game to 'downloading', then delegates to ``_steam_prefill_inner``
-    inside a guard so any failure (subprocess death, expired session, network)
-    marks the game 'failed' rather than leaving it stuck 'downloading' forever
-    (UAT-10 #2; mirrors the Epic path).
+    Delegates to ``_steam_prefill_inner`` inside a guard so any failure
+    (subprocess death, expired session, network) is recorded as a JOB OUTCOME
+    (mirrors the Epic path). The game's status is cache truth and is left to the
+    validate job the success path enqueues.
 
     When ``settings.agent_enabled`` is True the prefill is delegated to the
     out-of-process data-plane agent via ``deps.agent_client`` instead of the
-    in-process ``SteamPrefillDriver``; the DB writes (downloading → validate
-    enqueue → cached_version) are identical either way.
+    in-process ``SteamPrefillDriver``; the DB writes (validate enqueue →
+    cached_version) are identical either way.
 
     Raises:
         ValueError — unknown game, non-steam platform, or non-numeric app_id.
@@ -285,7 +282,6 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
 
     job_id = job.get("id")
     force = _payload_force(job)
-    await deps.pool.execute_write("UPDATE games SET status='downloading' WHERE id=?", (game_id,))
     _log.info("prefill.started", job_id=job_id, game_id=game_id, force=force)
     try:
         await _steam_prefill_inner(
@@ -298,15 +294,12 @@ async def _steam_prefill(job: dict[str, Any], deps: Deps) -> None:
             force=force,
         )
     except Exception as e:
-        # Never leave the game stuck in 'downloading'. The non-ok-exit path
-        # already set 'failed' (this then no-ops via the status guard); any other
-        # failure (subprocess/network) is marked here before the re-raise.
+        # How the JOB ended, never what the cache holds (mirrors the Epic path).
+        # The non-ok-exit path records its own, more specific outcome first; this
+        # overwrites it with the raised error (SteamPrefill's output tail stays in
+        # the log). Status is untouched either way.
         with contextlib.suppress(Exception):
-            await deps.pool.execute_write(
-                "UPDATE games SET status='failed', last_error=? "
-                "WHERE id=? AND status='downloading'",
-                (f"prefill: {type(e).__name__}: {e}"[:200], game_id),
-            )
+            await record_job_outcome(deps.pool, game_id, f"prefill: {type(e).__name__}: {e}")
         raise
 
 
@@ -352,10 +345,7 @@ async def _steam_prefill_inner(
         # SteamPrefill exited non-zero. Surface the tail of its output as the
         # operator-facing reason (it never logs token bytes — see the driver).
         last_error = (f"prefill: SteamPrefill exited non-zero: {raw[-150:]}")[:200]
-        await deps.pool.execute_write(
-            "UPDATE games SET status='failed', last_error=? WHERE id=?",
-            (last_error, game_id),
-        )
+        await record_job_outcome(deps.pool, game_id, last_error)
         raise RuntimeError(f"steam prefill failed for app {app_id_int} (exit non-zero)")
 
     # ID5: success → enqueue a validate job (it sets the final status). The

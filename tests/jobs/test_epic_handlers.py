@@ -86,8 +86,8 @@ async def test_epic_prefill_downloads_stores_manifest_enqueues_validate(pool, mo
 
     g = await pool.read_one("SELECT status, size_bytes FROM games WHERE id=?", (gid,))
     # Parity with steam: a disk-stat validate (enqueued below) finalizes status;
-    # prefill no longer optimistically marks up_to_date from the sample check.
-    assert g["status"] == "downloading"
+    # prefill writes no status at all, so the seeded value is untouched.
+    assert g["status"] == "not_downloaded"
     assert g["size_bytes"] == 500
     vj = await pool.read_one(
         "SELECT platform, state FROM jobs WHERE kind='validate' AND game_id=?", (gid,)
@@ -124,8 +124,10 @@ async def test_epic_prefill_low_hit_ratio_is_non_gating(pool, monkeypatch):
     assert vj is not None  # validate enqueued regardless of the sample hit ratio
 
 
-async def test_epic_prefill_failed_chunks_marks_failed(pool, monkeypatch):
+async def test_epic_prefill_failed_chunks_records_job_outcome(pool, monkeypatch):
+    """Failed chunks are a job outcome: recorded on the game, status untouched."""
     gid = await _seed_epic_game(pool, app_id="AppB")
+    await pool.execute_write("UPDATE games SET status='up_to_date' WHERE id=?", (gid,))
     stub = _StubEpic(manifest=_manifest())
 
     async def fake_prefill(paths, host, base, settings, **kw):
@@ -135,11 +137,16 @@ async def test_epic_prefill_failed_chunks_marks_failed(pool, monkeypatch):
 
     with pytest.raises(RuntimeError):
         await prefill_handler(_job("prefill", gid), Deps(pool=pool, epic_client=stub))
-    g = await pool.read_one("SELECT status FROM games WHERE id=?", (gid,))
-    assert g["status"] == "failed"
+    g = await pool.read_one("SELECT status, last_job_outcome FROM games WHERE id=?", (gid,))
+    assert g["status"] == "up_to_date"
+    # The chunk-failure path records its tally, then the handler's outer guard
+    # records the raised error over it — both are job outcomes, neither is truth.
+    assert "1/1 chunks" in (g["last_job_outcome"] or "")
 
 
-async def test_epic_prefill_manifest_error_marks_failed_not_stuck_downloading(pool):
+async def test_epic_prefill_manifest_error_records_job_outcome_not_status(pool):
+    """A manifest failure never writes cache truth — the game keeps its measured
+    status and the reason lands in last_job_outcome."""
     gid = await _seed_epic_game(pool, app_id="AppD")
 
     class _BadEpic:
@@ -152,9 +159,9 @@ async def test_epic_prefill_manifest_error_marks_failed_not_stuck_downloading(po
 
     with pytest.raises(EpicManifestError):
         await prefill_handler(_job("prefill", gid), Deps(pool=pool, epic_client=_BadEpic()))
-    g = await pool.read_one("SELECT status, last_error FROM games WHERE id=?", (gid,))
-    assert g["status"] == "failed"  # not stuck in 'downloading'
-    assert "EpicManifestError" in (g["last_error"] or "")
+    g = await pool.read_one("SELECT status, last_job_outcome FROM games WHERE id=?", (gid,))
+    assert g["status"] == "not_downloaded"
+    assert "EpicManifestError" in (g["last_job_outcome"] or "")
 
 
 async def test_epic_prefill_requires_client(pool):

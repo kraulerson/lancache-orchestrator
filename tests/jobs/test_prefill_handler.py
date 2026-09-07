@@ -122,21 +122,31 @@ async def test_steam_success_enqueues_validate_and_marks_cached(pool):
     assert g["cached_version"] == "42"
 
 
-async def test_steam_failure_marks_game_failed_no_validate(pool):
+async def test_steam_failure_records_job_outcome_leaves_status_no_validate(pool):
+    """A non-zero SteamPrefill exit is a JOB outcome, not a cache finding: it is
+    recorded in last_job_outcome and games.status keeps whatever the last real
+    measurement left there (2026-09-04 split)."""
     game_id = await _seed_game(pool, app_id="730")
+    await pool.execute_write("UPDATE games SET status='up_to_date' WHERE id=?", (game_id,))
     driver = _StubDriver(ok=False)
     with pytest.raises(RuntimeError):
         await prefill_handler(_job(game_id), _steam_deps(pool, driver))
-    g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
-    assert g["status"] == "failed"
+    g = await pool.read_one(
+        "SELECT status, last_job_outcome, last_job_outcome_at FROM games WHERE id=?", (game_id,)
+    )
+    assert g["status"] == "up_to_date"
+    assert "prefill" in g["last_job_outcome"]
+    assert g["last_job_outcome_at"] is not None
     vj = await pool.read_one("SELECT id FROM jobs WHERE kind='validate' AND game_id=?", (game_id,))
     assert vj is None
 
 
-async def test_steam_driver_error_marks_failed_not_stuck_downloading(pool):
-    """A driver exception (subprocess crash) must resolve to 'failed', not leave
-    the game stuck 'downloading' (UAT-10 #2 invariant preserved)."""
+async def test_steam_driver_error_records_job_outcome_not_status(pool):
+    """A driver exception (subprocess crash) records the outcome and leaves cache
+    truth alone — the game is never written 'downloading' or 'failed' (the
+    UAT-10 #2 stuck-'downloading' failure mode is gone with the status write)."""
     game_id = await _seed_game(pool, app_id="730")
+    await pool.execute_write("UPDATE games SET status='up_to_date' WHERE id=?", (game_id,))
 
     class _BoomDriver(_StubDriver):
         async def prefill_apps(self, app_ids, *, force=False):
@@ -144,8 +154,9 @@ async def test_steam_driver_error_marks_failed_not_stuck_downloading(pool):
 
     with pytest.raises(RuntimeError):
         await prefill_handler(_job(game_id), _steam_deps(pool, _BoomDriver()))
-    g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
-    assert g["status"] == "failed"
+    g = await pool.read_one("SELECT status, last_job_outcome FROM games WHERE id=?", (game_id,))
+    assert g["status"] == "up_to_date"
+    assert "SteamPrefill subprocess died" in g["last_job_outcome"]
 
 
 # --- DPA-T10: agent control-plane seam (settings.agent_enabled=True) ---
@@ -243,11 +254,12 @@ async def test_steam_agent_success_same_db_writes(pool, monkeypatch):
     assert g["cached_version"] == "42"
 
 
-async def test_steam_agent_failure_marks_failed_no_validate(pool, monkeypatch):
-    """agent returns ok=False → game marked 'failed' with last_error, RuntimeError
-    raised, and no validate job enqueued (mirrors the driver-non-ok path)."""
+async def test_steam_agent_failure_records_job_outcome_no_validate(pool, monkeypatch):
+    """agent returns ok=False → last_job_outcome recorded, status untouched,
+    RuntimeError raised, and no validate job enqueued (mirrors the driver path)."""
     _agent_enabled(monkeypatch)
     game_id = await _seed_game(pool, app_id="730")
+    await pool.execute_write("UPDATE games SET status='up_to_date' WHERE id=?", (game_id,))
     agent = _FakeAgent(ok=False, raw="boom: exited 1")
     deps = Deps(
         pool=pool,
@@ -256,9 +268,9 @@ async def test_steam_agent_failure_marks_failed_no_validate(pool, monkeypatch):
     )
     with pytest.raises(RuntimeError):
         await prefill_handler(_job(game_id), deps)
-    g = await pool.read_one("SELECT status, last_error FROM games WHERE id=?", (game_id,))
-    assert g["status"] == "failed"
-    assert g["last_error"] is not None
+    g = await pool.read_one("SELECT status, last_job_outcome FROM games WHERE id=?", (game_id,))
+    assert g["status"] == "up_to_date"
+    assert g["last_job_outcome"] is not None
     vj = await pool.read_one("SELECT id FROM jobs WHERE kind='validate' AND game_id=?", (game_id,))
     assert vj is None
 
@@ -381,7 +393,8 @@ async def test_epic_agent_success_enqueues_validate(pool, monkeypatch):
     validate (which sets the real status) instead of optimistically pre-setting
     status='up_to_date' from the 20-chunk sample HIT-check. It still adopts
     cached_version=current_version + last_prefilled_at (F8 diff-skip) and upserts
-    the manifest + size_bytes. Status stays 'downloading' until the validate runs."""
+    the manifest + size_bytes. Prefill writes no status at all now, so the seeded
+    status stands until the validate measures the cache."""
     import orchestrator.jobs.handlers.prefill as ph
 
     settings = Settings(orchestrator_token="a" * 32, agent_enabled=True)
@@ -404,8 +417,9 @@ async def test_epic_agent_success_enqueues_validate(pool, monkeypatch):
     g = await pool.read_one(
         "SELECT status, size_bytes, cached_version, last_prefilled_at FROM games WHERE id=?", (gid,)
     )
-    # No optimistic up_to_date: the enqueued validate finalizes status.
-    assert g["status"] == "downloading"
+    # No optimistic up_to_date and no 'downloading': the enqueued validate is the
+    # only thing allowed to move status, via record_measurement().
+    assert g["status"] == "unknown"
     assert g["size_bytes"] == 500
     assert g["cached_version"] == "bv-1"
     assert g["last_prefilled_at"] is not None
@@ -421,9 +435,9 @@ async def test_epic_agent_success_enqueues_validate(pool, monkeypatch):
     assert m["total_bytes"] == 500
 
 
-async def test_epic_agent_failed_chunks_marks_failed(pool, monkeypatch):
-    """agent.pull reporting chunks_failed>0 → game 'failed' with last_error and a
-    RuntimeError raised (mirrors the in-process chunks-failed path)."""
+async def test_epic_agent_failed_chunks_records_job_outcome(pool, monkeypatch):
+    """agent.pull reporting chunks_failed>0 → last_job_outcome recorded, status
+    untouched, RuntimeError raised (mirrors the in-process chunks-failed path)."""
     import orchestrator.jobs.handlers.prefill as ph
 
     settings = Settings(orchestrator_token="a" * 32, agent_enabled=True)
@@ -431,6 +445,7 @@ async def test_epic_agent_failed_chunks_marks_failed(pool, monkeypatch):
     monkeypatch.setattr(ph, "epic_verify_cached", _unreachable_verify := _make_unreachable_verify())
 
     gid = await _seed_epic_game(pool, app_id="AppFail")
+    await pool.execute_write("UPDATE games SET status='up_to_date' WHERE id=?", (gid,))
     deps = Deps(
         pool=pool,
         epic_client=_StubEpic(_epic_manifest()),
@@ -438,9 +453,9 @@ async def test_epic_agent_failed_chunks_marks_failed(pool, monkeypatch):
     )
     with pytest.raises(RuntimeError):
         await prefill_handler(_job(gid, platform="epic"), deps)
-    g = await pool.read_one("SELECT status, last_error FROM games WHERE id=?", (gid,))
-    assert g["status"] == "failed"
-    assert g["last_error"] is not None
+    g = await pool.read_one("SELECT status, last_job_outcome FROM games WHERE id=?", (gid,))
+    assert g["status"] == "up_to_date"
+    assert g["last_job_outcome"] is not None
     assert _unreachable_verify.called is False  # verify is skipped on the failure path
 
 

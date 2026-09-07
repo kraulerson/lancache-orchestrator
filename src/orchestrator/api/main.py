@@ -135,9 +135,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         reaped = await reap_running_jobs(get_pool())
         if reaped > 0:
             log.warning("api.boot.reaped_orphan_jobs", count=reaped)
-        # Then reset any game left stuck 'downloading' by an interrupted prefill
-        # (crash, or a timeout-cancelled handler) — runs after the job reaper so
-        # no prefill is in flight (UAT-11 F-INT-1).
+        # Then record the interruption on any game left in the legacy
+        # 'downloading' status by a pre-2026-09-04 prefill (crash, or a
+        # timeout-cancelled handler). It stamps a job outcome only — the sweep's
+        # next measurement is what restores cache truth (UAT-11 F-INT-1).
         reaped_games = await reap_orphaned_game_status(get_pool())
         if reaped_games > 0:
             log.warning("api.boot.reaped_orphan_downloading_games", count=reaped_games)

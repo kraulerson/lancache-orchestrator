@@ -53,19 +53,22 @@ GAME_REAPER_ERROR_MESSAGE = (
 
 
 async def reap_orphaned_game_status(pool: Pool) -> int:
-    """Reset games stuck in the transient ``'downloading'`` status to ``'failed'``.
+    """Record the interruption on games left in the legacy ``'downloading'`` status.
 
-    A prefill sets the game ``'downloading'`` and resets it on completion or
-    failure — but the per-job max-runtime timeout cancels the handler via
-    ``CancelledError`` (a ``BaseException``), which bypasses the handler's
-    ``except Exception`` reset, and a hard crash skips it entirely. Either way the
-    game is left ``'downloading'`` forever with nothing to recover it (UAT-11
-    F-INT-1). Run this at boot AFTER ``reap_running_jobs`` — no prefill is in
-    flight then, so any ``'downloading'`` game is genuinely orphaned. Returns the
-    number of rows touched.
+    Prefill no longer writes ``'downloading'`` into ``games.status`` at all — an
+    in-flight job is the ``jobs`` row (``state='running'``), and status is cache
+    truth written only by ``jobs.measurement.record_measurement``. So the rows
+    this touches are historical: games stranded by a restart or a job timeout
+    BEFORE the 2026-09-04 split, which nothing else would ever explain.
+
+    It therefore stamps the job outcome and leaves status alone. Cache truth is
+    restored by measurement, not by a reaper guessing: the sweep now measures
+    every owned game, so a stranded row gets a real status the first time it is
+    reached. Run at boot AFTER ``reap_running_jobs``. Returns rows touched.
     """
     rowcount = await pool.execute_write(
-        "UPDATE games SET status='failed', last_error=? WHERE status='downloading'",
+        "UPDATE games SET last_job_outcome=?, last_job_outcome_at=CURRENT_TIMESTAMP "
+        "WHERE status='downloading'",
         (GAME_REAPER_ERROR_MESSAGE,),
     )
     if rowcount > 0:

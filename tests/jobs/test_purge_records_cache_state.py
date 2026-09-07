@@ -192,8 +192,13 @@ async def test_the_status_and_the_observation_land_together(pool):
     finally:
         purge_mod._record_cache_emptied = original
 
-    g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
+    g = await pool.read_one("SELECT status, status_measured_at FROM games WHERE id=?", (game_id,))
     assert g["status"] == "up_to_date", (
         "the status flip must roll back with the failed observation — otherwise the "
         "game reads validation_failed while the newest row still claims 337/337"
     )
+    # The flip now runs through record_measurement inside the same transaction,
+    # so its timestamp and its transition row roll back with it.
+    assert g["status_measured_at"] is None
+    rows = await pool.read_all("SELECT id FROM measurement_transitions WHERE game_id=?", (game_id,))
+    assert rows == []

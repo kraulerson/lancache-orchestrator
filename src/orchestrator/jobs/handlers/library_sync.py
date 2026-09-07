@@ -32,22 +32,19 @@ _log = structlog.get_logger(__name__)
 # it and an EXISTING app has its title refreshed to the store name. Lifecycle
 # columns (cached_version, last_prefilled_at, …) are preserved.
 #
-# `status` is preserved too, with ONE exception: `not_downloaded` is reset to
-# `unknown`. Reaching this statement means the app is in the agent's prefilled
-# manifest cache — direct evidence it IS cached — while `not_downloaded` asserts
-# the opposite, and the gated sweep's candidate SQL covers only
-# ('unknown','up_to_date','validation_failed'). So a prefilled `not_downloaded`
-# row is never validated and can never correct itself. Found live 2026-08-16:
-# Half-Life: Alyx, Killing Floor 2 and Total War: PHARAOH DYNASTIES were fully
-# cached yet permanently stuck. Resetting to `unknown` hands them to the sweep,
-# which determines the real status. Deliberately NOT done by widening the sweep
-# to all `not_downloaded` rows: 1355 of the 1363 have no cache evidence, so that
-# would add ~1363 wasted validations per 6-hourly tick on a CPU-constrained host
-# to catch 8 games.
+# `status` is preserved unconditionally — a library enumeration is not a cache
+# measurement, and since 2026-09-04 only `jobs.measurement.record_measurement`
+# may write it. This statement used to reset `not_downloaded` to `unknown`,
+# because the gated sweep's candidate SQL skipped `not_downloaded` rows, so a
+# prefilled one could never correct itself (live 2026-08-16: Half-Life: Alyx,
+# Killing Floor 2 and Total War: PHARAOH DYNASTIES were fully cached yet
+# permanently stuck). The same design drops that filter — the sweep measures
+# every owned game — so those rows are re-measured on their own and the reset has
+# nothing left to fix. Guessing a status from "it appeared in an enumeration" is
+# exactly the conflation this design removes.
 _NAMED_UPSERT_SQL = (
     "INSERT INTO games (platform, app_id, title) VALUES ('steam', ?, ?) "
-    "ON CONFLICT(platform, app_id) DO UPDATE SET title = excluded.title, owned = 1, "
-    "status = CASE WHEN games.status = 'not_downloaded' THEN 'unknown' ELSE games.status END"
+    "ON CONFLICT(platform, app_id) DO UPDATE SET title = excluded.title, owned = 1"
 )
 
 # Idempotent upsert into the store-lookup cache (incl. MP-only category flags, #366).

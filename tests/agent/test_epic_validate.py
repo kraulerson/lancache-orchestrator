@@ -225,8 +225,9 @@ def test_zero_chunk_manifest(tmp_path):
     that failed to parse, and 'cached' maps to games.status='up_to_date' — a green
     the system cannot back up, which the 6-hourly sweep then re-confirms forever.
 
-    'error' leaves games.status untouched (validate.py's _STATUS_FOR has no entry
-    for it), so a healthy game is not falsely failed either.
+    'error' leaves games.status untouched (the single writer's _STATUS_FOR map in
+    orchestrator/jobs/measurement.py has no entry for it), so a healthy game is
+    not falsely failed either.
     """
     raw = build_manifest(VERSION, make_chunks(0))
     client, _ = _make_client(tmp_path)

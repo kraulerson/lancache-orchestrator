@@ -61,8 +61,9 @@ async def validate_one_game(
     # Cache truth is written in exactly one place. An 'error' outcome records the
     # attempt only: the old "unstick a stranded 'downloading' by setting
     # status='failed'" write lived here and is deliberately gone — that is a job
-    # outcome, not a cache measurement, and the startup job reaper (ID6) already
-    # resolves stranded 'downloading' rows.
+    # outcome, not a cache measurement. Nothing writes 'downloading' any more
+    # either, and the sweep re-measures every owned game, so a legacy stranded row
+    # gets a real status the next time it is measured.
     await record_measurement(pool, game_id, result.outcome)
     return result
 

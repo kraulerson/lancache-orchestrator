@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from orchestrator.jobs.measurement import record_measurement
+
 if TYPE_CHECKING:
     from orchestrator.clients.agent_client import AgentClient
     from orchestrator.db.pool import Pool
@@ -104,6 +106,10 @@ async def purge_handler(job: dict[str, Any], deps: Deps) -> None:
             non-numeric Steam app_id, or (Epic) no manifest to enumerate.
         AgentError — the agent-side delete failed; propagates so the job is marked
             failed and the game's status is left unchanged.
+        CircuitBreakerTripped — too many games lost cache state inside the window
+            (a mass purge is exactly that). The transaction rolls back, so the
+            status flip and the history row are both discarded even though the
+            files are already gone; the next sweep measures the real state.
     """
     platform = job.get("platform")
     if platform not in ("steam", "epic"):
@@ -135,19 +141,18 @@ async def purge_handler(job: dict[str, Any], deps: Deps) -> None:
     files_failed = int(result.get("failed", 0))
     bytes_freed = int(result.get("bytes_freed", 0))
 
-    # Reversibility invariant: purge sets validation_failed so F5/F6 re-prefills a
-    # fresh copy. Conditional to avoid churn when the game was already flagged (a
-    # {deleted:0} idempotent re-purge still lands here harmlessly).
+    # Reversibility invariant: purge flags the game so F5/F6 re-prefills a fresh
+    # copy. A purge is a KNOWN cache-state change backed by a history row, so it
+    # goes through the single writer as a 'partial' measurement rather than an
+    # out-of-band status write: that stamps status_measured_at (the evidence the
+    # Epic prefill uses to re-queue the purged game) and counts the drop as a
+    # level transition, so a mass purge registers as the real alarm it is.
     # ONE transaction. These were two separate writes, so a crash or PoolError
     # between them left the files deleted, the status flagged, and the newest
     # validation_history row still claiming a full cache — the exact badge #293
     # fixes, resurrected until the next sweep. Either both land or neither does.
     async with deps.pool.write_transaction() as tx:
-        await tx.execute(
-            "UPDATE games SET status='validation_failed' "
-            "WHERE id=? AND status != 'validation_failed'",
-            (game_id,),
-        )
+        await record_measurement(deps.pool, game_id, "partial", tx=tx)
         await _record_cache_emptied(deps.pool, game_id, tx)
     _log.info(
         "game.purged",
