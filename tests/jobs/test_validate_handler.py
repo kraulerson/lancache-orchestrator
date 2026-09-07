@@ -134,7 +134,12 @@ async def test_error_leaves_downloading_untouched(pool):
     conflation the 2026-09-04 design removes. The startup job reaper resolves
     stranded 'downloading' rows instead."""
     game_id = await _seed_game(pool)
-    await pool.execute_write("UPDATE games SET status='downloading' WHERE id=?", (game_id,))
+    # Seed a real measurement timestamp: asserting a column that was NULL from
+    # birth is still NULL would pass even if the error path rewrote truth.
+    await pool.execute_write(
+        "UPDATE games SET status='downloading', status_measured_at=? WHERE id=?",
+        ("2026-09-01 00:00:00", game_id),
+    )
     deps = Deps(
         pool=pool,
         agent_client=_StubAgent(_vresp(0, 0, 0, "error", versions="", error="agent unreachable")),
@@ -145,7 +150,7 @@ async def test_error_leaves_downloading_untouched(pool):
         (game_id,),
     )
     assert g["status"] == "downloading"  # unchanged: an error is not a measurement
-    assert g["status_measured_at"] is None
+    assert g["status_measured_at"] == "2026-09-01 00:00:00"
     assert g["last_measure_attempt_at"] is not None  # the attempt is still recorded
 
 
