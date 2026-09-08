@@ -308,6 +308,30 @@ def test_secret_key_redacted(capsys: pytest.CaptureFixture[str]) -> None:
     assert "cs3cr3t" not in out
 
 
+def test_kuma_push_urls_redacted(capsys: pytest.CaptureFixture[str]) -> None:
+    """Security audit SEV-4: a Kuma push URL IS the credential.
+
+    All five ORCH_KUMA_PUSH_* settings are plain `str`, not SecretStr, so the
+    only automated protection against one reaching the log stream is this key
+    matcher — and it matched none of `kuma`, `push`, `breaker` or `url`, so a
+    future `_log.info("...", kuma_push_measurement_breaker=url)` would have
+    emitted the whole push token verbatim with the redactor declining to fire.
+    """
+    log_mod.configure_logging()
+    structlog.get_logger().info(
+        "cfg",
+        kuma_push_measurement_breaker="http://kuma.test/api/push/brkTOKEN",
+        kuma_push_sweep="http://kuma.test/api/push/swpTOKEN",
+    )
+
+    out = capsys.readouterr().out
+    assert "brkTOKEN" not in out
+    assert "swpTOKEN" not in out
+    record = _last_json_line(out)
+    assert record["kuma_push_measurement_breaker"] == "<redacted>"
+    assert record["kuma_push_sweep"] == "<redacted>"
+
+
 def test_session_and_cookie_redacted(capsys: pytest.CaptureFixture[str]) -> None:
     log_mod.configure_logging()
     structlog.get_logger().info("req", session_id="sid", cookie="c=v")

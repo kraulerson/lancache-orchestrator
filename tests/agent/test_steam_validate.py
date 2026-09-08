@@ -409,8 +409,9 @@ def test_validate_all_redist_app_is_cached_not_error(tmp_path):
     (parsed_ok counts it) so an all-redist enumeration isn't a false error" — and
     #292 silently reversed it.
 
-    Left as 'error' the app is re-validated every 6h forever and never resolves, and
-    one caught at status 'downloading' becomes 'failed', which the sweep excludes
+    Left as 'error' the app is re-validated every 6h forever and never resolves:
+    'error' is not a measurement, so it writes no status at all and the row keeps
+    whatever it had — including a legacy 'downloading', which the sweep excludes
     from its candidate set — a dead end needing manual SQL.
     """
     client = _build_multidepot(tmp_path, depot_cached={228990: (8, 4)})

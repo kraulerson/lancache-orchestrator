@@ -250,6 +250,16 @@ class Settings(BaseSettings):
     scheduled_prefill_enabled: bool = True
     scheduled_prefill_cron: str = "45 3,9,15,21 * * *"
 
+    # Circuit breaker on mass cache-state loss (2026-09-04 design). A degraded
+    # agent returns plausible-but-false measurements — on 2026-08-31 it read 65 of
+    # 256 cache buckets and reported ~8% cached on every game, and each of those
+    # answers passes every per-game validity check. record_measurement halts
+    # writing once this many games drop a truth rank inside the window. 25 sits
+    # far above a normal sweep's incidental losses and far below a library-wide
+    # collapse; the window is one sweep's worth of running time.
+    measurement_breaker_threshold: int = Field(default=25, ge=1)
+    measurement_breaker_window_minutes: int = Field(default=60, ge=1)
+
     # Uptime Kuma push heartbeats. Kuma marks a monitor DOWN when no heartbeat
     # arrives within its interval, which is how a job that silently stops running
     # gets noticed — nothing else here detects absence.
@@ -261,6 +271,8 @@ class Settings(BaseSettings):
     kuma_push_sweep: str | None = None
     kuma_push_scheduled_prefill: str | None = None
     kuma_push_fetch_manifests: str | None = None
+    # Pushed DOWN (not by absence) when the measurement circuit breaker trips.
+    kuma_push_measurement_breaker: str | None = None
 
     # Above this share of apps failing, the fetch_manifests heartbeat goes DOWN
     # (#294). It does NOT fail the job: a partially-failing run is still a run that

@@ -3,7 +3,9 @@
 Reuses the `pool` fixture from tests/db/conftest.py via direct import.
 Adds a `jobs_handler_clean_registry` autouse fixture so each test gets
 the builtin HANDLERS registry restored after running — tests that
-re-register stubs don't leak across the suite.
+re-register stubs don't leak across the suite, and a
+`clear_breaker_notice` autouse fixture that does the same for the
+circuit breaker's module-level notification dedupe.
 """
 
 from __future__ import annotations
@@ -37,3 +39,20 @@ def jobs_handler_clean_registry():
     finally:
         HANDLERS.clear()
         HANDLERS.update(snapshot)
+
+
+@pytest.fixture(autouse=True)
+def clear_breaker_notice():
+    """Reset `measurement`'s notify-once dedupe either side of every test.
+
+    The dedupe is module-level state, so it outlives a test: a test that trips
+    the breaker suppresses the next test's notification, and the pair passes or
+    fails depending on collection order. It lives here rather than beside the
+    breaker tests because any test under tests/jobs/ can reach
+    `record_measurement()` through a handler.
+    """
+    from orchestrator.jobs import measurement
+
+    measurement.reset_breaker_notice()
+    yield
+    measurement.reset_breaker_notice()

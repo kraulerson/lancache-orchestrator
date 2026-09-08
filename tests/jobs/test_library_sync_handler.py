@@ -191,18 +191,17 @@ class TestEnumerateViaPrefill:
         assert row["owned"] == 1
 
 
-class TestPrefilledResurrectsNotDownloaded:
-    """A game recorded `not_downloaded` that IS present in the agent's prefilled
-    manifest cache must be reset to 'unknown' so the gated sweep validates it.
+class TestLibrarySyncNeverWritesStatus:
+    """A library enumeration is not a cache measurement, so it preserves status
+    whatever it finds — including `not_downloaded` rows that ARE in the agent's
+    prefilled manifest cache.
 
-    Found live 2026-08-16: 8 owned Steam games (incl. Half-Life: Alyx, Killing
-    Floor 2, Total War: PHARAOH DYNASTIES) were fully cached yet stuck at
-    `not_downloaded` forever. The sweep's candidate SQL covers only
-    ('unknown','up_to_date','validation_failed'), so a `not_downloaded` row is
-    never validated and can never flip — even with the cache evidence sitting
-    right there in prefilled_apps(). Resetting to 'unknown' here (rather than
-    widening the sweep to all 1363 `not_downloaded` rows) keeps the fix targeted
-    to games with actual cache evidence and adds no sweep churn.
+    This statement used to reset those to 'unknown' (live 2026-08-16: Half-Life:
+    Alyx, Killing Floor 2 and Total War: PHARAOH DYNASTIES were fully cached yet
+    stuck forever, because the gated sweep's candidate SQL skipped
+    `not_downloaded`). The 2026-09-04 design removes both halves of that: only
+    `record_measurement` writes status, and the sweep measures every owned game,
+    so a stale row corrects itself with a real measurement instead of a guess.
     """
 
     def _patch_settings(self, monkeypatch, *, budget=150, delay=0.0):
@@ -229,7 +228,9 @@ class TestPrefilledResurrectsNotDownloaded:
         monkeypatch.setattr("orchestrator.jobs.handlers.library_sync.fetch_app_info", fake_fetch)
         await library_sync_handler(_job(), Deps(pool=pool, agent_client=_StubAgent(app_ids)))
 
-    async def test_prefilled_not_downloaded_is_reset_to_unknown(self, pool, monkeypatch):
+    async def test_prefilled_not_downloaded_keeps_its_status(self, pool, monkeypatch):
+        # Being in prefilled_apps() is evidence, but it is not a measurement:
+        # the sweep re-measures this row and writes the status it actually finds.
         self._patch_settings(monkeypatch)
         await pool.execute_write(
             "INSERT INTO games (platform, app_id, title, owned, status) "
@@ -238,12 +239,16 @@ class TestPrefilledResurrectsNotDownloaded:
 
         await self._run(pool, monkeypatch, [232090])
 
-        row = await pool.read_one("SELECT status FROM games WHERE app_id='232090'")
-        assert row["status"] == "unknown"
+        row = await pool.read_one(
+            "SELECT status, status_measured_at, title FROM games WHERE app_id='232090'"
+        )
+        assert row["status"] == "not_downloaded"
+        assert row["status_measured_at"] is None  # no measurement happened here
+        assert row["title"] == "Killing Floor 2"  # the title refresh still lands
 
     async def test_already_swept_statuses_are_left_alone(self, pool, monkeypatch):
-        # up_to_date / validation_failed are already sweep candidates; resetting
-        # them would discard a real validation result and cause needless churn.
+        # up_to_date / validation_failed carry a real validation result; an
+        # enumeration must never discard one.
         self._patch_settings(monkeypatch)
         await pool.execute_write(
             "INSERT INTO games (platform, app_id, title, owned, status) "
@@ -256,8 +261,7 @@ class TestPrefilledResurrectsNotDownloaded:
         assert row["status"] == "up_to_date"
 
     async def test_not_downloaded_but_unprefilled_is_left_alone(self, pool, monkeypatch):
-        # No cache evidence -> no reason to spend a sweep slot on it. This is the
-        # 1355-row majority; resetting them would be the churn we are avoiding.
+        # A row this enumeration never even mentioned is untouched either way.
         self._patch_settings(monkeypatch)
         await pool.execute_write(
             "INSERT INTO games (platform, app_id, title, owned, status) "

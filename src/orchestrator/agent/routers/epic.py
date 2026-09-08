@@ -34,8 +34,8 @@ class EpicValidateRequest(BaseModel):
 def _classify(total: int, cached: int) -> str:
     # total == 0 is "I could not tell", NOT "nothing to cache" (#292) — a manifest
     # whose ChunkHashList is empty is indistinguishable from one that failed to
-    # parse. 'error' leaves games.status untouched (validate.py's _STATUS_FOR has no
-    # entry for it) instead of asserting a green we cannot back up.
+    # parse. 'error' leaves games.status untouched (jobs/measurement.py's _STATUS_FOR
+    # has no entry for it) instead of asserting a green we cannot back up.
     if total == 0:
         return "error"
     if cached == total:

@@ -53,21 +53,37 @@ GAME_REAPER_ERROR_MESSAGE = (
 
 
 async def reap_orphaned_game_status(pool: Pool) -> int:
-    """Reset games stuck in the transient ``'downloading'`` status to ``'failed'``.
+    """Record the interruption on games left in the legacy ``'downloading'`` status.
 
-    A prefill sets the game ``'downloading'`` and resets it on completion or
-    failure — but the per-job max-runtime timeout cancels the handler via
-    ``CancelledError`` (a ``BaseException``), which bypasses the handler's
-    ``except Exception`` reset, and a hard crash skips it entirely. Either way the
-    game is left ``'downloading'`` forever with nothing to recover it (UAT-11
-    F-INT-1). Run this at boot AFTER ``reap_running_jobs`` — no prefill is in
-    flight then, so any ``'downloading'`` game is genuinely orphaned. Returns the
-    number of rows touched.
+    Prefill no longer writes ``'downloading'`` into ``games.status`` at all — an
+    in-flight job is the ``jobs`` row (``state='running'``), and status is cache
+    truth written only by ``jobs.measurement.record_measurement``. So the rows
+    this touches are historical: games stranded by a restart or a job timeout
+    BEFORE the 2026-09-04 split, which nothing else would ever explain.
+
+    It therefore stamps the job outcome and leaves status alone. Cache truth is
+    restored by the next measurement of the row
+    (``jobs.measurement.record_measurement``), never by this code guessing from a
+    job's fate — and the scheduled sweep now reaches every such row unconditionally,
+    since its candidate SQL (Task 5) carries no status filter. Run at boot AFTER
+    ``reap_running_jobs``. Returns rows touched.
+
+    ``last_error`` carries the same text, mirroring ``record_job_outcome`` for
+    the API/CLI readers that still consume that legacy column.
+
+    The ``WHERE status='downloading'`` predicate does NOT self-clear: leaving
+    status alone is the point, so the same rows match again on the next boot and
+    are re-stamped with the same text. The set therefore decays only as the sweep
+    measures each row onto a real cache status — expect this to fire on every
+    boot until then, which is why it logs at INFO rather than WARNING.
     """
     rowcount = await pool.execute_write(
-        "UPDATE games SET status='failed', last_error=? WHERE status='downloading'",
-        (GAME_REAPER_ERROR_MESSAGE,),
+        "UPDATE games SET last_job_outcome=?, last_job_outcome_at=CURRENT_TIMESTAMP, "
+        "last_error=? WHERE status='downloading'",
+        (GAME_REAPER_ERROR_MESSAGE, GAME_REAPER_ERROR_MESSAGE),
     )
     if rowcount > 0:
-        _log.warning("jobs.reaper.reaped_orphan_downloading_games", count=rowcount)
+        # INFO, not WARNING: these rows keep their 'downloading' status, so they
+        # match again every boot until a measurement moves them. See the docstring.
+        _log.info("jobs.reaper.reaped_orphan_downloading_games", count=rowcount)
     return rowcount
