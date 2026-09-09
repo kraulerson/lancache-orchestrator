@@ -347,5 +347,18 @@ async def validate_game(
         app_id_int = int(row["app_id"])
     except (TypeError, ValueError):
         return ValidationResult(0, 0, 0, "error", "", "app_id not numeric")
-    res = await deps.agent_client.steam_validate(app_id_int)
+    # Steam self-enumerates agent-side, so unlike Epic there is no manifest row to
+    # read a chunk count from at call time — which is why #303 left steam on the
+    # flat base budget and its audit wrongly certified that as "unaffected". On
+    # post-rebuild hardware the base covers only ~12-16k chunks, so every large
+    # steam game timed out, wrote NO validation_history row, and could never
+    # self-correct. The previous run's chunks_total is the size we DO hold; a
+    # never-validated game has none and correctly falls back to the base.
+    size_row = await pool.read_one(
+        "SELECT chunks_total FROM validation_history WHERE game_id=? ORDER BY id DESC LIMIT 1",
+        (game_id,),
+    )
+    last_total = size_row["chunks_total"] if size_row is not None else None
+    chunk_count = int(last_total) if last_total else None
+    res = await deps.agent_client.steam_validate(app_id_int, chunk_count=chunk_count)
     return _shape(res)

@@ -52,10 +52,19 @@ class TestScaling:
         wedged agent still has to surface as a failure rather than hang the sweep."""
         assert validate_timeout_for(500_000_000).read == VALIDATE_TIMEOUT_CEILING_SEC
 
-    def test_the_ceiling_fits_inside_the_sweeps_own_budget(self) -> None:
-        """The sweep runs every 6 hours and currently takes ~40 minutes. A single
-        game must not be able to consume the whole window."""
-        assert VALIDATE_TIMEOUT_CEILING_SEC <= 1800
+    def test_the_ceiling_still_bounds_a_wedged_agent(self) -> None:
+        """SUPERSEDED 2026-09-01. This asserted ``<= 1800`` on the reasoning that
+        "the sweep runs every 6 hours and takes ~40 minutes, so one game must not
+        consume the window". That premise died with the OMV rebuild: validation
+        dropped from ~1500 to ~50 chunks/sec, no full sweep fits in 6 hours at any
+        ceiling, and a 1800s cap meant 379 of 1811 games could never validate at
+        all — permanently, since a timed-out validate writes no history row.
+
+        The ceiling's real job is narrower: stop a genuinely wedged agent hanging
+        forever. It must therefore be finite and not absurd, but it is no longer a
+        scheduling constraint. Pacing belongs to the sweep, not to this constant.
+        """
+        assert 0 < VALIDATE_TIMEOUT_CEILING_SEC <= 86_400
 
     def test_it_grows_with_the_count(self) -> None:
         assert validate_timeout_for(200_000).read > validate_timeout_for(20_000).read

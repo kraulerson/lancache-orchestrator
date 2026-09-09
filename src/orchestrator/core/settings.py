@@ -287,7 +287,15 @@ class Settings(BaseSettings):
     # (soundtracks/tools/servers/demos) from FUTURE prefill. Runs on the same
     # interval as the scheduled prefill; download-once-then-block.
     auto_classify_block_enabled: bool = True
-    sweep_batch_size: int = Field(default=10, ge=1)
+    # Capped at the agent's _CACHE_STAT_WORKERS (2). Concurrency above the stat
+    # pool adds queueing, not throughput, and silently divides the per-call
+    # throughput each validate budget assumes -- budgets measured sequentially
+    # are then wrong by the batch factor under a sweep (PR #303 review).
+    sweep_batch_size: int = Field(default=2, ge=1)
+    # The disk throughput validate budgets assume. A SETTING, not a constant:
+    # it is a property of the hardware, and the 2026-09-01 incident was a
+    # storage change silently invalidating a number nobody could see.
+    validate_assumed_chunks_per_sec: float = Field(default=40.0, gt=0)
     # Manifest-only fetcher (DepotDownloader) weekly cron — Monday 05:00 UTC,
     # offset from the sweep (03/09/15/21) and host prefill crons. 5-field, UTC.
     fetch_manifests_enabled: bool = True

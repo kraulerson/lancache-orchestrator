@@ -21,9 +21,14 @@ class _StubAgent:
     def __init__(self, response):
         self._response = response
         self.calls: list[int] = []
+        self.chunk_counts: list[int | None] = []
 
-    async def steam_validate(self, app_id: int):
+    # chunk_count is accepted EXPLICITLY, not swallowed by **kwargs. The
+    # signature change that broke this fake is the fake doing its job: a spy
+    # that silently absorbs new arguments stops protecting against drift.
+    async def steam_validate(self, app_id: int, *, chunk_count: int | None = None):
         self.calls.append(app_id)
+        self.chunk_counts.append(chunk_count)
         return self._response
 
 
