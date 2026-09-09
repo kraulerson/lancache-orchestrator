@@ -94,12 +94,14 @@ async def test_validate_one_game_returns_result_and_records(pool):
     assert vh["outcome"] == "cached"
 
 
-async def test_missing_marks_validation_failed(pool):
+async def test_missing_marks_not_downloaded(pool):
+    """Nothing on disk is 'not_downloaded', not 'validation_failed' — the two are
+    distinct measurements and are ranked differently downstream."""
     game_id = await _seed_game(pool)
     deps = Deps(pool=pool, agent_client=_StubAgent(_vresp(1, 0, 1, "missing")))
     await validate_handler(_job(game_id), deps)
     g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
-    assert g["status"] == "validation_failed"
+    assert g["status"] == "not_downloaded"
     vh = await pool.read_one("SELECT outcome FROM validation_history WHERE game_id=?", (game_id,))
     assert vh["outcome"] == "missing"
 
@@ -130,19 +132,32 @@ async def test_error_does_not_clobber_classified_status(pool):
     assert vh["outcome"] == "error"
 
 
-async def test_error_unsticks_transient_downloading(pool):
-    """A post-prefill validate that hits an infra error must resolve the transient
-    'downloading' state to 'failed', not leave it stuck (UAT-10 #3). It still must
-    not clobber a real classified status (above)."""
+async def test_error_leaves_downloading_untouched(pool):
+    """An infra error writes NO status at all — not even for the transient
+    'downloading' state. The old write (status='failed' where status='downloading',
+    UAT-10 #3) recorded a job outcome as a cache finding, which is exactly the
+    conflation the 2026-09-04 design removes. A row still carrying the legacy
+    'downloading' value is corrected by its next real measurement; the boot
+    reaper only records that the job was interrupted."""
     game_id = await _seed_game(pool)
-    await pool.execute_write("UPDATE games SET status='downloading' WHERE id=?", (game_id,))
+    # Seed a real measurement timestamp: asserting a column that was NULL from
+    # birth is still NULL would pass even if the error path rewrote truth.
+    await pool.execute_write(
+        "UPDATE games SET status='downloading', status_measured_at=? WHERE id=?",
+        ("2026-09-01 00:00:00", game_id),
+    )
     deps = Deps(
         pool=pool,
         agent_client=_StubAgent(_vresp(0, 0, 0, "error", versions="", error="agent unreachable")),
     )
     await validate_handler(_job(game_id), deps)
-    g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
-    assert g["status"] == "failed"  # transient 'downloading' resolved, not stuck
+    g = await pool.read_one(
+        "SELECT status, status_measured_at, last_measure_attempt_at FROM games WHERE id=?",
+        (game_id,),
+    )
+    assert g["status"] == "downloading"  # unchanged: an error is not a measurement
+    assert g["status_measured_at"] == "2026-09-01 00:00:00"
+    assert g["last_measure_attempt_at"] is not None  # the attempt is still recorded
 
 
 async def test_unknown_platform_raises(pool):
@@ -234,3 +249,55 @@ async def test_validate_never_writes_cached_version(pool, monkeypatch):
     row = await pool.read_one("SELECT status, cached_version FROM games WHERE id=?", (game_id,))
     assert row["status"] == "up_to_date"  # status still updates
     assert row["cached_version"] == "OLD"  # cached_version untouched by validate
+
+
+async def _prime_breaker(pool, n: int = 24) -> None:
+    """Leave the measurement circuit breaker one transition short of tripping.
+
+    Real downward measurements, not synthetic rows: this is the shape a lancache
+    eviction event has, and the default 24 sits one below the default threshold.
+    """
+    from orchestrator.jobs.measurement import record_measurement
+
+    for i in range(n):
+        await pool.execute_write(
+            "INSERT INTO games (platform, app_id, title, owned, status) "
+            "VALUES ('steam', ?, 't', 1, 'up_to_date')",
+            (f"prime{i}",),
+        )
+        row = await pool.read_one(
+            "SELECT id FROM games WHERE platform='steam' AND app_id=?", (f"prime{i}",)
+        )
+        await record_measurement(pool, int(row["id"]), "missing")
+
+
+async def test_a_refused_measurement_leaves_no_validation_history_row(pool):
+    """Security audit SEV-3: the observation and the status must land together.
+
+    The history row used to be written outside any transaction, so a tripped
+    breaker refused the status write and left the observation behind. The API
+    serves chunks_cached/chunks_total from the newest validation_history row
+    alongside status, so the operator investigating the breaker alarm read a
+    green up_to_date badge next to '0/337 cached' — on the very surface they were
+    using to diagnose the alarm.
+    """
+    from orchestrator.core.settings import get_settings
+    from orchestrator.jobs.handlers.validate import validate_one_game
+    from orchestrator.jobs.measurement import CircuitBreakerTripped
+
+    game_id = await _seed_game(pool, app_id="440")
+    await pool.execute_write("UPDATE games SET status='up_to_date' WHERE id=?", (game_id,))
+    await _prime_breaker(pool)
+
+    deps = Deps(pool=pool, agent_client=_StubAgent(_vresp(337, 0, 337, "missing")))
+    with pytest.raises(CircuitBreakerTripped):
+        await validate_one_game(pool, deps, game_id, get_settings())
+
+    rows = await pool.read_all("SELECT id FROM validation_history WHERE game_id=?", (game_id,))
+    assert rows == [], (
+        "a refused measurement must persist nothing: the history row it left behind "
+        "made the API report status='up_to_date' beside 0/337 cached"
+    )
+    g = await pool.read_one("SELECT status, status_measured_at FROM games WHERE id=?", (game_id,))
+    assert g["status"] == "up_to_date"
+    assert g["status_measured_at"] is None

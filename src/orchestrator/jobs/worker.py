@@ -21,6 +21,7 @@ from orchestrator.core.logging import new_correlation_id
 from orchestrator.core.settings import Settings, get_settings
 from orchestrator.db.pool import PoolError
 from orchestrator.jobs.handlers import HANDLERS
+from orchestrator.jobs.measurement import record_job_outcome
 
 if TYPE_CHECKING:
     from orchestrator.clients.agent_client import AgentClient
@@ -236,16 +237,15 @@ async def worker_loop(
                     err = f"job exceeded max runtime of {job_max_runtime_sec}s (cancelled)"
                     event = "jobs.handler.timed_out"
                     # The handler was cancelled mid-flight — CancelledError
-                    # bypasses its own 'downloading' -> 'failed' reset. The worker
-                    # is NOT cancelled, so reset the game here (UAT-11 F-INT-1).
+                    # bypasses its own except-clause, so it recorded nothing. The
+                    # worker is NOT cancelled: record the timeout as this game's
+                    # job outcome here. It never touches status, so a wedged job
+                    # can no longer overwrite cache truth (UAT-11 F-INT-1, and the
+                    # 2026-09-01 corruption this design closes).
                     game_id = row.get("game_id")
                     if game_id is not None:
                         with contextlib.suppress(Exception):
-                            await deps.pool.execute_write(
-                                "UPDATE games SET status='failed', last_error=? "
-                                "WHERE id=? AND status='downloading'",
-                                (err, game_id),
-                            )
+                            await record_job_outcome(deps.pool, game_id, err)
                 else:
                     err = f"{type(e).__name__}: {str(e)[: JOB_ERROR_TRUNCATE - 50]}"
                     event = "jobs.handler.failed"

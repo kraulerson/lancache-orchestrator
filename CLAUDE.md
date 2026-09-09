@@ -16,7 +16,7 @@ This project follows the **Solo Orchestrator Framework v1.0**.
 - Development Guardrails for Claude Code: `.claude/framework/` (Git hook guardrails — see `.claude/manifest.json` for active profile and configuration)
 
 ## Current State
-<!-- Last Updated: 2026-08-13 -->
+<!-- Last Updated: 2026-09-07 -->
 
 Orientation for a fresh session. This section is also the anchor for
 `scripts/check-session-state.sh`, which warns when HEAD drifts more than 5 commits
@@ -24,16 +24,17 @@ or 24 hours past the last commit touching this file.
 
 - **Phase:** 2 (Construction). Gates 0→1 and 1→2 approved 2026-04-20; the Phase 2→3
   gate has not been taken. Track: light. Deployment: personal. Framework: v1.0.
-- **Shipped:** 23 features recorded in `FEATURES.md`, all Complete or
-  Complete-pending-live-UAT — the F1–F18 MVP plus the LAN-bind source-IP allowlist.
+- **Shipped:** 25 features recorded in `FEATURES.md`, all Complete or
+  Complete-pending-live-UAT — the F1–F18 MVP, the LAN-bind source-IP allowlist,
+  the Uptime Kuma job heartbeats, and the cache truth/job-outcome split.
 - **Runs live, split across two hosts:** the control plane (API, jobs, scheduler,
   DB) on a Proxmox LXC; the data-plane agent (byte-puller, disk-stat, prefill
   drivers) on the NAS beside lancache itself. See
   `docs/deploy/lxc-cutover-runbook.md` and the migration runbooks under
   `docs/superpowers/`.
-- **Not yet released:** all 111 `CHANGELOG.md` entries sit under `[Unreleased]`;
+- **Not yet released:** all 134 `CHANGELOG.md` entries sit under `[Unreleased]`;
   no version has been tagged.
-- **Tests:** 1636 passing. Run them as
+- **Tests:** 1835 passing (3 deselected). Run them as
   `PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest` — the PATH prefix is
   required, or `tests/test_licenses.py` false-fails on a missing `pip-licenses`
   binary that is installed in `.venv/bin` but not otherwise on PATH. Bare `python`
@@ -43,6 +44,30 @@ or 24 hours past the last commit touching this file.
   SQLite's signed INTEGER range, a `contains` filter operator behind
   `game list --title/--offset` with a truncation footer, and HTTP errors that no
   longer render as a blank `HTTP 404:`.
+- **Recent work (2026-09) — cache validation integrity (branch
+  `docs/cache-validation-integrity-design`, not yet merged):** migration 0015
+  splits cache truth from job outcome. New `games` columns `status_measured_at`,
+  `last_measure_attempt_at`, `last_job_outcome`, `last_job_outcome_at`, plus a
+  `measurement_transitions` log. **Single-writer rule:** `games.status` /
+  `status_measured_at` are written only by
+  `orchestrator.jobs.measurement.record_measurement()`, enforced by a
+  build-breaking source scan (`tests/test_measurement_writer_guard.py`);
+  everything else calls `record_job_outcome()`. **Measurement before download:**
+  Epic's scheduled prefill requires `status IN
+  ('validation_failed','not_downloaded') AND status_measured_at IS NOT NULL`, so
+  `unknown` triggers measurement and never traffic. The sweep now orders by
+  `last_measure_attempt_at` with no status filter (resumable by construction),
+  and a tripped circuit breaker aborts it with **`sweep.aborted`** rather than
+  `sweep.completed` — update anything alerting on the old event. **Epic
+  scheduled prefill is OFF in production** (`ORCH_SCHEDULED_PREFILL_ENABLED=false`
+  in `/root/orch-lxc.env` since 2026-09-04) and stays off until the recovery
+  sweep has re-measured the library. **Expect the first convergence sweeps to
+  trip the breaker on real downward transitions** (months of genuine evictions on
+  stale-green rows, plus the `validation_failed` → `not_downloaded`
+  reclassification) — confirm the agent is healthy first, then raise
+  `ORCH_MEASUREMENT_BREAKER_THRESHOLD` for those passes and restore 25 once a
+  sweep completes clean; do not re-enable Epic prefill before that. See
+  `docs/superpowers/specs/2026-09-04-cache-validation-integrity-design.md`.
 
 **Authoritative sources — prefer these over this summary, which is a snapshot:**
 `FEATURES.md` (what exists) · `CHANGELOG.md` (what changed) · `PROJECT_BIBLE.md`

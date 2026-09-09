@@ -43,6 +43,7 @@
     "manual-download-checker-agent",
     "epic-prefill-status-based",
     "f18-cache-purge",
+    "cache-validation-integrity",
     "validate-timeout-recalibration"
   ],
   "features_since_last_test": 1,

@@ -332,9 +332,9 @@ def _classify(total: int, cached: int) -> str:
     # maps to up_to_date. A game went green on the strength of a zero-byte file, and
     # the 6-hourly sweep re-confirmed it forever.
     #
-    # 'error' is both the honest answer and the safe one: validate.py's _STATUS_FOR
-    # has no entry for it, so an unreadable manifest leaves games.status untouched
-    # rather than flipping it green or falsely failing a healthy game.
+    # 'error' is both the honest answer and the safe one: jobs/measurement.py's
+    # _STATUS_FOR has no entry for it, so an unreadable manifest leaves games.status
+    # untouched rather than flipping it green or falsely failing a healthy game.
     if total == 0:
         return "error"
     if cached == total:
@@ -510,8 +510,8 @@ async def steam_validate(body: SteamValidateRequest, request: Request) -> dict[s
         #     app has no data of its own to validate ('cached'). The redist branch
         #     above says exactly this: "an all-redist enumeration isn't a false
         #     error". #292 reversed it by accident; left as 'error' the app
-        #     re-validates every 6h forever, and one at 'downloading' becomes
-        #     'failed', which the sweep excludes — a dead end.
+        #     re-validates every 6h forever and never records what is actually
+        #     on disk.
         #   - anything else -> we could not read it ('error'), never a green
         #
         # The discriminator is `versions`, NOT parsed_ok. parse_chunk_shas and

@@ -52,14 +52,19 @@ def test_tolerates_unreadable_file(tmp_path, monkeypatch):
     live, arch = tmp_path / "live", tmp_path / "arch"
     _bin(live, "1_1_2_3.bin")
     _bin(live, "4_4_5_6.bin")
-    real = mod.shutil.copy2
+    # copyfile, not copy2: the sync stopped using copy2 because copystat is its last
+    # act, which handed back a temp already carrying the source's stale mtime and let
+    # the orphan sweep unlink it mid-flight. Patching copy2 here would simulate a
+    # failure that can no longer happen, and this test would pass while proving
+    # nothing.
+    real = mod.shutil.copyfile
 
     def flaky(src, dst, *a, **k):
         if Path(src).name == "1_1_2_3.bin":
             raise OSError("boom")
         return real(src, dst, *a, **k)
 
-    monkeypatch.setattr(mod.shutil, "copy2", flaky)
+    monkeypatch.setattr(mod.shutil, "copyfile", flaky)
     assert sync_manifests_to_archive(live, arch) == 1  # the good one still copied
 
 

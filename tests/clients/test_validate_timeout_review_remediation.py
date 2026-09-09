@@ -81,23 +81,31 @@ class TestTheAssumedRateIsPinnedToSomethingReal:
 
 
 class TestTheSweepCanMakeProgressAcrossTruncatedRuns:
-    def test_candidates_are_ordered_least_recently_validated_first(self) -> None:
+    def test_candidates_are_ordered_least_recently_attempted_first(self) -> None:
         """STRUCTURAL, and honest about it: this asserts the ordering clause, not
-        observed behaviour against a populated DB.
+        observed behaviour against a populated DB. The behavioural counterpart
+        lives in ``tests/jobs/handlers/test_sweep_ordering.py``.
 
         ``ORDER BY id`` guarantees a truncated sweep re-does the same head every
         time. Since the sweep is killed at 6h and needs ~147h for the library, the
-        tail was unreachable by construction. Oldest-validated-first makes each
-        truncated run pick up where the last left off, so the library is covered
-        across runs even though no single run can finish."""
+        tail was unreachable by construction. Oldest-first makes each truncated
+        run pick up where the last left off, so the library is covered across runs
+        even though no single run can finish.
+
+        RETARGETED on the PR #305 merge (cache validation integrity). This branch
+        ordered by ``last_validated_at``; #305 orders by ``last_measure_attempt_at``,
+        which is strictly stronger — it is stamped on *every* attempt, success or
+        failure, so a game that always times out cannot sit at the head of the
+        queue forever the way it could under a column that only moves on success.
+        The requirement this test defends is unchanged; only the column is."""
         for sql in (sweep_mod._CANDIDATE_SQL, sweep_mod._CANDIDATE_SQL_FULL):
             assert "ORDER BY id" not in sql, (
                 "ordering by id makes a truncated sweep re-validate the same head "
                 "forever and never reach the tail"
             )
-            assert "last_validated_at" in sql, (
-                "the sweep must order by last_validated_at so a run that is cut "
-                "off still advances coverage"
+            assert "last_measure_attempt_at" in sql, (
+                "the sweep must order by last_measure_attempt_at so a run that is "
+                "cut off still advances coverage"
             )
 
 
