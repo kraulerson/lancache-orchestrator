@@ -249,11 +249,53 @@ class Settings(BaseSettings):
     # still writing reports it as a false partial.
     scheduled_prefill_enabled: bool = True
     scheduled_prefill_cron: str = "45 3,9,15,21 * * *"
+
+    # Circuit breaker on mass cache-state loss (2026-09-04 design). A degraded
+    # agent returns plausible-but-false measurements — on 2026-08-31 it read 65 of
+    # 256 cache buckets and reported ~8% cached on every game, and each of those
+    # answers passes every per-game validity check. record_measurement halts
+    # writing once this many games drop a truth rank inside the window. 25 sits
+    # far above a normal sweep's incidental losses and far below a library-wide
+    # collapse; the window is one sweep's worth of running time.
+    measurement_breaker_threshold: int = Field(default=25, ge=1)
+    measurement_breaker_window_minutes: int = Field(default=60, ge=1)
+
+    # Uptime Kuma push heartbeats. Kuma marks a monitor DOWN when no heartbeat
+    # arrives within its interval, which is how a job that silently stops running
+    # gets noticed — nothing else here detects absence.
+    #
+    # Each URL is a SECRET (it is the whole credential), so these live only in the
+    # environment as ORCH_KUMA_PUSH_*. Leaving one unset disables that heartbeat,
+    # which is the documented way to turn a monitor off.
+    kuma_push_library_sync: str | None = None
+    kuma_push_sweep: str | None = None
+    kuma_push_scheduled_prefill: str | None = None
+    kuma_push_fetch_manifests: str | None = None
+    # Pushed DOWN (not by absence) when the measurement circuit breaker trips.
+    kuma_push_measurement_breaker: str | None = None
+
+    # Above this share of apps failing, the fetch_manifests heartbeat goes DOWN
+    # (#294). It does NOT fail the job: a partially-failing run is still a run that
+    # happened, and conflating the two makes 'failed' useless as a signal.
+    #
+    # 0.75 is a starting point chosen to sit above the current steady state
+    # (698/1174 ≈ 0.59 on 2026-08-25) so the monitor is not born red, while still
+    # catching a genuine collapse. Tune it once the numbers have been visible for a
+    # while — that is the whole point of putting them on the monitor.
+    fetch_manifests_max_failure_ratio: float = Field(default=0.75, ge=0.0, le=1.0)
     # #225: after a game is prefilled, auto-exclude classifier-flagged non-games
     # (soundtracks/tools/servers/demos) from FUTURE prefill. Runs on the same
     # interval as the scheduled prefill; download-once-then-block.
     auto_classify_block_enabled: bool = True
-    sweep_batch_size: int = Field(default=10, ge=1)
+    # Capped at the agent's _CACHE_STAT_WORKERS (2). Concurrency above the stat
+    # pool adds queueing, not throughput, and silently divides the per-call
+    # throughput each validate budget assumes -- budgets measured sequentially
+    # are then wrong by the batch factor under a sweep (PR #303 review).
+    sweep_batch_size: int = Field(default=2, ge=1)
+    # The disk throughput validate budgets assume. A SETTING, not a constant:
+    # it is a property of the hardware, and the 2026-09-01 incident was a
+    # storage change silently invalidating a number nobody could see.
+    validate_assumed_chunks_per_sec: float = Field(default=40.0, gt=0)
     # Manifest-only fetcher (DepotDownloader) weekly cron — Monday 05:00 UTC,
     # offset from the sweep (03/09/15/21) and host prefill crons. 5-field, UTC.
     fetch_manifests_enabled: bool = True

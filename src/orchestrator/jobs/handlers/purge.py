@@ -17,12 +17,57 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from orchestrator.jobs.measurement import record_measurement
+
 if TYPE_CHECKING:
     from orchestrator.clients.agent_client import AgentClient
     from orchestrator.db.pool import Pool
     from orchestrator.jobs.worker import Deps
 
 _log = structlog.get_logger(__name__)
+
+# Same shape validate.py writes. method stays 'disk_stat' because that is the
+# observation being recorded — the state of the chunk files on disk.
+_INSERT_VH = (
+    "INSERT INTO validation_history "
+    "(game_id, manifest_version, started_at, finished_at, method, "
+    " chunks_total, chunks_cached, chunks_missing, outcome, error) "
+    "VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'disk_stat', ?, 0, ?, 'missing', NULL)"
+)
+
+
+async def _record_cache_emptied(pool: Pool, game_id: int, tx: Any = None) -> None:
+    """Append an observation that nothing is cached any more (#293).
+
+    ``chunks_cached`` is not stored on ``games`` — the API reads it from the newest
+    ``validation_history`` row. Purge used to delete the files and record nothing, so
+    the newest observation stayed the pre-purge one and every consumer kept reporting
+    a fully cached game with no files behind it. Game_shelf's cache badge is driven by
+    exactly those fields, so a purged game displayed "Cached 337/337".
+
+    History is append-only: the previous row was true when it was written, so this
+    adds a new observation rather than editing the old one.
+
+    ``chunks_total`` is carried from the last validation because purge does not
+    re-read the manifest. With no prior validation there is no known total, and
+    inventing one would be its own false report — so nothing is written and the
+    re-prefill flag alone carries the state.
+    """
+    reader = tx if tx is not None else pool
+    previous = await reader.read_one(
+        "SELECT manifest_version, chunks_total FROM validation_history "
+        "WHERE game_id = ? ORDER BY id DESC LIMIT 1",
+        (game_id,),
+    )
+    if previous is None:
+        return
+
+    total = int(previous["chunks_total"])
+    params = (game_id, previous["manifest_version"], total, total)
+    if tx is not None:
+        await tx.execute(_INSERT_VH, params)
+    else:
+        await pool.execute_write(_INSERT_VH, params)
 
 
 async def _purge_epic_game(
@@ -92,13 +137,28 @@ async def purge_handler(job: dict[str, Any], deps: Deps) -> None:
     files_failed = int(result.get("failed", 0))
     bytes_freed = int(result.get("bytes_freed", 0))
 
-    # Reversibility invariant: purge sets validation_failed so F5/F6 re-prefills a
-    # fresh copy. Conditional to avoid churn when the game was already flagged (a
-    # {deleted:0} idempotent re-purge still lands here harmlessly).
-    await deps.pool.execute_write(
-        "UPDATE games SET status='validation_failed' WHERE id=? AND status != 'validation_failed'",
-        (game_id,),
-    )
+    # Reversibility invariant: purge flags the game so F5/F6 re-prefills a fresh
+    # copy. A purge is a KNOWN cache-state change backed by a history row, so it
+    # goes through the single writer as a 'partial' measurement rather than an
+    # out-of-band status write: that stamps status_measured_at, the evidence the
+    # Epic prefill uses to re-queue the purged game. The shared UPDATE also
+    # stamps last_validated_at, which is honest here and not merely tolerated:
+    # _record_cache_emptied inserts a real validation_history observation in this
+    # same transaction, so the two agree by construction.
+    # commanded=True because the files are ALREADY gone by the time this runs
+    # (security audit SEV-2). The circuit breaker vetoes observations it cannot
+    # trust; refusing this one would not preserve truth, it would discard the
+    # only record of a delete that really happened — leaving a green badge over
+    # an empty cache, ineligible for re-prefill, and unreachable by the sweep the
+    # same breaker has halted. So the breaker is skipped and no transition row is
+    # written: a deliberate purge is not evidence of unexplained mass loss.
+    # ONE transaction. These were two separate writes, so a crash or PoolError
+    # between them left the files deleted, the status flagged, and the newest
+    # validation_history row still claiming a full cache — the exact badge #293
+    # fixes, resurrected until the next sweep. Either both land or neither does.
+    async with deps.pool.write_transaction() as tx:
+        await record_measurement(deps.pool, game_id, "partial", tx=tx, commanded=True)
+        await _record_cache_emptied(deps.pool, game_id, tx)
     _log.info(
         "game.purged",
         job_id=job_id,

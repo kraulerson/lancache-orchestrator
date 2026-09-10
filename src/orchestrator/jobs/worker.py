@@ -16,19 +16,77 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from orchestrator.clients import heartbeat
 from orchestrator.core.logging import new_correlation_id
+from orchestrator.core.settings import Settings, get_settings
 from orchestrator.db.pool import PoolError
 from orchestrator.jobs.handlers import HANDLERS
+from orchestrator.jobs.measurement import record_job_outcome
 
 if TYPE_CHECKING:
     from orchestrator.clients.agent_client import AgentClient
     from orchestrator.db.pool import Pool
+    from orchestrator.jobs.summary import JobSummary
     from orchestrator.platform.epic.client import EpicClient
     from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
 
 _log = structlog.get_logger(__name__)
 
 JOB_ERROR_TRUNCATE = 200
+
+
+def monitor_url_for(kind: str, source: str, settings: Settings) -> str | None:
+    """The Uptime Kuma push URL for a finished job, or None for no heartbeat.
+
+    These monitors answer one question: **is the schedule still running?** Kuma
+    detects that by absence — no heartbeat inside the interval means DOWN. So only a
+    run the SCHEDULER started may push, whatever its kind.
+
+    Every monitored kind can also be triggered by hand: prefill from the CLI or
+    Game_shelf, sweep from ``POST /api/v1/sweep`` (which is Game_shelf's full-sweep
+    button), library_sync from the epic ``/sync`` endpoint, fetch_manifests from its
+    own trigger — all with ``source='api'`` or similar. An earlier version gated only
+    prefill, on the claim that the other three "only ever run on the schedule". That
+    was false and unchecked, and it mattered most on the sweep monitor: if APScheduler
+    wedges and someone then clicks full-sweep, the monitor goes green and its
+    countdown resets, hiding the dead scheduler for as long as manual activity
+    continues — the precise failure the gate exists to prevent.
+    """
+    if source != "scheduler":
+        return None
+    return {
+        "prefill": settings.kuma_push_scheduled_prefill,
+        "library_sync": settings.kuma_push_library_sync,
+        "sweep": settings.kuma_push_sweep,
+        "fetch_manifests": settings.kuma_push_fetch_manifests,
+    }.get(kind)
+
+
+async def _emit_heartbeat(
+    row: dict[str, Any], *, ok: bool, error: str = "", summary: JobSummary | None = None
+) -> None:
+    """Tell Kuma how a job ended. Never raises, never blocks the outcome.
+
+    heartbeat.push already swallows its own failures; this second guard covers a
+    fault in the lookup itself (a settings load that throws, say). A job's recorded
+    outcome must never depend on whether we managed to report it.
+    """
+    try:
+        url = monitor_url_for(str(row.get("kind", "")), str(row.get("source", "")), get_settings())
+        if url is None:
+            return
+
+        # A handler that reported its own verdict overrides "it did not throw".
+        # fetch_manifests uses this to say 669 of 1170 apps failed on a run that
+        # legitimately succeeded (#294).
+        if summary is not None:
+            status, msg = ("up" if summary.ok else "down"), summary.msg
+        else:
+            status, msg = ("up" if ok else "down"), (error if error else "ok")
+
+        await heartbeat.push(url, status=status, msg=msg)
+    except Exception as exc:
+        _log.warning("jobs.heartbeat_failed", error=str(exc)[:JOB_ERROR_TRUNCATE])
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,8 +119,12 @@ async def claim_next_job(pool: Pool) -> dict[str, Any] | None:
             "WHERE id=? AND state='queued'",
             (row["id"],),
         )
+        # `source` is selected for the heartbeat lookup: scheduled prefill is
+        # kind='prefill' with source='scheduler', indistinguishable from a manual
+        # one without it.
         return await tx.read_one(
-            "SELECT id, kind, game_id, platform, state, started_at, payload FROM jobs WHERE id=?",
+            "SELECT id, kind, game_id, platform, state, started_at, payload, source "
+            "FROM jobs WHERE id=?",
             (row["id"],),
         )
 
@@ -161,9 +223,11 @@ async def worker_loop(
             _log.info("jobs.handler.started", kind=kind, job_id=job_id)
             try:
                 if job_max_runtime_sec > 0:
-                    await asyncio.wait_for(handler(row, deps), timeout=job_max_runtime_sec)
+                    summary = await asyncio.wait_for(
+                        handler(row, deps), timeout=job_max_runtime_sec
+                    )
                 else:
-                    await handler(row, deps)
+                    summary = await handler(row, deps)
             except Exception as e:
                 # A TimeoutError under an active budget means wait_for cancelled a
                 # wedged handler — label it distinctly. (TimeoutError is an
@@ -173,16 +237,15 @@ async def worker_loop(
                     err = f"job exceeded max runtime of {job_max_runtime_sec}s (cancelled)"
                     event = "jobs.handler.timed_out"
                     # The handler was cancelled mid-flight — CancelledError
-                    # bypasses its own 'downloading' -> 'failed' reset. The worker
-                    # is NOT cancelled, so reset the game here (UAT-11 F-INT-1).
+                    # bypasses its own except-clause, so it recorded nothing. The
+                    # worker is NOT cancelled: record the timeout as this game's
+                    # job outcome here. It never touches status, so a wedged job
+                    # can no longer overwrite cache truth (UAT-11 F-INT-1, and the
+                    # 2026-09-01 corruption this design closes).
                     game_id = row.get("game_id")
                     if game_id is not None:
                         with contextlib.suppress(Exception):
-                            await deps.pool.execute_write(
-                                "UPDATE games SET status='failed', last_error=? "
-                                "WHERE id=? AND status='downloading'",
-                                (err, game_id),
-                            )
+                            await record_job_outcome(deps.pool, game_id, err)
                 else:
                     err = f"{type(e).__name__}: {str(e)[: JOB_ERROR_TRUNCATE - 50]}"
                     event = "jobs.handler.failed"
@@ -202,6 +265,7 @@ async def worker_loop(
                     kind_error=type(e).__name__,
                     elapsed_ms=int((time.monotonic() - t0) * 1000),
                 )
+                await _emit_heartbeat(row, ok=False, error=err)
                 continue
 
             try:
@@ -219,5 +283,6 @@ async def worker_loop(
                 job_id=job_id,
                 elapsed_ms=int((time.monotonic() - t0) * 1000),
             )
+            await _emit_heartbeat(row, ok=True, summary=summary)
 
     _log.info("jobs.worker.stopped")

@@ -57,6 +57,46 @@ if [ ! -d "$MATRIX_DIR" ]; then
   exit 1
 fi
 
+# Wall-clock bound for any single third-party tool command.
+TOOL_CMD_TIMEOUT="${TOOL_CMD_TIMEOUT:-5}"
+
+# Run a shell command with a time bound, portably.
+#
+# `timeout(1)` is GNU coreutils and is NOT present on a stock macOS — which is
+# precisely where this matters, because CI skips tool resolution entirely and the
+# only people who reach this code are developers on their own machines. perl ships
+# with macOS and its alarm() gives the same guarantee, so it is the fallback.
+#
+# An unresponsive tool is treated as simply unresolved: the caller reads a non-zero
+# exit as "not installed", which is the correct answer for a binary that will not
+# answer.
+if command -v timeout >/dev/null 2>&1; then
+  _BOUND_WITH="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  _BOUND_WITH="gtimeout"
+elif command -v perl >/dev/null 2>&1; then
+  _BOUND_WITH="perl"
+else
+  _BOUND_WITH="none"
+fi
+
+run_bounded() {
+  _secs="$1"
+  shift
+  case "$_BOUND_WITH" in
+    timeout|gtimeout) "$_BOUND_WITH" "$_secs" sh -c "$*" ;;
+    perl)             perl -e 'alarm shift; exec @ARGV' "$_secs" sh -c "$*" ;;
+    # No bounding mechanism available. Say so once rather than hanging silently.
+    none)
+      if [ -z "${_BOUND_WARNED:-}" ]; then
+        echo "Warning: neither timeout nor perl found; tool checks run unbounded." >&2
+        _BOUND_WARNED=1
+      fi
+      sh -c "$*"
+      ;;
+  esac
+}
+
 # Normalize dev_os to lowercase
 DEV_OS=$(echo "$DEV_OS" | tr '[:upper:]' '[:lower:]')
 case "$DEV_OS" in
@@ -194,10 +234,14 @@ while IFS=$'\t' read -r TOOL_NAME TOOL_CATEGORY TOOL_PHASE TOOL_REQUIRED TOOL_CH
   INSTALLED=false
   VERSION=""
   set +u
-  if eval "$TOOL_CHECK" &>/dev/null 2>&1; then
+  # Bounded, because these are arbitrary third-party commands. `colima version`
+  # against a wedged lima ssh blocks forever, and since check-phase-gate.sh skips
+  # tool resolution when CI is set, CI never sees it — only the developer, whose
+  # documented pytest invocation is what hangs (#295).
+  if run_bounded "$TOOL_CMD_TIMEOUT" "$TOOL_CHECK" >/dev/null 2>&1; then
     INSTALLED=true
     if [ -n "$TOOL_VERSION_CMD" ]; then
-      VERSION=$(eval "$TOOL_VERSION_CMD" 2>/dev/null || echo "")
+      VERSION=$(run_bounded "$TOOL_CMD_TIMEOUT" "$TOOL_VERSION_CMD" 2>/dev/null || echo "")
     fi
   fi
   set -u

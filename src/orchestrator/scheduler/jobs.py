@@ -70,7 +70,7 @@ async def enqueue_validation_sweep(
     ``full=True`` validates EVERY game across all platforms (the validate-all
     backfill), carried
     on the job payload `{"full": true}`; the weekly cron uses the default
-    (status-gated) sweep. Mirrors `enqueue_library_sync`: at most one in-flight
+    (owned-gated) sweep. Mirrors `enqueue_library_sync`: at most one in-flight
     sweep, DB-enforced by `idx_jobs_sweep_inflight` (migration 0005) via
     `ON CONFLICT DO NOTHING`. Returns the rowcount (1 queued / 0 deduped-or-failed).
     Never raises — a failing scheduler tick must not degrade APScheduler. The
@@ -133,9 +133,10 @@ async def enqueue_fetch_manifests(pool: Pool, *, source: str = "scheduler") -> i
 
 
 async def enqueue_scheduled_prefill(pool: Pool) -> int:
-    """Enqueue 'prefill' jobs for owned EPIC games NOT validated as cached
-    (``status <> 'up_to_date'``) — and not block-listed / prefill-excluded (F8
-    driver, Epic-scoped per Piece 2).
+    """Enqueue 'prefill' jobs for owned EPIC games with measured evidence of
+    absence (``status IN ('validation_failed', 'not_downloaded')`` AND
+    ``status_measured_at IS NOT NULL``) — and not block-listed / prefill-excluded
+    (F8 driver, Epic-scoped per Piece 2).
 
     Steam is prefilled by the host SteamPrefill cron (it auto-grabs recent
     purchases); EpicPrefill never auto-downloads new games, so the orchestrator
@@ -146,11 +147,12 @@ async def enqueue_scheduled_prefill(pool: Pool) -> int:
     VALIDATION STATUS rather than a cached/current version-diff: the version-diff
     could never be cleared for Epic and looped over the whole library (go-live
     bug 2026-07-04). A prefill sets status via its enqueued validate; the nightly
-    sweep re-validates, so eviction/drift flips status off 'up_to_date' and
-    re-triggers. One bulk INSERT...SELECT. `ON CONFLICT DO NOTHING` + the
-    migration-0006 in-flight UNIQUE index dedups against a prefill already
-    queued/running for a game. Returns the number of rows enqueued. Never raises
-    — a failing scheduler tick must not degrade APScheduler.
+    sweep re-validates, and a real re-measurement that finds the game absent or
+    incomplete (not merely off 'up_to_date') re-triggers. One bulk INSERT...SELECT.
+    `ON CONFLICT DO NOTHING` + the migration-0006 in-flight UNIQUE index dedups
+    against a prefill already queued/running for a game. Returns the number of
+    rows enqueued. Never raises — a failing scheduler tick must not degrade
+    APScheduler.
     """
     try:
         inserted = await pool.execute_write(
@@ -168,11 +170,15 @@ async def enqueue_scheduled_prefill(pool: Pool) -> int:
             # handler sets cached_version = current_version (NULL). A version-diff
             # (cached_version IS NULL / <> current_version) can therefore never be
             # cleared — it would re-enqueue the whole Epic library every tick
-            # (go-live bug). Key off VALIDATION STATUS instead: enqueue every owned
-            # Epic game NOT validated as cached. The nightly disk-stat sweep
-            # re-validates, so eviction / content drift flips status off
-            # 'up_to_date' and re-triggers a prefill.
-            "  AND g.status <> 'up_to_date' "
+            # (go-live bug).
+            #
+            # Evidence-based (2026-09-04). Previously `status <> 'up_to_date'`,
+            # which meant "not proven cached" == "download it" -- so 1769 games
+            # corrupted by an interrupted prefill batch would have queued 655
+            # Epic downloads for titles already on disk. A download now requires a
+            # real measurement that actually found the game absent or incomplete.
+            "  AND g.status IN ('validation_failed', 'not_downloaded') "
+            "  AND g.status_measured_at IS NOT NULL "
             "  AND NOT EXISTS ("
             "      SELECT 1 FROM block_list b "
             "      WHERE b.platform = g.platform AND b.app_id = g.app_id) "

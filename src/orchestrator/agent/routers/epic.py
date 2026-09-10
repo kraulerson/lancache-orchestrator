@@ -32,7 +32,13 @@ class EpicValidateRequest(BaseModel):
 
 
 def _classify(total: int, cached: int) -> str:
-    if total == 0 or cached == total:
+    # total == 0 is "I could not tell", NOT "nothing to cache" (#292) — a manifest
+    # whose ChunkHashList is empty is indistinguishable from one that failed to
+    # parse. 'error' leaves games.status untouched (jobs/measurement.py's _STATUS_FOR
+    # has no entry for it) instead of asserting a green we cannot back up.
+    if total == 0:
+        return "error"
+    if cached == total:
         return "cached"
     if cached == 0:
         return "missing"
@@ -103,13 +109,14 @@ async def epic_validate(body: EpicValidateRequest, request: Request) -> dict[str
 
     total = len(candidate_lists)
     if total == 0:
+        # A manifest that parsed but yielded no chunks — see _classify (#292).
         return {
             "chunks_total": 0,
             "chunks_cached": 0,
             "chunks_missing": 0,
-            "outcome": "cached",
+            "outcome": "error",
             "versions": version,
-            "error": None,
+            "error": "manifest yielded no chunks",
         }
     cached, _present = await validate_chunks_any(candidate_lists)
     return {

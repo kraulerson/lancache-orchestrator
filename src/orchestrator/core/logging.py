@@ -72,6 +72,10 @@ _SENSITIVE_KEY_RE = re.compile(
     r"session|"
     r"api[_-]?key|apikey|"
     r"credential|"
+    # A Kuma push URL IS the credential (settings.py: the five ORCH_KUMA_PUSH_*
+    # values), and none of `kuma`, `push`, `breaker` or `url` matched anything
+    # above — so the redactor would have declined to fire on a key naming one.
+    r"kuma[_-]?push|push[_-]?url|webhook|"
     r"private[_-]?key|privkey|"
     r"signature|"
     r"(?:^|[^a-zA-Z])(?:pwd|pin|otp|mfa|tfa|sid|creds|salt|nonce)(?:[^a-zA-Z]|$)",

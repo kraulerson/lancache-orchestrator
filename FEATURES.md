@@ -1377,3 +1377,194 @@ still 403 a remote allowlisted host.
 ---
 
 <!-- Copy the section above for each new feature. Number sequentially. -->
+
+---
+
+## Feature 24: Scheduled-Job Heartbeats (Uptime Kuma push)
+
+**Phase Built:** 2 (UAT-14 remediation)
+**Status:** Complete (2026-08-26)
+
+**Summary:** Pushes an Uptime Kuma heartbeat when a scheduled job finishes, so a job
+that **silently stops running** is detected by absence — the one failure mode nothing
+else here catches, since every other signal reports on work that happened. Kuma marks
+a monitor DOWN when no heartbeat arrives inside its interval. Wire format is
+`GET <url>?status=up|down&msg=<text>`; the message carries the failure text on `down`,
+truncated to 200 characters keeping the **tail**, because the specific failure in an
+error is at the end.
+
+Emitted from the jobs worker at the point a job's outcome is decided rather than from
+individual handlers, so one site covers every kind and a kind added later needs only a
+setting. **Only a run the scheduler started may push** — every monitored kind can also
+be triggered by hand (prefill from the CLI or Game_shelf, sweep from Game_shelf's
+full-sweep button, library_sync from the epic `/sync` endpoint, fetch_manifests from
+its own trigger), and heartbeating a manual run would let clicking a button mask a
+wedged scheduler.
+
+A handler may optionally return a `JobSummary` to override "it did not throw";
+`fetch_manifests` uses this to report its per-app tally and to push DOWN above a
+failure-ratio threshold **without** changing `jobs.state` (#294).
+
+**Key Interfaces:**
+  - `src/orchestrator/clients/heartbeat.py` — `push()`; never raises
+  - `src/orchestrator/jobs/worker.py` — `monitor_url_for()`, `_emit_heartbeat()`
+  - `src/orchestrator/jobs/summary.py` — `JobSummary`
+  - Env: `ORCH_KUMA_PUSH_LIBRARY_SYNC`, `_SWEEP`, `_SCHEDULED_PREFILL`,
+    `_FETCH_MANIFESTS` (secrets — the URL is the whole credential; unset disables that
+    heartbeat), `ORCH_FETCH_MANIFESTS_MAX_FAILURE_RATIO` (default 0.75)
+
+**Test Coverage:** 28 in `tests/jobs/test_worker_heartbeats.py` (monitor selection as a
+pure function, including every kind × every manual source; wiring for up, down-with-error,
+silence on a manual trigger, and a push that raises leaving the job succeeded), 8 in
+`tests/clients/test_heartbeat.py` (driven through `httpx.MockTransport`, asserting the
+real outgoing request), 12 in `tests/jobs/test_fetch_manifests_summary.py`.
+
+**Known Limitations:**
+  - Monitoring is fire-and-forget: a push rejected by Kuma (e.g. a paused monitor,
+    which returns HTTP 404) is not distinguished from success. Deliberate — the
+    monitor going DOWN for want of a heartbeat is the correct signal either way.
+  - The `fetch_manifests` threshold default of 0.75 was chosen to sit above the
+    observed steady state (0.59 on 2026-08-25) rather than from a target, and should
+    be tuned once the numbers have been visible for a while.
+
+---
+
+## Feature 25: Cache Validation Integrity (truth/outcome split)
+
+**Phase Built:** 2 (post-UAT-14 correctness work)
+**Status:** Complete-pending-live-UAT (2026-09-07) — built and green in CI; the
+multi-day recovery sweep and the re-enable of Epic prefill have not yet run in
+production.
+
+**Summary:** Separates **cache truth** (what a measurement found on disk) from
+**job outcome** (how the last job ended), which had shared the single
+`games.status` column. On 2026-09-01 an orchestrator restart interrupted a
+prefill batch and stamped 1769 games with the dead job's outcome; because Epic's
+scheduled prefill selected on `status <> 'up_to_date'`, that would have queued
+655 Epic downloads for titles already on disk. Migration 0015 adds the column
+split plus a durable transition log; `record_measurement()` becomes the **only**
+writer of cache truth, enforced by a source-scanning test that fails the build;
+the validation sweep orders by least-recently-attempted with **no status filter
+at all**, so it resumes after an interruption by construction and can never again
+exclude a status value; a cancelled or timed-out sweep records attempts and zero
+truth; a circuit breaker halts writing on mass cache-state loss; and Epic prefill
+requires measured evidence of absence before it downloads anything.
+
+Three defects are closed, all observed live on 2026-09-01. **D1:** the sweep
+selected `ORDER BY id` with no cursor, so job 46446 burned its full 21600s budget
+on low ids and every game past the six-hour mark was permanently unreachable.
+**D2:** `not_downloaded` was missing from the candidate filter, making 1357 Steam
+games stamped 2026-06-18 invisible to every sweep since. **D3:** job outcomes
+were cache truth, and Epic's download trigger read cache truth.
+
+**Key Interfaces:**
+  - `src/orchestrator/jobs/measurement.py` — `record_measurement()` (the sole
+    writer of `games.status` / `status_measured_at`; ranks states and enforces
+    the breaker), `record_job_outcome()` (job outcome + legacy `last_error`
+    mirror), `CircuitBreakerTripped`, `reset_breaker_notice()` (tests only).
+    Both take an optional `tx=` so a caller with an open write transaction (purge)
+    gets one atomic unit.
+  - `src/orchestrator/db/migrations/0015_games_measurement_split.sql` —
+    `games.status_measured_at`, `.last_measure_attempt_at`, `.last_job_outcome`,
+    `.last_job_outcome_at`; the incident-window repair; the
+    `last_measure_attempt_at` / `status_measured_at` seeding;
+    `measurement_transitions` + `idx_games_measure_attempt` +
+    `idx_measurement_transitions_window`.
+  - `src/orchestrator/jobs/handlers/sweep.py` — `_CANDIDATE_SQL` /
+    `_CANDIDATE_SQL_FULL` (`ORDER BY last_measure_attempt_at ASC NULLS FIRST, id
+    ASC`, no status filter), the cancellation / exception / breaker split, and
+    the `sweep.aborted` event.
+  - `src/orchestrator/scheduler/jobs.py::enqueue_scheduled_prefill` — Epic
+    selection on `status IN ('validation_failed','not_downloaded') AND
+    status_measured_at IS NOT NULL`.
+  - `tests/test_measurement_writer_guard.py` — the build-breaking source scan
+    (`writes_cache_truth()`, `normalise()`, `strip_comments()`).
+  - Env: `ORCH_MEASUREMENT_BREAKER_THRESHOLD` (default 25),
+    `ORCH_MEASUREMENT_BREAKER_WINDOW_MINUTES` (default 60),
+    `ORCH_KUMA_PUSH_MEASUREMENT_BREAKER` (a secret — the URL is the whole
+    credential; unset disables the push).
+
+**Locked decisions:**
+  - **The `status` vocabulary is unchanged.** Renaming the values was rejected —
+    SQLite cannot alter a `CHECK` constraint in place, so it would have forced a
+    snapshot/drop/recreate of the whole library table plus API, CLI, Game_shelf
+    and test-suite churn, for a cosmetic gain.
+  - **Ordering, not a persisted cursor.** A stored cursor goes stale on every
+    insert or delete and needs its own repair path.
+  - **Never download without positive evidence of absence.** `unknown` triggers
+    measurement, never a download.
+  - **Both a build-breaking code guard and a live alarm.** The guard stops
+    regression; the breaker catches operational surprise the guard cannot see.
+  - **`last_measure_attempt_at` moves on every attempt; `status_measured_at` only
+    on success** — otherwise a game that always times out blocks the head of the
+    queue forever.
+
+**Test Coverage:** 47 new tests across seven files — 20 in
+`tests/jobs/test_measurement_circuit_breaker.py` (rank table, threshold, window,
+upward moves ignored at volume, notify-once-per-window, refusal writes nothing,
+`tx=` counting from the caller's own connection, and the four `commanded` cases:
+never refused, no transition row, logs `measurement.commanded`, no effect on the
+`error` path), 10 in
+`tests/jobs/test_measurement.py` (outcome→status mapping, attempt-only writes,
+truth untouched on `error`, transition rows), 5 in
+`tests/scheduler/test_scheduled_prefill_evidence.py` (nothing queued for
+`unknown` or unmeasured rows; legacy `failed` not queued), 4 in
+`tests/jobs/handlers/test_sweep_timeout_safety.py` (the 2026-09-01 replay: an
+interrupted sweep writes zero cache truth), 3 in
+`tests/jobs/handlers/test_sweep_ordering.py` (least-recently-attempted first, the
+D2 regression, a repeatedly-failing game rotates to the back), 3 in
+`tests/db/test_migration_0015_measurement_split.py` (exactly the damaged rows
+reset, the seeding, the new schema objects) and 2 in
+`tests/test_measurement_writer_guard.py` (the repo scan, plus a sample table
+pinning eleven forms the pattern must catch and nine it must not flag). Further
+tests were added to `tests/jobs/test_sweep_handler.py`,
+`tests/scheduler/test_jobs.py`, `tests/jobs/test_purge_records_cache_state.py`
+(a purge is never refused by the breaker) and `tests/core/test_logging.py` (the
+Kuma push token never reaches stdout), and existing assertions across eleven more
+test files were rewritten onto the new writers. Full suite: **1835 passing**.
+
+**Known Limitations:**
+  - **`measurement_transitions` has no retention policy** — one row per
+    *observed* truth write (commanded changes excepted), on the order of 1.7M
+    rows/year at current sweep rates. A periodic
+    prune of rows older than the breaker window is a deferred follow-up.
+  - **The breaker's notify-once dedupe is per-process.** A crash loop re-notifies
+    once per restart. The refusal itself is durable (it reads the transition log),
+    only the announcement is in-memory.
+  - **Up to `ORCH_SWEEP_BATCH_SIZE` games already inside the semaphore still
+    validate after the first trip.** Their writes are refused and persist
+    nothing, so the bound is on wasted work, not on corruption.
+  - **The source guard cannot see a truth write assembled from non-adjacent
+    literals** (`+` concatenation, or an f-string). None exist in the repo. The
+    `no-f-string-sql` Semgrep rule does not close the gap either — it matches
+    `.execute(f"…")` / `.execute("…" + …)` and this codebase writes through the
+    pool's `execute_write` wrapper — so the blind spot is held shut by convention,
+    not by a second gate.
+  - **`measurement_transitions.game_id` has no index**, so an `ON DELETE CASCADE`
+    from `games` scans the table — consistent with the `manifests` /
+    `validation_history` precedent, and games are effectively never deleted.
+  - **A purge storm is invisible to the circuit breaker.** Purge calls
+    `record_measurement(..., "partial", tx=tx, commanded=True)`, which skips the
+    breaker and writes no transition row — the files are already unlinked when it
+    runs, so refusing the write would destroy the only record of a change that
+    really happened rather than preserve truth (security audit finding 1, SEV-2,
+    fixed in `c50399c`). The cost is that mass purging cannot arm the mass-loss
+    alarm. A purge remains visible in the `jobs` table, in the per-game
+    `measurement.commanded` log line, and in Game_shelf.
+  - **The first convergence sweeps are expected to trip the breaker.** Every
+    downward move they record is genuine: months of real lancache evictions
+    landing on rows still stamped green, plus the `validation_failed` →
+    `not_downloaded` reclassification on first re-measurement. Roughly 24
+    corrections per run means `sweep.aborted`, a failed sweep job and a Kuma DOWN
+    on the early passes. **Do not clear it blind** — first confirm the agent is
+    healthy (the 2026-08-31 signature was ~8% cached reported on *every* game
+    after the agent lost read access to most cache buckets and had to be pinned
+    to `--user 0:0`; see
+    `docs/security-audits/cache-validation-integrity-security-audit.md`), then
+    raise `ORCH_MEASUREMENT_BREAKER_THRESHOLD` in `/root/orch-lxc.env` for the
+    convergence passes and restore 25 once a sweep completes clean.
+  - **Not yet exercised in production.** Epic scheduled prefill remains disarmed
+    (`ORCH_SCHEDULED_PREFILL_ENABLED=false` in `/root/orch-lxc.env` since
+    2026-09-04) until the recovery sweep — expected to take days — has re-measured
+    the library, and must not be re-enabled before one sweep has completed
+    without tripping the breaker.

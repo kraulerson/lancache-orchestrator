@@ -114,19 +114,56 @@ async def _insert_game(pool, *, status="downloading", app_id="1"):
 
 
 class TestGameStatusReaper:
-    """UAT-11 F-INT-1: a prefill cancelled by the per-job timeout (CancelledError
-    bypasses the handler's `except Exception` reset) or killed by a crash leaves
-    the game stuck 'downloading' forever. The boot reaper recovers it."""
+    """Nothing writes 'downloading' into games.status any more (2026-09-04 split),
+    so the rows this reaper meets are legacy strandings. It records the
+    interruption as a job outcome and leaves cache truth to the sweep's next
+    measurement — a reaper must never guess what is on disk."""
 
-    async def test_reaps_orphaned_downloading_game(self, pool):
-        from orchestrator.jobs.reaper import reap_orphaned_game_status
+    async def test_records_job_outcome_on_stranded_downloading_game(self, pool):
+        from orchestrator.jobs.reaper import GAME_REAPER_ERROR_MESSAGE, reap_orphaned_game_status
 
         gid = await _insert_game(pool, status="downloading")
         n = await reap_orphaned_game_status(pool)
         assert n == 1
-        row = await pool.read_one("SELECT status, last_error FROM games WHERE id=?", (gid,))
-        assert row["status"] == "failed"
-        assert row["last_error"]
+        row = await pool.read_one(
+            "SELECT status, last_job_outcome, last_job_outcome_at, status_measured_at, last_error "
+            "FROM games WHERE id=?",
+            (gid,),
+        )
+        assert row["status"] == "downloading"  # status is measurement's to write, not the reaper's
+        assert row["last_job_outcome"] == GAME_REAPER_ERROR_MESSAGE
+        assert row["last_job_outcome_at"] is not None
+        assert row["status_measured_at"] is None
+        # Same legacy mirror record_job_outcome() maintains, for the API/CLI readers.
+        assert row["last_error"] == GAME_REAPER_ERROR_MESSAGE
+
+    async def test_legacy_downloading_restamp_logs_at_info(self, pool, monkeypatch):
+        """The predicate does not self-clear, so this fires on every boot until the
+        sweep measures the row. WARNING would cry wolf; INFO is the honest level.
+
+        Asserted through a recording logger rather than `capture_logs()`: structlog
+        is configured with `cache_logger_on_first_use=True`, so once any API test
+        has booted the app the reaper's module logger is frozen behind a
+        level-filtering wrapper and an INFO call never reaches a capture
+        processor at all. The recorder sees the call the module actually makes,
+        whatever the global config happens to be by then.
+        """
+        from orchestrator.jobs import reaper as reaper_mod
+
+        calls: list[tuple[str, str]] = []
+
+        class _Recorder:
+            def info(self, event: str, **kw: object) -> None:
+                calls.append(("info", event))
+
+            def warning(self, event: str, **kw: object) -> None:
+                calls.append(("warning", event))
+
+        monkeypatch.setattr(reaper_mod, "_log", _Recorder())
+        await _insert_game(pool, status="downloading", app_id="3")
+        await reaper_mod.reap_orphaned_game_status(pool)
+
+        assert calls == [("info", "jobs.reaper.reaped_orphan_downloading_games")]
 
     async def test_leaves_non_transient_statuses_untouched(self, pool):
         from orchestrator.jobs.reaper import reap_orphaned_game_status
