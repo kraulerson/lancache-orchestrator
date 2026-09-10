@@ -1,5 +1,10 @@
 # Re-arch ④ — LXC cutover runbook (operator)
 
+> **Historical.** This is the one-time migration that produced the current
+> two-host topology; it has been run. For how the hosts are configured **today**
+> — and which failure each setting prevents — see
+> [`live-configuration.md`](live-configuration.md).
+
 Concrete, copy-paste steps for moving the control plane to the Proxmox LXC. The
 code is done + merged (PRs #195–#197) and Phase 0 is **live-verified on the NAS**.
 This runbook is the Phase C (§4/§5 of `docs/superpowers/specs/2026-06-23-lxc-move-design.md`)
