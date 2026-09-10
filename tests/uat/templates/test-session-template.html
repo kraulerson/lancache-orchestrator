@@ -271,6 +271,11 @@ function exportResults() {
 }
 
 renderScenarios();
+// Refresh the counter at LOAD, not only from setResult(). Without this the
+// header keeps its static '0 / 0 completed' until the tester clicks a result —
+// which is exactly what a page whose JavaScript died looks like, and is how a
+// perfectly good checklist gets mistaken for a broken one (UAT-14).
+updateProgress();
 </script>
 </body>
 </html>

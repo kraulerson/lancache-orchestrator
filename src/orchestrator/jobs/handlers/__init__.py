@@ -11,9 +11,14 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from orchestrator.jobs.summary import JobSummary
     from orchestrator.jobs.worker import Deps
 
-Handler = Callable[[dict[str, Any], "Deps"], Awaitable[None]]
+# Most handlers return None: the job succeeded unless they raised, and that is the
+# whole story. A handler that knows more than "it did not throw" — a tally of
+# per-item results — may return a JobSummary, which the worker puts in the Uptime
+# Kuma heartbeat. It never affects jobs.state (UAT-14 #294).
+Handler = Callable[[dict[str, Any], "Deps"], Awaitable["JobSummary | None"]]
 
 HANDLERS: dict[str, Handler] = {}
 

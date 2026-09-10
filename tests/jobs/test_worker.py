@@ -299,13 +299,14 @@ class TestWorkerLoopDispatch:
         assert row["state"] == "failed"
         assert "max runtime" in (row["error"] or "").lower()
 
-    async def test_timed_out_prefill_resets_game_from_downloading(self, pool):
-        """UAT-11 F-INT-1: when the timeout cancels a prefill handler, the game it
-        left 'downloading' must be reset by the worker (which is NOT cancelled, so
-        the write completes) — not left stuck forever."""
+    async def test_timed_out_handler_records_job_outcome_without_touching_status(self, pool):
+        """UAT-11 F-INT-1, post-2026-09-04: when the timeout cancels a handler
+        (CancelledError bypasses its own except clause), the worker — which is NOT
+        cancelled — records the timeout as the game's job outcome. It must not
+        write status: a cancelled job measured nothing."""
         await pool.execute_write(
             "INSERT INTO games (platform, app_id, title, status) "
-            "VALUES ('steam', '77', 'G', 'downloading')"
+            "VALUES ('steam', '77', 'G', 'up_to_date')"
         )
         gid = int((await pool.read_one("SELECT id FROM games ORDER BY id DESC LIMIT 1"))["id"])
         await pool.execute_write(
@@ -325,8 +326,8 @@ class TestWorkerLoopDispatch:
 
         async def stopper():
             for _ in range(300):
-                g = await pool.read_one("SELECT status FROM games WHERE id=?", (gid,))
-                if g and g["status"] != "downloading":
+                g = await pool.read_one("SELECT last_job_outcome FROM games WHERE id=?", (gid,))
+                if g and g["last_job_outcome"]:
                     break
                 await asyncio.sleep(0.02)
             shutdown.set()
@@ -335,8 +336,12 @@ class TestWorkerLoopDispatch:
             worker_loop(deps, shutdown=shutdown, poll_interval_sec=0.02, job_max_runtime_sec=0.1),
             stopper(),
         )
-        g = await pool.read_one("SELECT status FROM games WHERE id=?", (gid,))
-        assert g["status"] == "failed"  # not stuck 'downloading'
+        g = await pool.read_one(
+            "SELECT status, last_job_outcome, status_measured_at FROM games WHERE id=?", (gid,)
+        )
+        assert g["status"] == "up_to_date"  # cache truth survives a wedged job
+        assert "max runtime" in (g["last_job_outcome"] or "").lower()
+        assert g["status_measured_at"] is None
 
     async def test_loop_exits_promptly_on_shutdown(self, pool):
         """Empty queue + shutdown.set() should exit within one poll interval."""

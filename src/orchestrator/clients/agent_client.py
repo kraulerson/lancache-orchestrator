@@ -24,6 +24,73 @@ _log = structlog.get_logger(__name__)
 # single-flight gate blocks every other prefill until it finally exits.
 _STEAM_PREFILL_POLL_TIMEOUT_SEC = 37800.0  # 10.5h — 30 min of headroom over 10h
 
+# Validate budget. Every call used to get a flat 300s regardless of size, so game
+# 15035 (359,671 chunks, ~433s measured, up to 876s on a bad NFS day) was cut off on
+# all 27 sweeps across 52 days while still reporting up_to_date (#297).
+#
+# Cutting it off does not just discard finished work — the agent's handler is torn
+# down on client disconnect, so the run is ABORTED and the next sweep starts over.
+#
+# A bigger flat number would only move the cliff; MechWarrior 5 Editor already sits at
+# 271s against the old 300s. So the budget scales with the chunk count the caller
+# already holds in manifests.chunk_count.
+VALIDATE_TIMEOUT_BASE_SEC = 300.0
+# THE DISK THROUGHPUT THE BUDGET ASSUMES, stated outright — the previous form
+# (`PER_CHUNK_SEC = 0.00217`) hid an assumption of ~461 chunks/sec, and nothing
+# flagged it when the hardware stopped being able to deliver that.
+#
+# Measured on 2026-09-01 from validation_history durations:
+#   before the OMV rebuild (bcache in front of the RAID0):  1471-1539 chunks/sec
+#   after  the OMV rebuild (raw RAID0, NVMe cache detached):  48-54 chunks/sec
+#
+# 40 is deliberately BELOW the measured 48, so a slow day does not reintroduce
+# the cliff. Raise it if a cache layer is restored — but measure first, and
+# remember that being wrong in the optimistic direction is what caused the
+# incident: 379 of 1811 games (21%) could not validate at all, and a timed-out
+# validate writes no validation_history row, so those games never self-correct.
+VALIDATE_TIMEOUT_ASSUMED_CHUNKS_PER_SEC = 40.0
+# Must exceed the largest real game's requirement or the cliff simply moves: at
+# 40/sec ARK: Survival Evolved (369,317 chunks) needs ~9,533s including the base.
+# 4 hours leaves room for library growth. The ceiling exists so a genuinely
+# wedged agent still surfaces as a failure rather than hanging forever.
+#
+# UPPER BOUND, and it is not negotiable: this must stay <= Settings.
+# job_max_runtime_sec (21600s). The worker wraps every handler in
+# asyncio.wait_for, so a ceiling above the job budget is a fiction — the job is
+# cancelled first, and CancelledError is a BaseException that bypasses the
+# sweep's per-game `except Exception`, aborting validates with NO
+# validation_history row. That is the very "cannot self-correct" mechanism this
+# constant was raised to remove. Pinned by
+# tests/clients/test_validate_timeout_review_remediation.py.
+VALIDATE_TIMEOUT_CEILING_SEC = 14400.0
+
+
+def validate_timeout_for(
+    chunk_count: int | None,
+    *,
+    chunks_per_sec: float = VALIDATE_TIMEOUT_ASSUMED_CHUNKS_PER_SEC,
+) -> httpx.Timeout:
+    """Read budget for a validate call, scaled to the work it implies.
+
+    An unknown or nonsensical count keeps the base budget — no information means no
+    change, so steam (which self-enumerates agent-side) behaves exactly as before.
+
+    ``chunks_per_sec`` is the assumed disk throughput. It is a parameter rather than
+    a baked-in constant because it is a property of the HARDWARE, not of the code:
+    the 2026-09-01 incident was a storage change silently invalidating a number
+    nobody could see. Overriding it must not require a code edit.
+
+    Only the READ budget scales. Reaching the agent is fast or it is broken, so the
+    connect timeout stays short.
+    """
+    read = VALIDATE_TIMEOUT_BASE_SEC
+    if chunk_count is not None and chunk_count > 0 and chunks_per_sec > 0:
+        read = min(
+            VALIDATE_TIMEOUT_CEILING_SEC,
+            VALIDATE_TIMEOUT_BASE_SEC + (chunk_count / chunks_per_sec),
+        )
+    return httpx.Timeout(read, connect=10.0)
+
 
 class AgentError(RuntimeError):
     """The agent was unreachable, returned an error, or its job failed."""
@@ -41,8 +108,13 @@ class AgentClient:
         poll_timeout_sec: float = 7200.0,
         connect_retries: int = 2,
         connect_retry_backoff_sec: float = 0.5,
+        validate_chunks_per_sec: float = VALIDATE_TIMEOUT_ASSUMED_CHUNKS_PER_SEC,
     ) -> None:
         self._base_url = base_url
+        # Assumed disk throughput for validate budgets, injected from Settings so a
+        # hardware change is a config edit rather than a code edit — the 2026-09-01
+        # incident was exactly a storage change invalidating a buried constant.
+        self._validate_chunks_per_sec = validate_chunks_per_sec
         self._headers = {"Authorization": f"Bearer {token}"}
         self._transport = transport
         # UAT-12: poll at 3s (was 0.5s) — a multi-hour job needs far fewer
@@ -200,22 +272,32 @@ class AgentClient:
         result: dict[str, Any] = resp.json()
         return result
 
-    async def steam_validate(self, app_id: int) -> dict[str, Any]:
-        # A big game (tens of thousands of chunks) stat's many cache files over
-        # NFS and can take well over the default 30s timeout — use a generous
-        # per-call timeout so validate doesn't AgentError on large apps.
+    async def steam_validate(
+        self, app_id: int, *, chunk_count: int | None = None
+    ) -> dict[str, Any]:
+        # A big game stats many cache files over NFS. The budget scales with the
+        # manifest's chunk count when the caller knows it; steam self-enumerates
+        # agent-side, so it usually does not and keeps the base budget.
         resp = await self._request(
             "POST",
             "/v1/steam/validate",
             json={"app_id": app_id},
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=validate_timeout_for(chunk_count, chunks_per_sec=self._validate_chunks_per_sec),
         )
         result: dict[str, Any] = resp.json()
         return result
 
     async def epic_validate(
-        self, *, app_id: int, version: str, cdn_base: str, raw_manifest_b64: str
+        self,
+        *,
+        app_id: int,
+        version: str,
+        cdn_base: str,
+        raw_manifest_b64: str,
+        chunk_count: int | None = None,
     ) -> dict[str, Any]:
+        # Epic callers read the manifest row first, so they know chunk_count and the
+        # budget scales with it — this is the path game 15035 was dying on (#297).
         resp = await self._request(
             "POST",
             "/v1/epic/validate",
@@ -225,7 +307,7 @@ class AgentClient:
                 "cdn_base": cdn_base,
                 "raw_manifest_b64": raw_manifest_b64,
             },
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=validate_timeout_for(chunk_count, chunks_per_sec=self._validate_chunks_per_sec),
         )
         result: dict[str, Any] = resp.json()
         return result

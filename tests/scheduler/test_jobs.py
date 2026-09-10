@@ -176,41 +176,75 @@ class TestEnqueueValidationSweep:
 # by the host SteamPrefill cron). Epic has NO version data (current_version is
 # always NULL — the Epic library API returns no buildVersion), so the prefill
 # decision keys off VALIDATION STATUS, not the cached/current version-diff. Games
-# default to status='unknown' (never validated → should be prefilled).
+# default to status='unknown' with no status_measured_at. Evidence-based policy
+# (2026-09-04): 'unknown' is never prefilled on its own -- only a real measurement
+# (status_measured_at set) that found the game absent/incomplete triggers a download.
 async def _seed_game(
-    pool, app_id, *, owned=1, current=None, cached=None, status="unknown", platform="epic"
+    pool,
+    app_id,
+    *,
+    owned=1,
+    current=None,
+    cached=None,
+    status="unknown",
+    platform="epic",
+    status_measured_at=None,
 ):
     await pool.execute_write(
         "INSERT INTO games "
-        "(platform, app_id, title, owned, current_version, cached_version, status)"
-        " VALUES (?, ?, 'G', ?, ?, ?, ?)",
-        (platform, app_id, owned, current, cached, status),
+        "(platform, app_id, title, owned, current_version, cached_version, status, "
+        "status_measured_at)"
+        " VALUES (?, ?, 'G', ?, ?, ?, ?, ?)",
+        (platform, app_id, owned, current, cached, status, status_measured_at),
     )
 
 
 class TestEnqueueScheduledPrefill:
-    async def test_enqueues_unknown_status(self, pool):
-        # A never-validated epic game (status 'unknown') is enqueued.
+    async def test_unknown_status_is_not_queued(self, pool):
+        # A never-validated epic game (status 'unknown') is NOT enqueued -- the
+        # 655-download bug (2026-09-01): "not proven cached" must not mean
+        # "download it". Unknown must be measured first, never assumed absent.
         from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
 
         await _seed_game(pool, "1", status="unknown")
+        assert await enqueue_scheduled_prefill(pool) == 0
+
+    async def test_failed_status_is_not_queued(self, pool):
+        # 'failed' is a job outcome (a prefill attempt died), not evidence the
+        # game is absent from cache -- it must not trigger a download even with
+        # status_measured_at set. Nothing writes this value any more (legacy).
+        from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
+
+        await _seed_game(pool, "1", status="failed", status_measured_at="2026-09-04 12:00:00")
+        assert await enqueue_scheduled_prefill(pool) == 0
+
+    async def test_enqueues_validation_failed(self, pool):
+        # A measured partial (disk-stat found some but not all chunks) is queued.
+        from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
+
+        await _seed_game(
+            pool, "1", status="validation_failed", status_measured_at="2026-09-04 12:00:00"
+        )
         n = await enqueue_scheduled_prefill(pool)
         assert n == 1
         row = await pool.read_one("SELECT kind, platform, state, source FROM jobs LIMIT 1")
         assert (row["kind"], row["state"], row["source"]) == ("prefill", "queued", "scheduler")
 
-    async def test_enqueues_failed(self, pool):
-        # The live Epic 'failed' status (disk-stat found it uncached) is enqueued.
+    async def test_enqueues_measured_not_downloaded(self, pool):
+        # A measured absence (disk-stat found nothing cached) is queued.
         from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
 
-        await _seed_game(pool, "1", status="failed")
+        await _seed_game(
+            pool, "1", status="not_downloaded", status_measured_at="2026-09-04 12:00:00"
+        )
         assert await enqueue_scheduled_prefill(pool) == 1
 
-    async def test_enqueues_validation_failed(self, pool):
+    async def test_skips_unmeasured_not_downloaded(self, pool):
+        # Status says missing but nothing ever measured it -- no evidence, no download.
         from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
 
-        await _seed_game(pool, "1", status="validation_failed")
-        assert await enqueue_scheduled_prefill(pool) == 1
+        await _seed_game(pool, "1", status="not_downloaded", status_measured_at=None)
+        assert await enqueue_scheduled_prefill(pool) == 0
 
     async def test_skips_up_to_date(self, pool):
         from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
@@ -232,20 +266,32 @@ class TestEnqueueScheduledPrefill:
     async def test_skips_unowned(self, pool):
         from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
 
-        await _seed_game(pool, "1", owned=0, status="failed")
+        # Otherwise-eligible (measured absence) but unowned -- owned gate wins.
+        await _seed_game(
+            pool, "1", owned=0, status="not_downloaded", status_measured_at="2026-09-04 12:00:00"
+        )
         assert await enqueue_scheduled_prefill(pool) == 0
 
     async def test_skips_steam_platform(self, pool):
         # Piece 2: the orchestrator leaves Steam to the host SteamPrefill cron.
         from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
 
-        await _seed_game(pool, "1", status="failed", platform="steam")
+        # Otherwise-eligible (measured absence) but steam -- platform gate wins.
+        await _seed_game(
+            pool,
+            "1",
+            status="not_downloaded",
+            status_measured_at="2026-09-04 12:00:00",
+            platform="steam",
+        )
         assert await enqueue_scheduled_prefill(pool) == 0
 
     async def test_skips_blocked(self, pool):
         from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
 
-        await _seed_game(pool, "1", status="failed")
+        await _seed_game(
+            pool, "1", status="not_downloaded", status_measured_at="2026-09-04 12:00:00"
+        )
         await pool.execute_write(
             "INSERT INTO block_list (platform, app_id, source) VALUES ('epic','1','api')"
         )
@@ -256,7 +302,9 @@ class TestEnqueueScheduledPrefill:
         # gameshelf Steam-covered copy) is skipped by the scheduled prefill.
         from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
 
-        await _seed_game(pool, "1", status="failed")
+        await _seed_game(
+            pool, "1", status="not_downloaded", status_measured_at="2026-09-04 12:00:00"
+        )
         await pool.execute_write(
             "INSERT INTO prefill_exclusions (platform, app_id, mode, source) "
             "VALUES ('epic','1','exclude','classifier')"
@@ -267,7 +315,9 @@ class TestEnqueueScheduledPrefill:
         # #225: an operator 'allow' override does NOT suppress prefill.
         from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
 
-        await _seed_game(pool, "1", status="failed")
+        await _seed_game(
+            pool, "1", status="not_downloaded", status_measured_at="2026-09-04 12:00:00"
+        )
         await pool.execute_write(
             "INSERT INTO prefill_exclusions (platform, app_id, mode, source) "
             "VALUES ('epic','1','allow','operator')"
@@ -277,7 +327,9 @@ class TestEnqueueScheduledPrefill:
     async def test_dedups_inflight_prefill(self, pool):
         from orchestrator.scheduler.jobs import enqueue_scheduled_prefill
 
-        await _seed_game(pool, "1", status="failed")
+        await _seed_game(
+            pool, "1", status="not_downloaded", status_measured_at="2026-09-04 12:00:00"
+        )
         gid = (await pool.read_one("SELECT id FROM games LIMIT 1"))["id"]
         await pool.execute_write(
             "INSERT INTO jobs (kind, game_id, platform, state, source)"

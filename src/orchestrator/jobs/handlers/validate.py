@@ -1,9 +1,10 @@
 """F7 — validate job handler.
 
 Validates a Steam game's current depot manifests against the lancache
-on-disk cache, records a `validation_history` row, and updates
-`games.status`. An `error` outcome (infra failure, e.g. cache not
-mounted) is recorded but never clobbers the game's existing status.
+on-disk cache, records a `validation_history` row, and hands the outcome to
+`orchestrator.jobs.measurement.record_measurement`, the single writer of
+`games.status`. An `error` outcome (infra failure, e.g. cache not mounted) is
+recorded as an attempt there and never clobbers the game's existing status.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from orchestrator.core.settings import get_settings
+from orchestrator.jobs.measurement import record_measurement
 from orchestrator.validator.disk_stat import ValidationResult, validate_game
 
 if TYPE_CHECKING:
@@ -29,58 +31,53 @@ _INSERT_VH = (
     "VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'disk_stat', ?, ?, ?, ?, ?)"
 )
 
-# outcome -> games.status. 'error' is absent: it must not overwrite real state.
-_STATUS_FOR = {
-    "cached": "up_to_date",
-    "partial": "validation_failed",
-    "missing": "validation_failed",
-}
-
 
 async def validate_one_game(
     pool: Pool, deps: Deps, game_id: int, settings: Settings
 ) -> ValidationResult:
     """Validate one game against the on-disk cache, record a validation_history
-    row, and update games.status. Shared by the validate job handler (F7) and the
-    scheduled sweep (F13). Handles both steam and epic platforms — platform
+    row, and record the measurement. Shared by the validate job handler (F7) and
+    the scheduled sweep (F13). Handles both steam and epic platforms — platform
     dispatch is done inside ``validate_game`` using the game's stored platform."""
     started_row = await pool.read_one("SELECT CURRENT_TIMESTAMP AS t")
     started_at = started_row["t"] if started_row is not None else None
 
     result = await validate_game(pool, deps, game_id, settings)
 
-    await pool.execute_write(
-        _INSERT_VH,
-        (
-            game_id,
-            result.manifest_version,
-            started_at,
-            result.chunks_total,
-            result.chunks_cached,
-            result.chunks_missing,
-            result.outcome,
-            (result.error[:200] if result.error else None),
-        ),
-    )
-
-    new_status = _STATUS_FOR.get(result.outcome)
-    if new_status is not None:
-        # F8: validate does NOT write cached_version — prefill is the sole writer
-        # (it controls manifest freshness). A standalone sweep can validate a
-        # stale stored manifest, so stamping current_version here could falsely
-        # mark a patched game as cached. See the F8 spec "prefill-sole-writer".
-        await pool.execute_write(
-            "UPDATE games SET status=?, last_validated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (new_status, game_id),
+    # ONE transaction (security audit SEV-3). The history row used to be written
+    # outside any transaction, so a breaker-refused measurement left the
+    # observation behind while the status write rolled back: the API serves
+    # chunks_cached/chunks_total from the newest validation_history row alongside
+    # status, so the operator investigating the breaker alarm read a green
+    # up_to_date badge beside '17/337 cached'. Either both land or neither does,
+    # which also makes validate structurally identical to purge.
+    #
+    # A tripped breaker's deduped Kuma push runs inside this transaction and can
+    # hold the single writer for up to ~10s — at most once per window, and only
+    # on the run that trips. Accepted: the alternative is announcing a halt the
+    # database has not yet committed to.
+    #
+    # Cache truth is written in exactly one place. An 'error' outcome records the
+    # attempt only: the old "unstick a stranded 'downloading' by setting
+    # status='failed'" write lived here and is deliberately gone — that is a job
+    # outcome, not a cache measurement. Nothing writes 'downloading' any more
+    # either, and a legacy row still carrying it is corrected by the next
+    # measurement of that row, never by a handler inferring truth from a failure.
+    async with pool.write_transaction() as tx:
+        await tx.execute(
+            _INSERT_VH,
+            (
+                game_id,
+                result.manifest_version,
+                started_at,
+                result.chunks_total,
+                result.chunks_cached,
+                result.chunks_missing,
+                result.outcome,
+                (result.error[:200] if result.error else None),
+            ),
         )
-    else:
-        # outcome='error' (infra failure). Never clobber a classified status, but
-        # resolve the transient 'downloading' so a freshly-prefilled game isn't
-        # stuck (UAT-10 #3).
-        await pool.execute_write(
-            "UPDATE games SET status='failed', last_error=? WHERE id=? AND status='downloading'",
-            ((f"validate: {result.error}"[:200] if result.error else "validate: error"), game_id),
-        )
+        await record_measurement(pool, game_id, result.outcome, tx=tx)
     return result
 
 

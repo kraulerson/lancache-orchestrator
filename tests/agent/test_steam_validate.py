@@ -372,6 +372,59 @@ def test_validate_excludes_shared_redist_depot(tmp_path):
     assert "228990" not in body["versions"]  # redist depot excluded from versions
 
 
+def test_validate_empty_manifest_is_error_at_the_endpoint(tmp_path):
+    """A well-named but EMPTY manifest must not validate as cached — end to end.
+
+    The unit test on _classify cannot catch this. With the redist fix in place,
+    steam_validate's final return only runs when included > 0, so _classify(0, ·) is
+    unreachable from the endpoint and that test now guards dead code.
+
+    The trap: parse_shas and parse_chunk_shas NEVER raise — their own docstring says
+    "malformed/unrecognized buffer yields an empty set". So parsed_ok counts any
+    readable, well-named file whatever its contents, and a branch keyed on parsed_ok
+    alone calls a zero-byte manifest 'cached', which maps to
+    games.status='up_to_date'. That is exactly the #292 false green, on the platform
+    where it actually happened live.
+
+    The real discriminator is `versions`: the redist skip continues BEFORE
+    versions.append, while a depot that parsed to nothing still appends. So
+    all-redist is `parsed_ok and not versions`; an empty manifest has versions.
+    """
+    client = _build_multidepot(tmp_path, depot_cached={800441: (0, 0)})
+    body = client.post("/v1/steam/validate", json={"app_id": MD_APP}).json()
+
+    assert body["outcome"] == "error", (
+        "an empty manifest is unreadable content, not an app with nothing to cache. "
+        f"Got {body['outcome']!r} — this is #292 returning through the redist branch."
+    )
+
+
+def test_validate_all_redist_app_is_cached_not_error(tmp_path):
+    """An app whose ONLY depots are shared redist validates as cached, not error.
+
+    #292 made a zero-chunk result report 'error', which is right when the manifests
+    could not be read. It is wrong here: these manifests parsed perfectly, and every
+    depot was then deliberately excluded as shared Steamworks redistributables. The
+    guard at steam.py's redist branch already says so — "the manifest still parsed
+    (parsed_ok counts it) so an all-redist enumeration isn't a false error" — and
+    #292 silently reversed it.
+
+    Left as 'error' the app is re-validated every 6h forever and never resolves:
+    'error' is not a measurement, so it writes no status at all and the row keeps
+    whatever it had — including a legacy 'downloading', which the sweep excludes
+    from its candidate set — a dead end needing manual SQL.
+    """
+    client = _build_multidepot(tmp_path, depot_cached={228990: (8, 4)})
+    body = client.post("/v1/steam/validate", json={"app_id": MD_APP}).json()
+
+    assert body["outcome"] == "cached", (
+        "manifests that parsed and were then excluded as shared redist are not an "
+        f"unreadable manifest. Got {body['outcome']!r} / {body.get('error')!r}"
+    )
+    assert body["chunks_total"] == 0
+    assert body["error"] is None
+
+
 def test_validate_mode000_depot_counted_cached(tmp_path):
     """A depot whose chunk files EXIST on disk but are mode-000 validates as
     CACHED: mode-000 is a transient nginx-over-NFS write-race that self-heals to
