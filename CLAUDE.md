@@ -44,30 +44,36 @@ or 24 hours past the last commit touching this file.
   SQLite's signed INTEGER range, a `contains` filter operator behind
   `game list --title/--offset` with a truncation footer, and HTTP errors that no
   longer render as a blank `HTTP 404:`.
-- **Recent work (2026-09) — cache validation integrity (branch
-  `docs/cache-validation-integrity-design`, not yet merged):** migration 0015
-  splits cache truth from job outcome. New `games` columns `status_measured_at`,
-  `last_measure_attempt_at`, `last_job_outcome`, `last_job_outcome_at`, plus a
-  `measurement_transitions` log. **Single-writer rule:** `games.status` /
-  `status_measured_at` are written only by
-  `orchestrator.jobs.measurement.record_measurement()`, enforced by a
+- **Recent work (2026-09) — cache validation integrity (PR #305, merged and
+  deployed 2026-09-08):** migration 0015 splits cache truth from job outcome. New
+  `games` columns `status_measured_at`, `last_measure_attempt_at`,
+  `last_job_outcome`, `last_job_outcome_at`, plus a `measurement_transitions`
+  log. **Single-writer rule:** `games.status` / `status_measured_at` are written
+  only by `orchestrator.jobs.measurement.record_measurement()`, enforced by a
   build-breaking source scan (`tests/test_measurement_writer_guard.py`);
   everything else calls `record_job_outcome()`. **Measurement before download:**
   Epic's scheduled prefill requires `status IN
   ('validation_failed','not_downloaded') AND status_measured_at IS NOT NULL`, so
-  `unknown` triggers measurement and never traffic. The sweep now orders by
+  `unknown` triggers measurement and never traffic. The sweep orders by
   `last_measure_attempt_at` with no status filter (resumable by construction),
   and a tripped circuit breaker aborts it with **`sweep.aborted`** rather than
-  `sweep.completed` — update anything alerting on the old event. **Epic
-  scheduled prefill is OFF in production** (`ORCH_SCHEDULED_PREFILL_ENABLED=false`
-  in `/root/orch-lxc.env` since 2026-09-04) and stays off until the recovery
-  sweep has re-measured the library. **Expect the first convergence sweeps to
-  trip the breaker on real downward transitions** (months of genuine evictions on
-  stale-green rows, plus the `validation_failed` → `not_downloaded`
-  reclassification) — confirm the agent is healthy first, then raise
-  `ORCH_MEASUREMENT_BREAKER_THRESHOLD` for those passes and restore 25 once a
-  sweep completes clean; do not re-enable Epic prefill before that. See
-  `docs/superpowers/specs/2026-09-04-cache-validation-integrity-design.md`.
+  `sweep.completed` — update anything alerting on the old event. See
+  `docs/superpowers/specs/2026-09-04-cache-validation-integrity-design.md` and
+  `docs/deploy/live-configuration.md`.
+- **Convergence is done and Epic scheduled prefill is BACK ON**
+  (`ORCH_SCHEDULED_PREFILL_ENABLED=true` in `/root/orch-lxc.env` since
+  2026-09-10). As of 2026-09-11: 1835 owned games `up_to_date`, 1355
+  `not_downloaded`, 19 legacy `failed`, and the three most recent prefill cycles
+  each enqueued **0** downloads. The breaker has recorded no downward transition
+  in 24 h, and `ORCH_MEASUREMENT_BREAKER_THRESHOLD` is no longer set in
+  `/root/orch-lxc.env`, so the code default of 25 applies again — the temporary
+  raise used during the convergence passes has been removed.
+- **Known live rough edge (2026-09-11):** a full sweep needs ~8 h and
+  `job_max_runtime_sec` is 6 h, so sweeps are cancelled mid-pass and recorded as
+  `failed`. No data is harmed — ordering by `last_measure_attempt_at` means the
+  next run resumes at the frontier — but `sweep.completed` never fires, so the
+  Uptime Kuma sweep push monitor gets no heartbeat. `ORCH_SWEEP_BATCH_SIZE` was
+  raised 2 → 4 on 2026-09-11 to bring a pass inside the cap.
 
 **Authoritative sources — prefer these over this summary, which is a snapshot:**
 `FEATURES.md` (what exists) · `CHANGELOG.md` (what changed) · `PROJECT_BIBLE.md`
