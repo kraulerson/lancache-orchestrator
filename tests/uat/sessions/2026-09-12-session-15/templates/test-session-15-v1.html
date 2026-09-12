@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>UAT Session 15</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0f0f17; color: #cdd6f4; line-height: 1.5; padding: 24px; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin-bottom: 4px; }
+  .meta { color: #a6adc8; font-size: 0.9rem; margin-bottom: 24px; }
+  .progress-bar { background: #1e1e2e; border-radius: 8px; height: 8px; margin-bottom: 24px; overflow: hidden; }
+  .progress-fill { background: #a6e3a1; height: 100%; width: 0%; transition: width 0.3s; }
+  .progress-text { text-align: center; color: #a6adc8; font-size: 0.85rem; margin-bottom: 24px; }
+  h2 { font-size: 1.2rem; color: #89b4fa; margin: 32px 0 16px; padding-bottom: 8px; border-bottom: 1px solid #313244; }
+  .fixture-ref { background: #11111b; border: 1px solid #313244; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 0.85rem; color: #a6adc8; }
+  .fixture-ref strong { color: #cdd6f4; }
+  .fixture-ref code { background: #313244; padding: 2px 6px; border-radius: 3px; color: #f9e2af; }
+  .scenario { background: #1e1e2e; border-radius: 8px; margin-bottom: 12px; overflow: hidden; border-left: 4px solid #45475a; transition: border-color 0.2s; }
+  .scenario.pass { border-left-color: #a6e3a1; }
+  .scenario.fail { border-left-color: #f38ba8; }
+  .scenario-header { padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+  .scenario-num { background: #313244; color: #a6adc8; font-size: 0.8rem; font-weight: 600; padding: 2px 8px; border-radius: 4px; min-width: 28px; text-align: center; }
+  .scenario-title { flex: 1; font-weight: 500; }
+  .btn-group { display: flex; gap: 4px; }
+  .btn { padding: 6px 14px; border: 1px solid #45475a; border-radius: 4px; background: transparent; color: #cdd6f4; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
+  .btn:hover { background: #313244; }
+  .btn.pass-btn.active { background: #a6e3a1; color: #1e1e2e; border-color: #a6e3a1; font-weight: 600; }
+  .btn.fail-btn.active { background: #f38ba8; color: #1e1e2e; border-color: #f38ba8; font-weight: 600; }
+  .btn.skip-btn.active { background: #f9e2af; color: #1e1e2e; border-color: #f9e2af; font-weight: 600; }
+  .scenario-details { padding: 0 16px 8px 16px; display: none; }
+  .scenario-details.open { display: block; }
+  .steps { background: #11111b; padding: 10px 14px; border-radius: 4px; font-size: 0.85rem; color: #a6adc8; margin-bottom: 8px; }
+  .steps strong { color: #cdd6f4; }
+  .scenario-notes { padding: 4px 16px 12px 16px; }
+  .notes-input { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; resize: vertical; min-height: 36px; }
+  .notes-input:focus { outline: none; border-color: #89b4fa; }
+  .toggle-details { background: none; border: none; color: #6c7086; cursor: pointer; font-size: 0.75rem; padding: 4px 8px; }
+  .toggle-details:hover { color: #89b4fa; }
+  .bugs-section { margin-top: 40px; }
+  .bug-entry { background: #1e1e2e; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #f38ba8; }
+  .bug-row { display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .bug-field { flex: 1; min-width: 200px; }
+  .bug-field label { display: block; color: #a6adc8; font-size: 0.8rem; margin-bottom: 4px; }
+  .bug-field input, .bug-field select, .bug-field textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; }
+  .bug-field textarea { resize: vertical; min-height: 60px; }
+  .bug-field input:focus, .bug-field select:focus, .bug-field textarea:focus { outline: none; border-color: #89b4fa; }
+  .bug-field select { appearance: auto; }
+  .add-bug-btn { background: #313244; border: 1px dashed #45475a; color: #a6adc8; padding: 10px; border-radius: 8px; width: 100%; cursor: pointer; font-size: 0.85rem; margin-bottom: 12px; }
+  .add-bug-btn:hover { border-color: #f38ba8; color: #f38ba8; }
+  .remove-bug { background: none; border: none; color: #f38ba8; cursor: pointer; font-size: 0.8rem; float: right; }
+  .overall-notes { margin-top: 32px; }
+  .overall-notes textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 12px; border-radius: 8px; font-size: 0.9rem; font-family: inherit; resize: vertical; min-height: 100px; }
+  .overall-notes textarea:focus { outline: none; border-color: #89b4fa; }
+  .export-section { margin-top: 32px; text-align: center; padding: 24px; }
+  .export-btn { background: #89b4fa; color: #1e1e2e; border: none; padding: 12px 32px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; }
+  .export-btn:hover { background: #74c7ec; }
+  .export-btn:active { transform: scale(0.98); }
+  .copy-msg { color: #a6e3a1; margin-top: 8px; font-size: 0.85rem; display: none; }
+</style>
+</head>
+<body>
+
+
+<h1>UAT Session 15</h1>
+
+
+<div class="meta">Date: 2026-09-12 | Features: Cache validation integrity (#305), Validate timeout recalibration (#303) | Tester: <input id="tester-name" type="text" placeholder="Your name" style="background:#1e1e2e;border:1px solid #45475a;color:#cdd6f4;padding:4px 8px;border-radius:4px;font-size:0.85rem;width:140px;"></div>
+
+<div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+<div class="progress-text" id="progress-text">0 / 0 completed</div>
+
+
+<h2>Feature 1: Cache validation integrity (PR #305)</h2>
+<div class="fixture-ref">
+  <strong>Where to look</strong><br>
+  <code>Game_shelf</code> — http://10.100.23.102/ (badges and per-store chips)<br>
+  <code>Orchestrator API</code> — on LXC 1105, <code>source /root/orch-lxc.env</code> then curl 127.0.0.1:8765<br>
+  <code>CLI</code> — <code>docker exec orchestrator python -m orchestrator.cli game list</code><br>
+  Automated agents already verified the schema, the single-writer rule and the prefill guard.
+  These scenarios cover what only a human looking at the UI can judge.
+</div>
+<div id="feature1"></div>
+
+<h2>Feature 2: Validate timeout recalibration (PR #303)</h2>
+<div class="fixture-ref">
+  <strong>Reference games</strong><br>
+  <code>ARK ModKit (UE4)</code> — game id 15035, 359,671 chunks, 244 GB. The game that
+  motivated this change; it timed out under the old flat budget.<br>
+  <code>Destiny 2</code> — game id 15206, 164 GB.<br>
+  <code>Half-Life 2: Lost Coast</code> — game id 56, a known <code>no_manifest_in_cache</code> error case.
+</div>
+<div id="feature2"></div>
+
+<div class="bugs-section">
+  <h2>Bugs Found</h2>
+  <div id="bugs-list"></div>
+  <button class="add-bug-btn" onclick="addBug()">+ Add Bug</button>
+</div>
+
+<div class="overall-notes">
+  <h2>Overall Notes</h2>
+  <textarea id="overall-notes" placeholder="Free-form observations, UX concerns, suggestions, things that felt wrong even if they technically worked..."></textarea>
+</div>
+
+<div class="export-section">
+  <button class="export-btn" onclick="exportResults()">Copy Results to Clipboard</button>
+  <div class="copy-msg" id="copy-msg">Copied! Paste into terminal or save to submissions folder.</div>
+</div>
+
+<script>
+
+const scenarios = [
+  {
+    "id": 1,
+    "feature": 1,
+    "title": "A cached game shows as cached, and says when it was measured",
+    "steps": "1. Open Game_shelf at http://10.100.23.102/\\n2. Find a game you know is fully downloaded to the cache (e.g. a big Steam title you have played recently)\\n3. Look at its badge and its per-store chips\\n4. Note whether anything tells you HOW RECENTLY that was checked",
+    "expected": "The badge reads Cached for the store it is cached on. The per-store chips agree with the badge \u2014 no store shows a status that contradicts it. NOTE HONESTLY whether you can tell when it was last measured; the API field status_measured_at exists but may not be surfaced in the UI yet. If you cannot tell, that is a finding worth writing down."
+  },
+  {
+    "id": 2,
+    "feature": 1,
+    "title": "Nothing is being auto-downloaded behind your back",
+    "steps": "1. On LXC 1105: ssh root@10.100.23.105\\n2. docker exec orchestrator python /tmp/sweepstat.py  (shows the latest sweep)\\n3. Check the jobs list in the UI or via the API for any job of kind 'prefill'\\n4. Look specifically for jobs created since 2026-09-08",
+    "expected": "ZERO prefill jobs since 2026-09-08. This is the whole point of the release: on 2026-09-01 an interrupted run would have re-downloaded 655 already-cached games. Right now 17 Epic games would be queued under the old logic and are correctly blocked. If you see ANY prefill job you did not start yourself, stop and flag it as SEV-1."
+  },
+  {
+    "id": 3,
+    "feature": 1,
+    "title": "An unknown game triggers a check, never a download",
+    "steps": "1. In Game_shelf, filter for cache status Unknown\\n2. Pick one game and note its name and store\\n3. Check whether the orchestrator has queued anything for it (jobs list)\\n4. Leave it alone \u2014 do not force anything",
+    "expected": "Unknown games sit there waiting to be measured. No download job appears for them. Unknown must mean 'we have not looked yet', never 'go fetch it'."
+  },
+  {
+    "id": 4,
+    "feature": 1,
+    "title": "Force a single validate and watch the status update",
+    "steps": "1. Pick ONE small game you do not mind re-checking\\n2. Trigger a validate for it from Game_shelf or the CLI\\n3. Wait for it to finish\\n4. Re-check the badge and the game's detail",
+    "expected": "The status changes to reflect what is actually on disk, and the measured timestamp moves to now. The job completes without error. If the badge does not change when you would expect it to, note exactly which game and what you saw."
+  },
+  {
+    "id": 5,
+    "feature": 1,
+    "title": "The 19 permanently-stuck games are visible and harmless",
+    "steps": "1. On LXC 1105, list games with status 'failed'\\n2. Look at how Game_shelf displays those same games\\n3. Judge whether the display is misleading to you as the operator",
+    "expected": "19 games (15 Epic) show a legacy 'failed' status that no current code can clear \u2014 every re-check errors with no_manifest_in_cache. They are correctly excluded from downloads. The question for you: does the UI make these look BROKEN in a way that would worry you, or is it clear they are just unmeasurable? Your judgement here decides whether we fix the display."
+  },
+  {
+    "id": 6,
+    "feature": 1,
+    "title": "Badges and filters still agree after the September Game_shelf fixes",
+    "steps": "1. Filter for Steam AND Not downloaded\\n2. Confirm every result is genuinely a Steam game that is not downloaded on Steam\\n3. Filter for Blocked and check no game shows a Cached badge\\n4. Filter for Unknown and confirm no already-downloaded game appears",
+    "expected": "All three filters behave as single combined statements, not as separate tests across different stores. This regression-checks the four filter/display defects fixed on 2026-09-10."
+  },
+  {
+    "id": 7,
+    "feature": 2,
+    "title": "The biggest game in the library validates without timing out",
+    "steps": "1. Trigger a validate for ARK ModKit (UE4), game id 15035\\n2. Note the start time\\n3. Wait \u2014 the computed budget is about 9,292 seconds (2.6 hours), and it should finish well inside that\\n4. Record how long it actually took",
+    "expected": "It completes with a real result (cached / partial / missing) rather than a timeout. Under the old flat budget this game timed out every time. Record the actual duration \u2014 that number tells us whether the 40-chunks-per-second assumption still matches your hardware."
+  },
+  {
+    "id": 8,
+    "feature": 2,
+    "title": "A known error case fails cleanly without poisoning anything",
+    "steps": "1. Trigger a validate for Half-Life 2: Lost Coast, game id 56\\n2. Observe the result\\n3. Immediately trigger a SECOND validate for the same game\\n4. Compare how long each attempt took",
+    "expected": "Both attempts return an error (no_manifest_in_cache) quickly and the game's status is NOT changed to something misleading. IMPORTANT: an agent found that an error result can shrink a large game's future time budget permanently. This scenario is checking the small-game case is unaffected. If the second attempt behaves differently from the first, that is significant \u2014 write down both durations."
+  }
+];
+
+function renderScenarios() {
+  scenarios.forEach(s => {
+    const container = document.getElementById('feature' + s.feature);
+    if (!container) return;
+    container.innerHTML += '<div class="scenario" id="scenario-' + s.id + '">' +
+      '<div class="scenario-header">' +
+        '<span class="scenario-num">' + s.id + '</span>' +
+        '<span class="scenario-title">' + s.title + '</span>' +
+        '<button class="toggle-details" onclick="toggleDetails(' + s.id + ')">details</button>' +
+        '<div class="btn-group">' +
+          '<button class="btn pass-btn" onclick="setResult(' + s.id + ',\'pass\',this)">Pass</button>' +
+          '<button class="btn fail-btn" onclick="setResult(' + s.id + ',\'fail\',this)">Fail</button>' +
+          '<button class="btn skip-btn" onclick="setResult(' + s.id + ',\'skip\',this)">Skip</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="scenario-details" id="details-' + s.id + '">' +
+        '<div class="steps"><strong>Steps:</strong><br>' + s.steps.replace(/\n/g,'<br>') + '</div>' +
+        '<div class="steps"><strong>Expected:</strong><br>' + s.expected + '</div>' +
+      '</div>' +
+      '<div class="scenario-notes">' +
+        '<textarea class="notes-input" id="notes-' + s.id + '" placeholder="Notes — observations, issues, anything worth recording"></textarea>' +
+      '</div>' +
+    '</div>';
+  });
+}
+
+const results = {};
+
+function setResult(id, result, btn) {
+  results[id] = result;
+  const sc = document.getElementById('scenario-' + id);
+  sc.className = 'scenario ' + (result === 'skip' ? '' : result);
+  sc.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  updateProgress();
+}
+
+function toggleDetails(id) {
+  document.getElementById('details-' + id).classList.toggle('open');
+}
+
+function updateProgress() {
+  const done = Object.keys(results).length;
+  const pct = (done / scenarios.length * 100).toFixed(0);
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent = done + ' / ' + scenarios.length + ' completed';
+}
+
+var bugCount = 0;
+
+function addBug() {
+  bugCount++;
+  var n = bugCount;
+  document.getElementById('bugs-list').innerHTML +=
+    '<div class="bug-entry" id="bug-' + n + '">' +
+      '<button class="remove-bug" onclick="document.getElementById(\'bug-' + n + '\').remove()">remove</button>' +
+      '<div class="bug-row">' +
+        '<div class="bug-field"><label>Severity</label><select id="bug-sev-' + n + '">' +
+          '<option>SEV-1 (crash/data loss)</option><option>SEV-2 (broken, workaround exists)</option>' +
+          '<option selected>SEV-3 (minor UX)</option><option>SEV-4 (polish/enhancement)</option>' +
+        '</select></div>' +
+        '<div class="bug-field"><label>Feature</label><select id="bug-feat-' + n + '">' +
+          '<option>1 - Cache validation integrity</option><option>2 - Validate timeout recalibration</option>' +
+        '</select></div>' +
+      '</div>' +
+      '<div class="bug-field"><label>Description</label><input id="bug-desc-' + n + '" placeholder="What went wrong?"></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Steps to Reproduce</label><textarea id="bug-steps-' + n + '" placeholder="1. ...\n2. ...\n3. ..."></textarea></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Expected vs Actual</label><textarea id="bug-exp-' + n + '" placeholder="Expected: ...\nActual: ..."></textarea></div>' +
+    '</div>';
+}
+
+function exportResults() {
+  var tester = document.getElementById('tester-name').value || 'Unknown';
+  var md = '# ' + document.querySelector('h1').textContent + ' Results\n\n';
+  md += '**Date:** 2026-09-12\n';
+  md += '**Tester:** ' + tester + '\n';
+  md += '**Features:** Cache validation integrity (#305), Validate timeout recalibration (#303)\n\n';
+
+  var pass = 0, fail = 0, skip = 0;
+  for (var k in results) {
+    if (results[k] === 'pass') pass++;
+    else if (results[k] === 'fail') fail++;
+    else if (results[k] === 'skip') skip++;
+  }
+  var untested = scenarios.length - Object.keys(results).length;
+  md += '**Summary:** ' + pass + ' passed, ' + fail + ' failed, ' + skip + ' skipped, ' + untested + ' not tested\n\n---\n\n';
+
+  md += '## Scenarios\n\n';
+  md += '| # | Scenario | Result | Notes |\n';
+  md += '|---|---|---|---|\n';
+  scenarios.forEach(function(s) {
+    var r = results[s.id] || 'not tested';
+    var icon = r === 'pass' ? 'PASS' : r === 'fail' ? 'FAIL' : r === 'skip' ? 'SKIP' : '-';
+    var el = document.getElementById('notes-' + s.id);
+    var notes = el ? el.value.replace(/\|/g, '/').replace(/\n/g, ' ').replace(/`/g, "'").replace(/\[/g, '(').replace(/\]/g, ')').replace(/\*/g, '-') : '';
+    md += '| ' + s.id + ' | ' + s.title + ' | ' + icon + ' | ' + notes + ' |\n';
+  });
+
+  var bugEntries = document.querySelectorAll('.bug-entry');
+  if (bugEntries.length > 0) {
+    md += '\n---\n\n## Bugs Found\n\n';
+    var i = 0;
+    bugEntries.forEach(function(el) {
+      i++;
+      var id = el.id.split('-')[1];
+      var sev = document.getElementById('bug-sev-' + id);
+      var feat = document.getElementById('bug-feat-' + id);
+      var desc = document.getElementById('bug-desc-' + id);
+      var steps = document.getElementById('bug-steps-' + id);
+      var exp = document.getElementById('bug-exp-' + id);
+      md += '### Bug ' + i + '\n';
+      md += '- **Severity:** ' + (sev ? sev.value : '') + '\n';
+      md += '- **Feature:** ' + (feat ? feat.value : '') + '\n';
+      md += '- **Description:** ' + (desc ? desc.value : '') + '\n';
+      md += '- **Steps:** ' + (steps ? steps.value.replace(/\n/g, '; ') : '') + '\n';
+      md += '- **Expected vs Actual:** ' + (exp ? exp.value.replace(/\n/g, '; ') : '') + '\n\n';
+    });
+  }
+
+  var overall = document.getElementById('overall-notes').value;
+  if (overall) {
+    md += '\n---\n\n## Overall Notes\n\n' + overall + '\n';
+  }
+
+  navigator.clipboard.writeText(md).then(function() {
+    var msg = document.getElementById('copy-msg');
+    msg.style.display = 'block';
+    setTimeout(function() { msg.style.display = 'none'; }, 3000);
+  });
+}
+
+renderScenarios();
+// perfectly good checklist gets mistaken for a broken one (UAT-14).
+updateProgress();
+</script>
+</body>
+</html>
