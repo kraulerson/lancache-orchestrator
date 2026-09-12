@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>UAT Session 15 — v2 (4 outstanding scenarios)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0f0f17; color: #cdd6f4; line-height: 1.5; padding: 24px; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin-bottom: 4px; }
+  .meta { color: #a6adc8; font-size: 0.9rem; margin-bottom: 24px; }
+  .progress-bar { background: #1e1e2e; border-radius: 8px; height: 8px; margin-bottom: 24px; overflow: hidden; }
+  .progress-fill { background: #a6e3a1; height: 100%; width: 0%; transition: width 0.3s; }
+  .progress-text { text-align: center; color: #a6adc8; font-size: 0.85rem; margin-bottom: 24px; }
+  h2 { font-size: 1.2rem; color: #89b4fa; margin: 32px 0 16px; padding-bottom: 8px; border-bottom: 1px solid #313244; }
+  .fixture-ref { background: #11111b; border: 1px solid #313244; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 0.85rem; color: #a6adc8; }
+  .fixture-ref strong { color: #cdd6f4; }
+  .fixture-ref code { background: #313244; padding: 2px 6px; border-radius: 3px; color: #f9e2af; }
+  .scenario { background: #1e1e2e; border-radius: 8px; margin-bottom: 12px; overflow: hidden; border-left: 4px solid #45475a; transition: border-color 0.2s; }
+  .scenario.pass { border-left-color: #a6e3a1; }
+  .scenario.fail { border-left-color: #f38ba8; }
+  .scenario-header { padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+  .scenario-num { background: #313244; color: #a6adc8; font-size: 0.8rem; font-weight: 600; padding: 2px 8px; border-radius: 4px; min-width: 28px; text-align: center; }
+  .scenario-title { flex: 1; font-weight: 500; }
+  .btn-group { display: flex; gap: 4px; }
+  .btn { padding: 6px 14px; border: 1px solid #45475a; border-radius: 4px; background: transparent; color: #cdd6f4; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
+  .btn:hover { background: #313244; }
+  .btn.pass-btn.active { background: #a6e3a1; color: #1e1e2e; border-color: #a6e3a1; font-weight: 600; }
+  .btn.fail-btn.active { background: #f38ba8; color: #1e1e2e; border-color: #f38ba8; font-weight: 600; }
+  .btn.skip-btn.active { background: #f9e2af; color: #1e1e2e; border-color: #f9e2af; font-weight: 600; }
+  .scenario-details { padding: 0 16px 8px 16px; display: none; }
+  .scenario-details.open { display: block; }
+  .steps { background: #11111b; padding: 10px 14px; border-radius: 4px; font-size: 0.85rem; color: #a6adc8; margin-bottom: 8px; }
+  .steps strong { color: #cdd6f4; }
+  .scenario-notes { padding: 4px 16px 12px 16px; }
+  .notes-input { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; resize: vertical; min-height: 36px; }
+  .notes-input:focus { outline: none; border-color: #89b4fa; }
+  .toggle-details { background: none; border: none; color: #6c7086; cursor: pointer; font-size: 0.75rem; padding: 4px 8px; }
+  .toggle-details:hover { color: #89b4fa; }
+  .bugs-section { margin-top: 40px; }
+  .bug-entry { background: #1e1e2e; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #f38ba8; }
+  .bug-row { display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .bug-field { flex: 1; min-width: 200px; }
+  .bug-field label { display: block; color: #a6adc8; font-size: 0.8rem; margin-bottom: 4px; }
+  .bug-field input, .bug-field select, .bug-field textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; }
+  .bug-field textarea { resize: vertical; min-height: 60px; }
+  .bug-field input:focus, .bug-field select:focus, .bug-field textarea:focus { outline: none; border-color: #89b4fa; }
+  .bug-field select { appearance: auto; }
+  .add-bug-btn { background: #313244; border: 1px dashed #45475a; color: #a6adc8; padding: 10px; border-radius: 8px; width: 100%; cursor: pointer; font-size: 0.85rem; margin-bottom: 12px; }
+  .add-bug-btn:hover { border-color: #f38ba8; color: #f38ba8; }
+  .remove-bug { background: none; border: none; color: #f38ba8; cursor: pointer; font-size: 0.8rem; float: right; }
+  .overall-notes { margin-top: 32px; }
+  .overall-notes textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 12px; border-radius: 8px; font-size: 0.9rem; font-family: inherit; resize: vertical; min-height: 100px; }
+  .overall-notes textarea:focus { outline: none; border-color: #89b4fa; }
+  .export-section { margin-top: 32px; text-align: center; padding: 24px; }
+  .export-btn { background: #89b4fa; color: #1e1e2e; border: none; padding: 12px 32px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; }
+  .export-btn:hover { background: #74c7ec; }
+  .export-btn:active { transform: scale(0.98); }
+  .copy-msg { color: #a6e3a1; margin-top: 8px; font-size: 0.85rem; display: none; }
+</style>
+</head>
+<body>
+
+
+<h1>UAT Session 15 — v2 (4 outstanding scenarios)</h1>
+
+
+<div class="meta">Date: 2026-09-12 | Features: Cache validation integrity (#305), Validate timeout recalibration (#303) | Tester: <input id="tester-name" type="text" placeholder="Your name" style="background:#1e1e2e;border:1px solid #45475a;color:#cdd6f4;padding:4px 8px;border-radius:4px;font-size:0.85rem;width:140px;"></div>
+
+<div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+<div class="progress-text" id="progress-text">0 / 0 completed</div>
+
+
+<h2>Feature 1: Cache validation integrity (PR #305)</h2>
+<div class="fixture-ref">
+  <strong>v2 — only the 4 scenarios skipped in v1.</strong> They were skipped because v1
+  gave game ids with no commands and, in scenario 7, named the wrong game. Every command
+  below has been run against the live system first.<br><br>
+  <strong>Getting a shell:</strong> <code>ssh root@10.100.23.105</code><br>
+  <strong>CLI (verified working):</strong> <code>docker exec orchestrator orchestrator-cli game show &lt;id&gt;</code><br>
+  <strong>Is a sweep running?</strong> <code>docker exec orchestrator python /tmp/sweepstat.py</code><br>
+  Scenarios 1, 2, 4 and 6 already passed in v1 and are not repeated. Scenario 1 failed and
+  is logged as UAT15-B1 — no need to re-test it.
+</div>
+<div id="feature1"></div>
+
+<h2>Feature 2: Validate timeout recalibration (PR #303)</h2>
+<div class="fixture-ref">
+  <strong>Correction from v1:</strong> your largest game is
+  <code>ARK: Survival Evolved</code> — Steam, id <strong>1242</strong>, 377 GB,
+  369,317 chunks. v1 wrongly called ARK ModKit (243.9 GB) the largest.<br>
+  Computed budget at 40 chunks/sec: <strong>9,233 seconds (2h34m)</strong>.
+  Expected real duration is far shorter — roughly 20 to 40 minutes at the ~650 GiB/h
+  this NAS actually achieves.
+</div>
+<div id="feature2"></div>
+
+<div class="bugs-section">
+  <h2>Bugs Found</h2>
+  <div id="bugs-list"></div>
+  <button class="add-bug-btn" onclick="addBug()">+ Add Bug</button>
+</div>
+
+<div class="overall-notes">
+  <h2>Overall Notes</h2>
+  <textarea id="overall-notes" placeholder="Free-form observations, UX concerns, suggestions, things that felt wrong even if they technically worked..."></textarea>
+</div>
+
+<div class="export-section">
+  <button class="export-btn" onclick="exportResults()">Copy Results to Clipboard</button>
+  <div class="copy-msg" id="copy-msg">Copied! Paste into terminal or save to submissions folder.</div>
+</div>
+
+<script>
+
+const scenarios = [
+  {
+    "id": 3,
+    "feature": 1,
+    "title": "An unknown game is waiting to be measured, not queued for download",
+    "steps": "1. ssh root@10.100.23.105\\n2. Run: docker exec orchestrator orchestrator-cli game show 360757    (Steelrising, Epic)\\n3. Run: docker exec orchestrator orchestrator-cli game show 485801    (Astral Ascent, Epic)\\n4. Note the 'status' line for each\\n5. Run: docker exec orchestrator orchestrator-cli jobs list    and look for any job of kind 'prefill' naming either game",
+    "expected": "Both show status UNKNOWN. NEITHER appears in any prefill job. This replaces v1's scenario 3, which needed you to buy a new game \u2014 these two are already in the unknown state, so the same property is checkable without spending anything. Unknown must mean 'we have not looked yet', never 'go download it'."
+  },
+  {
+    "id": 5,
+    "feature": 1,
+    "title": "The 19 permanently-stuck games look explainable, not alarming",
+    "steps": "1. ssh root@10.100.23.105\\n2. Run: docker exec orchestrator orchestrator-cli game show 56      (Half-Life 2: Lost Coast)\\n3. Run: docker exec orchestrator orchestrator-cli game show 1879    (Lossless Scaling)\\n4. Run: docker exec orchestrator orchestrator-cli game show 14906   (Unreal Tournament, Epic)\\n5. Note the 'status' and 'last_error' lines\\n6. Now open Game_shelf and find those same three games. Look at what the UI shows you.",
+    "expected": "All three show a legacy status of FAILED with last_error 'validate: no_manifest_in_cache' (or an Epic manifest error). There is no manifest, so there is nothing to check them against \u2014 no current code can ever clear this. THE ACTUAL QUESTION FOR YOU: in Game_shelf, do these look BROKEN in a way that would worry you, or is it obvious they are simply unmeasurable? Your answer decides whether we change the display. There is no right answer \u2014 say what you actually feel looking at it."
+  },
+  {
+    "id": 7,
+    "feature": 2,
+    "title": "The genuinely largest game validates without timing out",
+    "steps": "1. ssh root@10.100.23.105\\n2. FIRST check nothing is in the way: docker exec orchestrator python /tmp/sweepstat.py\\n   If the state says 'running', a sweep is using the worker \u2014 either wait for it to finish or expect your validate to queue behind it.\\n3. Run: docker exec orchestrator orchestrator-cli game show 1242    and note chunks_total (should be 369317) and last_validated_at\\n4. Note the wall-clock time now\\n5. Run: docker exec orchestrator orchestrator-cli game validate 1242\\n6. Wait. Re-run 'docker exec orchestrator orchestrator-cli game show 1242' every few minutes until last_validated_at changes\\n7. Record how many minutes it actually took",
+    "expected": "It completes with a real result and last_validated_at moves to now. It must NOT time out. Under the old flat 300-second budget this game could never finish; the chunk-scaled budget gives it 9,233 seconds. WRITE DOWN THE ACTUAL MINUTES \u2014 that number tells us whether the 40-chunks-per-second assumption still matches your hardware, and an agent found that the ceiling on this budget is hard-coded and cannot be tuned if your storage gets slower."
+  },
+  {
+    "id": 8,
+    "feature": 2,
+    "title": "A game with no manifest fails fast and stays honest",
+    "steps": "1. ssh root@10.100.23.105\\n2. Run: docker exec orchestrator orchestrator-cli game show 56     (Half-Life 2: Lost Coast \u2014 one of the 19 from scenario 5)\\n3. Note chunks_total (expected 0) and status\\n4. Run: docker exec orchestrator orchestrator-cli game validate 56    and time roughly how long it takes\\n5. Run: docker exec orchestrator orchestrator-cli game show 56    again\\n6. Repeat steps 4 and 5 once more and compare the two durations",
+    "expected": "Both attempts finish QUICKLY (seconds, not minutes) with an error, and the status does not change to something misleading like 'not downloaded'. This is safe to run \u2014 this game has no manifest and never had one, so there is no good measurement to damage. An agent found that on a LARGE game an error result can permanently shrink its future time budget; this scenario confirms the small no-manifest case behaves sanely. If the second attempt takes noticeably longer than the first, that is significant \u2014 write down both."
+  }
+];
+
+function renderScenarios() {
+  scenarios.forEach(s => {
+    const container = document.getElementById('feature' + s.feature);
+    if (!container) return;
+    container.innerHTML += '<div class="scenario" id="scenario-' + s.id + '">' +
+      '<div class="scenario-header">' +
+        '<span class="scenario-num">' + s.id + '</span>' +
+        '<span class="scenario-title">' + s.title + '</span>' +
+        '<button class="toggle-details" onclick="toggleDetails(' + s.id + ')">details</button>' +
+        '<div class="btn-group">' +
+          '<button class="btn pass-btn" onclick="setResult(' + s.id + ',\'pass\',this)">Pass</button>' +
+          '<button class="btn fail-btn" onclick="setResult(' + s.id + ',\'fail\',this)">Fail</button>' +
+          '<button class="btn skip-btn" onclick="setResult(' + s.id + ',\'skip\',this)">Skip</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="scenario-details" id="details-' + s.id + '">' +
+        '<div class="steps"><strong>Steps:</strong><br>' + s.steps.replace(/\n/g,'<br>') + '</div>' +
+        '<div class="steps"><strong>Expected:</strong><br>' + s.expected + '</div>' +
+      '</div>' +
+      '<div class="scenario-notes">' +
+        '<textarea class="notes-input" id="notes-' + s.id + '" placeholder="Notes — observations, issues, anything worth recording"></textarea>' +
+      '</div>' +
+    '</div>';
+  });
+}
+
+const results = {};
+
+function setResult(id, result, btn) {
+  results[id] = result;
+  const sc = document.getElementById('scenario-' + id);
+  sc.className = 'scenario ' + (result === 'skip' ? '' : result);
+  sc.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  updateProgress();
+}
+
+function toggleDetails(id) {
+  document.getElementById('details-' + id).classList.toggle('open');
+}
+
+function updateProgress() {
+  const done = Object.keys(results).length;
+  const pct = (done / scenarios.length * 100).toFixed(0);
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent = done + ' / ' + scenarios.length + ' completed';
+}
+
+var bugCount = 0;
+
+function addBug() {
+  bugCount++;
+  var n = bugCount;
+  document.getElementById('bugs-list').innerHTML +=
+    '<div class="bug-entry" id="bug-' + n + '">' +
+      '<button class="remove-bug" onclick="document.getElementById(\'bug-' + n + '\').remove()">remove</button>' +
+      '<div class="bug-row">' +
+        '<div class="bug-field"><label>Severity</label><select id="bug-sev-' + n + '">' +
+          '<option>SEV-1 (crash/data loss)</option><option>SEV-2 (broken, workaround exists)</option>' +
+          '<option selected>SEV-3 (minor UX)</option><option>SEV-4 (polish/enhancement)</option>' +
+        '</select></div>' +
+        '<div class="bug-field"><label>Feature</label><select id="bug-feat-' + n + '">' +
+          '<option>1 - Cache validation integrity</option><option>2 - Validate timeout recalibration</option>' +
+        '</select></div>' +
+      '</div>' +
+      '<div class="bug-field"><label>Description</label><input id="bug-desc-' + n + '" placeholder="What went wrong?"></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Steps to Reproduce</label><textarea id="bug-steps-' + n + '" placeholder="1. ...\n2. ...\n3. ..."></textarea></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Expected vs Actual</label><textarea id="bug-exp-' + n + '" placeholder="Expected: ...\nActual: ..."></textarea></div>' +
+    '</div>';
+}
+
+function exportResults() {
+  var tester = document.getElementById('tester-name').value || 'Unknown';
+  var md = '# ' + document.querySelector('h1').textContent + ' Results\n\n';
+  md += '**Date:** 2026-09-12\n';
+  md += '**Tester:** ' + tester + '\n';
+  md += '**Features:** Cache validation integrity (#305), Validate timeout recalibration (#303)\n\n';
+
+  var pass = 0, fail = 0, skip = 0;
+  for (var k in results) {
+    if (results[k] === 'pass') pass++;
+    else if (results[k] === 'fail') fail++;
+    else if (results[k] === 'skip') skip++;
+  }
+  var untested = scenarios.length - Object.keys(results).length;
+  md += '**Summary:** ' + pass + ' passed, ' + fail + ' failed, ' + skip + ' skipped, ' + untested + ' not tested\n\n---\n\n';
+
+  md += '## Scenarios\n\n';
+  md += '| # | Scenario | Result | Notes |\n';
+  md += '|---|---|---|---|\n';
+  scenarios.forEach(function(s) {
+    var r = results[s.id] || 'not tested';
+    var icon = r === 'pass' ? 'PASS' : r === 'fail' ? 'FAIL' : r === 'skip' ? 'SKIP' : '-';
+    var el = document.getElementById('notes-' + s.id);
+    var notes = el ? el.value.replace(/\|/g, '/').replace(/\n/g, ' ').replace(/`/g, "'").replace(/\[/g, '(').replace(/\]/g, ')').replace(/\*/g, '-') : '';
+    md += '| ' + s.id + ' | ' + s.title + ' | ' + icon + ' | ' + notes + ' |\n';
+  });
+
+  var bugEntries = document.querySelectorAll('.bug-entry');
+  if (bugEntries.length > 0) {
+    md += '\n---\n\n## Bugs Found\n\n';
+    var i = 0;
+    bugEntries.forEach(function(el) {
+      i++;
+      var id = el.id.split('-')[1];
+      var sev = document.getElementById('bug-sev-' + id);
+      var feat = document.getElementById('bug-feat-' + id);
+      var desc = document.getElementById('bug-desc-' + id);
+      var steps = document.getElementById('bug-steps-' + id);
+      var exp = document.getElementById('bug-exp-' + id);
+      md += '### Bug ' + i + '\n';
+      md += '- **Severity:** ' + (sev ? sev.value : '') + '\n';
+      md += '- **Feature:** ' + (feat ? feat.value : '') + '\n';
+      md += '- **Description:** ' + (desc ? desc.value : '') + '\n';
+      md += '- **Steps:** ' + (steps ? steps.value.replace(/\n/g, '; ') : '') + '\n';
+      md += '- **Expected vs Actual:** ' + (exp ? exp.value.replace(/\n/g, '; ') : '') + '\n\n';
+    });
+  }
+
+  var overall = document.getElementById('overall-notes').value;
+  if (overall) {
+    md += '\n---\n\n## Overall Notes\n\n' + overall + '\n';
+  }
+
+  navigator.clipboard.writeText(md).then(function() {
+    var msg = document.getElementById('copy-msg');
+    msg.style.display = 'block';
+    setTimeout(function() { msg.style.display = 'none'; }, 3000);
+  });
+}
+
+renderScenarios();
+// perfectly good checklist gets mistaken for a broken one (UAT-14).
+updateProgress();
+</script>
+</body>
+</html>
