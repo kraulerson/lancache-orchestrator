@@ -19,6 +19,21 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — one transient error no longer cripples a large game's validate budget forever — 2026-09-13
+
+- **`validate_game` took the newest `validation_history` row regardless of outcome.**
+  An errored run writes `chunks_total = 0` (`validate_one_game` inserts
+  unconditionally), which collapsed to `None` and dropped the budget to the 300s
+  base. Measured on ARK: Survival Evolved — **9292s before an error row, 300s
+  after**. It could not recover: at 300s the game times out, and the resulting
+  `AgentError` propagates out of `validate_one_game` *before* the history insert,
+  so no new row is written and the zero row stays newest permanently. The largest
+  games in the library — exactly the ones the recalibration existed to rescue —
+  became silently unvalidatable after a single "cache not mounted" moment. The
+  lookup now takes the newest row that actually measured something
+  (`AND chunks_total > 0`); an error measured nothing and carries no size.
+  Found by the exploratory agent in UAT session 15 (#308).
+
 ### Security — the measurement breaker's Kuma push URL is redacted, and so are the four that never were — 2026-09-07
 
 `ORCH_KUMA_PUSH_MEASUREMENT_BREAKER` is a credential in its own right: with an Uptime Kuma push monitor the URL *is* the token. It arrived as a plain `str` alongside four pre-existing `kuma_push_*` settings — and `core/logging.py`'s `_SENSITIVE_KEY_RE` matched none of `kuma`, `push`, `breaker` or `url`, so **all five were invisible to the log redactor**, not just the new one. Nothing in the codebase logs any of them today; the finding (security audit #5, SEV-4) is that the protection was resting on nobody having yet typed `_log.info("…", url=…)`. `_SENSITIVE_KEY_RE` now carries `kuma[_-]?push|push[_-]?url|webhook`. `tests/core/test_logging.py::test_kuma_push_urls_redacted` pins two of the five field names — `kuma_push_measurement_breaker` and `kuma_push_sweep` — asserting end to end that the token bytes never reach stdout and that both keys render as `<redacted>`. The wider matrix (the other three field names, `push_url`, `webhook_url`, `kuma-push`, the upper-case env form, and `status` / `game_id` / `last_job_outcome` confirmed *not* over-redacted) was an audit probe against the matcher, not a committed test. **One alias is deliberately still open:** a bare `url=` key is unmatched, so the fix covers the field names in use rather than every spelling. Typing the five fields as `SecretStr` would close it and is not required.

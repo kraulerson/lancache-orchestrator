@@ -117,3 +117,46 @@ async def test_a_zero_chunk_history_row_does_not_shrink_the_budget(pool) -> None
     await validate_game(pool, Deps(pool=pool, agent_client=agent), game_id, SETTINGS)
 
     assert agent.calls[0].get("chunk_count") in (None, 0)
+
+
+async def _seed_error_history(pool, game_id: int, finished_at: str) -> None:
+    """An errored run writes a row with chunks_total = 0.
+
+    validate_one_game inserts unconditionally, so this is what the agent being
+    briefly unreachable, or the cache being unmounted, leaves behind.
+    """
+    await pool.execute_write(
+        "INSERT INTO validation_history "
+        "(game_id, manifest_version, started_at, finished_at, method, "
+        " chunks_total, chunks_cached, chunks_missing, outcome, error) "
+        "VALUES (?, '1', ?, ?, 'disk_stat', 0, 0, 0, 'error', 'agent unreachable')",
+        (game_id, finished_at, finished_at),
+    )
+
+
+async def test_an_error_row_does_not_erase_the_last_known_size(pool) -> None:
+    """UAT15-B3 (#308): one transient error must not permanently cripple a big game.
+
+    The budget lookup takes the newest history row regardless of outcome. An error
+    row carries chunks_total = 0, which collapses to None and drops ARK from a
+    9292s budget to the 300s base. At 300s it times out; the timeout raises
+    AgentError out of validate_one_game BEFORE the history insert, so no new row is
+    written and the zero row stays newest forever. The game can never be validated
+    again and never self-corrects.
+
+    The last row that actually measured something is the only one that carries size
+    information. An error measured nothing.
+    """
+    game_id = await _seed_game(pool, "346111", "ARK: Survival Evolved")
+    await _seed_history(pool, game_id, 369_317, "2026-09-11 21:21:44")
+    await _seed_error_history(pool, game_id, "2026-09-12 05:57:27")
+    agent = _RecordingAgent()
+
+    await validate_game(pool, Deps(pool=pool, agent_client=agent), game_id, SETTINGS)
+
+    assert agent.calls, "the agent was never called"
+    assert agent.calls[0].get("chunk_count") == 369_317, (
+        "an error row measured nothing and must not erase the last known size; "
+        f"got {agent.calls[0].get('chunk_count')!r}, which is the 300s base budget "
+        "and guarantees this game times out forever"
+    )
