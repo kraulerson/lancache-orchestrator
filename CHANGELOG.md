@@ -19,6 +19,19 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — the API and CLI now say when a game's cache status was measured — 2026-09-13
+
+- **`status_measured_at` is exposed on `GET /api/v1/games` and the game detail
+  endpoint**, and therefore on `orchestrator-cli game show`, which renders whatever
+  the endpoint returns. Migration 0015 has recorded this timestamp since 2026-09-08
+  and nothing surfaced it: the operator could see that a game was Cached but not
+  whether that was verified an hour ago or three weeks ago, which undercuts the
+  point of separating cache truth from job outcome. It is **not** interchangeable
+  with `last_validated_at`, which is stamped by attempts too — including errored
+  ones — and so answers "when did we last try" rather than "when did we last know".
+  A never-measured game reports `null`; the value is never backfilled from an
+  attempt. Found by the operator in UAT session 15, scenario 1 (#309).
+
 ### Fixed — one transient error no longer cripples a large game's validate budget forever — 2026-09-13
 
 - **`validate_game` took the newest `validation_history` row regardless of outcome.**
