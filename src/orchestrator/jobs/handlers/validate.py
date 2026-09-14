@@ -33,12 +33,18 @@ _INSERT_VH = (
 
 
 async def validate_one_game(
-    pool: Pool, deps: Deps, game_id: int, settings: Settings
+    pool: Pool, deps: Deps, game_id: int, settings: Settings, *, commanded: bool = False
 ) -> ValidationResult:
     """Validate one game against the on-disk cache, record a validation_history
-    row, and record the measurement. Shared by the validate job handler (F7) and
-    the scheduled sweep (F13). Handles both steam and epic platforms — platform
-    dispatch is done inside ``validate_game`` using the game's stored platform."""
+    row, and record the measurement. Shared by the validate job handler (F7), the
+    scheduled sweep (F13) and — since #310 — purge (F18). Handles both steam and
+    epic platforms — platform dispatch is done inside ``validate_game`` using the
+    game's stored platform.
+
+    ``commanded`` is for the purge caller only: this system has just deleted the
+    files, so the measurement that follows is exempt from the breaker's veto (a
+    refusal would leave a green badge over a cache it emptied itself) while still
+    being logged. See :func:`orchestrator.jobs.measurement.record_measurement`."""
     started_row = await pool.read_one("SELECT CURRENT_TIMESTAMP AS t")
     started_at = started_row["t"] if started_row is not None else None
 
@@ -77,7 +83,7 @@ async def validate_one_game(
                 (result.error[:200] if result.error else None),
             ),
         )
-        await record_measurement(pool, game_id, result.outcome, tx=tx)
+        await record_measurement(pool, game_id, result.outcome, tx=tx, commanded=commanded)
     return result
 
 

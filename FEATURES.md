@@ -1470,6 +1470,10 @@ were cache truth, and Epic's download trigger read cache truth.
     `last_measure_attempt_at` / `status_measured_at` seeding;
     `measurement_transitions` + `idx_games_measure_attempt` +
     `idx_measurement_transitions_window`.
+  - `src/orchestrator/db/migrations/0016_commanded_transitions.sql` —
+    `measurement_transitions.commanded`, and the rebuild of
+    `idx_measurement_transitions_window` to `WHERE downward = 1 AND commanded = 0`
+    so the index matches the breaker's predicate (#310).
   - `src/orchestrator/jobs/handlers/sweep.py` — `_CANDIDATE_SQL` /
     `_CANDIDATE_SQL_FULL` (`ORDER BY last_measure_attempt_at ASC NULLS FIRST, id
     ASC`, no status filter), the cancellation / exception / breaker split, and
@@ -1543,13 +1547,16 @@ test files were rewritten onto the new writers. Full suite: **1835 passing**.
   - **`measurement_transitions.game_id` has no index**, so an `ON DELETE CASCADE`
     from `games` scans the table — consistent with the `manifests` /
     `validation_history` precedent, and games are effectively never deleted.
-  - **A purge storm is invisible to the circuit breaker.** Purge calls
-    `record_measurement(..., "partial", tx=tx, commanded=True)`, which skips the
-    breaker and writes no transition row — the files are already unlinked when it
-    runs, so refusing the write would destroy the only record of a change that
-    really happened rather than preserve truth (security audit finding 1, SEV-2,
-    fixed in `c50399c`). The cost is that mass purging cannot arm the mass-loss
-    alarm. A purge remains visible in the `jobs` table, in the per-game
+  - **A purge storm cannot arm the circuit breaker, but is no longer invisible.**
+    Purge measures the disk after deleting and records that through
+    `validate_one_game(..., commanded=True)`; `commanded` exempts the write from
+    the breaker's veto, because the files are already unlinked when it runs and
+    refusing the write would destroy the only record of a change that really
+    happened rather than preserve truth (security audit finding 1, SEV-2, fixed in
+    `c50399c`). Since #310 it is **not** exempt from the transition log: the row is
+    written and marked `commanded = 1`, and the breaker's count and partial index
+    (migration 0016) read only unmarked rows. So mass purging still cannot arm the
+    mass-loss alarm, and it is also visible in the `jobs` table, in the per-game
     `measurement.commanded` log line, and in Game_shelf.
   - **The first convergence sweeps are expected to trip the breaker.** Every
     downward move they record is genuine: months of real lancache evictions

@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from orchestrator.core.settings import get_settings
+from orchestrator.jobs.handlers.validate import validate_one_game
 from orchestrator.jobs.measurement import record_measurement
 
 if TYPE_CHECKING:
@@ -55,8 +57,12 @@ async def _record_cache_emptied(pool: Pool, game_id: int, tx: Any = None) -> Non
     """
     reader = tx if tx is not None else pool
     previous = await reader.read_one(
+        # chunks_total > 0 (#308, which #310 made reachable here): the failed
+        # validation this falls back from appends its own 0-chunk error row, so
+        # "the newest row" would take the size from a run that measured nothing
+        # and report the game as 0 chunks. An error carries no size information.
         "SELECT manifest_version, chunks_total FROM validation_history "
-        "WHERE game_id = ? ORDER BY id DESC LIMIT 1",
+        "WHERE game_id = ? AND chunks_total > 0 ORDER BY id DESC LIMIT 1",
         (game_id,),
     )
     if previous is None:
@@ -137,28 +143,51 @@ async def purge_handler(job: dict[str, Any], deps: Deps) -> None:
     files_failed = int(result.get("failed", 0))
     bytes_freed = int(result.get("bytes_freed", 0))
 
-    # Reversibility invariant: purge flags the game so F5/F6 re-prefills a fresh
-    # copy. A purge is a KNOWN cache-state change backed by a history row, so it
-    # goes through the single writer as a 'partial' measurement rather than an
-    # out-of-band status write: that stamps status_measured_at, the evidence the
-    # Epic prefill uses to re-queue the purged game. The shared UPDATE also
-    # stamps last_validated_at, which is honest here and not merely tolerated:
-    # _record_cache_emptied inserts a real validation_history observation in this
-    # same transaction, so the two agree by construction.
+    # Delete, THEN measure (#310). The agent returns HTTP 200 with
+    # {"deleted": 0, "failed": N} when every unlink fails — which is what happens
+    # when it comes back as uid 1000 instead of 0:0, as it has twice in this
+    # project. This used to record 'partial' and a chunks_cached=0 observation
+    # unconditionally, so an EACCES on every file wrote validation_failed over a
+    # cache that was completely intact and queued the whole set for re-download.
+    # files_failed was read and never acted on.
+    #
+    # So cache truth comes from a real validation of the disk afterwards, not from
+    # the agent's own report of what it thinks it did. That also decides the
+    # partial case honestly: 300 of 337 deleted records the 37 that survived,
+    # where both "any failure is total failure" and "infer from the counts" get it
+    # wrong in one direction or the other.
+    #
+    # Reversibility (ADR-0015) is unchanged: a measured-empty cache is
+    # 'not_downloaded' and a measured-partial one 'validation_failed', both in the
+    # set F5/F6 select on, and the single writer stamps status_measured_at, which
+    # Epic's scheduled prefill also requires.
+    #
     # commanded=True because the files are ALREADY gone by the time this runs
-    # (security audit SEV-2). The circuit breaker vetoes observations it cannot
-    # trust; refusing this one would not preserve truth, it would discard the
-    # only record of a delete that really happened — leaving a green badge over
-    # an empty cache, ineligible for re-prefill, and unreachable by the sweep the
-    # same breaker has halted. So the breaker is skipped and no transition row is
-    # written: a deliberate purge is not evidence of unexplained mass loss.
-    # ONE transaction. These were two separate writes, so a crash or PoolError
-    # between them left the files deleted, the status flagged, and the newest
-    # validation_history row still claiming a full cache — the exact badge #293
-    # fixes, resurrected until the next sweep. Either both land or neither does.
-    async with deps.pool.write_transaction() as tx:
-        await record_measurement(deps.pool, game_id, "partial", tx=tx, commanded=True)
-        await _record_cache_emptied(deps.pool, game_id, tx)
+    # (security audit SEV-2). The breaker vetoes observations it cannot trust;
+    # refusing this one would not preserve truth, it would discard the only record
+    # of a delete that really happened — leaving a green badge over an empty
+    # cache, ineligible for re-prefill, and unreachable by the sweep the same
+    # breaker has halted. Since #310 that exemption is from the veto ONLY: the
+    # transition row is written and marked, so a bulk purge is visible in the log
+    # without arming the alarm against the next sweep.
+    #
+    # validate_one_game writes the history row and the measurement in ONE
+    # transaction, which is the atomicity #293 needs: the status and the
+    # observation behind it can never disagree.
+    settings = get_settings()
+    measured = await validate_one_game(deps.pool, deps, game_id, settings, commanded=True)
+
+    if measured.outcome == "error" and files_deleted > 0:
+        # The deletes happened; only the measurement failed. Leaving the pre-purge
+        # status would put a green badge over a cache this system just emptied —
+        # the exact defect 'commanded' was introduced to fix. Fall back to the
+        # conservative record: something is missing, and nothing is claimed about
+        # how much. With no successful delete there is nothing to correct, so the
+        # attempt-only write validate_one_game already made is left to stand.
+        async with deps.pool.write_transaction() as tx:
+            await record_measurement(deps.pool, game_id, "partial", tx=tx, commanded=True)
+            await _record_cache_emptied(deps.pool, game_id, tx)
+
     _log.info(
         "game.purged",
         job_id=job_id,
@@ -168,4 +197,6 @@ async def purge_handler(job: dict[str, Any], deps: Deps) -> None:
         files_deleted=files_deleted,
         files_failed=files_failed,
         total_bytes_freed=bytes_freed,
+        measured_outcome=measured.outcome,
+        chunks_cached_after=measured.chunks_cached,
     )
