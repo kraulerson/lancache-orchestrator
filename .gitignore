@@ -44,7 +44,7 @@ Thumbs.db
 coverage/
 .coverage
 playwright-report/
-test-results/
+/test-results/
 
 # Debug
 *.log
