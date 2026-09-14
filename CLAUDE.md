@@ -34,7 +34,7 @@ or 24 hours past the last commit touching this file.
   `docs/superpowers/`.
 - **Not yet released:** all 134 `CHANGELOG.md` entries sit under `[Unreleased]`;
   no version has been tagged.
-- **Tests:** 1835 passing (3 deselected). Run them as
+- **Tests:** 1867 passing (3 deselected). Run them as
   `PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest` — the PATH prefix is
   required, or `tests/test_licenses.py` false-fails on a missing `pip-licenses`
   binary that is installed in `.venv/bin` but not otherwise on PATH. Bare `python`
@@ -258,7 +258,7 @@ Before moving to Phase 3, verify:
   **The rollback_tested step must be completed before go_live_verified can be marked.**
 
 ### UAT Test Sessions
-- Generate UAT test sessions as interactive HTML files using the template at `templates/uat/templates/test-session-template.html` (preferred) or the Markdown template at `tests/uat/templates/test-session-template.md` (fallback for environments where HTML is impractical).
+- Generate UAT test sessions as interactive HTML files using the template at `tests/uat/templates/test-session-template.html` (preferred) or the Markdown template at `tests/uat/templates/test-session-template.md` (fallback for environments where HTML is impractical).
 - Working location: `tests/uat/sessions/<date>-session-N/` with subdirectories: `templates/`, `agent-results/`, `submissions/`.
 - Naming: `test-session-N-v1.html`. Increment version on re-test (v2, v3). Never overwrite previous versions.
 - After completion and review, archive to `docs/test-results/[date]_uat-session-N-vX.html`.

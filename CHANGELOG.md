@@ -19,6 +19,24 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Documentation — three stale facts in CLAUDE.md, and the UAT archive path that silently discarded every archive — 2026-09-14
+
+- **`.gitignore`'s `test-results/` pattern is anchored to the repository root.**
+  A bare directory pattern with a trailing slash matches at *any* depth, so it
+  also matched `docs/test-results/` — the exact directory CLAUDE.md instructs the
+  agent to archive reviewed UAT sessions and security-scan results into. Every
+  such archive since the ignore was added was therefore written to disk and never
+  tracked; only six files, added before the pattern existed, are in the
+  repository. The anchored form `/test-results/` still ignores the Playwright
+  artifact directory at the root, which is what the pattern was for. The two
+  session 15 archives that had been stranded locally are committed here.
+- **The UAT HTML template path in CLAUDE.md pointed at a directory that does not
+  exist** (`templates/uat/templates/`). The real location is
+  `tests/uat/templates/`, which is where the Markdown fallback on the same line
+  already pointed.
+- **The test count in the Current State block was stale**: 1835 → 1867 passing
+  (3 deselected), verified by a full run on 2026-09-14.
+
 ### Added — the API and CLI now say when a game's cache status was measured — 2026-09-13
 
 - **`status_measured_at` is exposed on `GET /api/v1/games` and the game detail
