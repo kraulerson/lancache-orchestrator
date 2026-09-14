@@ -90,6 +90,7 @@ class TestGamesHappyPath:
                 "blocked",
                 "chunks_cached",
                 "chunks_total",
+                "status_measured_at",
             }
 
 
@@ -643,6 +644,7 @@ class TestGamesMetadata:
                     "blocked": 0,
                     "chunks_cached": None,
                     "chunks_total": None,
+                    "status_measured_at": None,
                 }
             ]
 
@@ -684,6 +686,7 @@ class TestGamesMetadata:
                     "blocked": 0,
                     "chunks_cached": None,
                     "chunks_total": None,
+                    "status_measured_at": None,
                 },
                 {
                     "id": 2,
@@ -702,6 +705,7 @@ class TestGamesMetadata:
                     "blocked": 0,
                     "chunks_cached": None,
                     "chunks_total": None,
+                    "status_measured_at": None,
                 },
             ]
 

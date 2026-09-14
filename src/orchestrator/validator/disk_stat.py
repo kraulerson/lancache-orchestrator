@@ -354,8 +354,15 @@ async def validate_game(
     # steam game timed out, wrote NO validation_history row, and could never
     # self-correct. The previous run's chunks_total is the size we DO hold; a
     # never-validated game has none and correctly falls back to the base.
+    # chunks_total > 0 because an errored run writes a row with 0 (validate_one_game
+    # inserts unconditionally). Taking the newest row regardless of outcome let one
+    # transient error erase the size permanently: ARK dropped 9292s -> 300s, timed
+    # out at 300s, and the resulting AgentError propagates BEFORE the history insert,
+    # so no new row was ever written and the zero row stayed newest forever (#308).
+    # An error measured nothing, so it carries no size information.
     size_row = await pool.read_one(
-        "SELECT chunks_total FROM validation_history WHERE game_id=? ORDER BY id DESC LIMIT 1",
+        "SELECT chunks_total FROM validation_history "
+        "WHERE game_id=? AND chunks_total > 0 ORDER BY id DESC LIMIT 1",
         (game_id,),
     )
     last_total = size_row["chunks_total"] if size_row is not None else None

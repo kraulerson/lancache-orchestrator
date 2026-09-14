@@ -73,7 +73,8 @@ GAMES_INCLUDE_ALLOW_LIST = IncludeAllowList(keys=set())
 _GAMES_COLUMNS = (
     "id, platform, app_id, title, owned, size_bytes, "
     "current_version, cached_version, status, "
-    "last_validated_at, last_prefilled_at, last_error, metadata"
+    "last_validated_at, last_prefilled_at, last_error, metadata, "
+    "status_measured_at"
 )
 
 # UAT-4 S3-e: cap metadata bytes before json.loads to defend against
@@ -131,6 +132,11 @@ class GameResponse(BaseModel):
     last_validated_at: str | None
     last_prefilled_at: str | None
     last_error: str | None
+    # When a measurement last LOOKED AT THE DISK (migration 0015). Distinct from
+    # last_validated_at, which is stamped by attempts too — including errored ones
+    # — and so answers "when did we last try", not "when did we last know". Null
+    # means never measured; it is never backfilled from an attempt (#309).
+    status_measured_at: str | None
     metadata: dict[str, Any] | None
     blocked: bool
     # Latest validation_history counts (newest row by started_at) so the UI can
@@ -230,6 +236,7 @@ def _row_to_game_response(row: Any) -> GameResponse | None:
             cached_version=row["cached_version"],
             status=row["status"],
             last_validated_at=row["last_validated_at"],
+            status_measured_at=row["status_measured_at"],
             last_prefilled_at=row["last_prefilled_at"],
             last_error=last_error,
             metadata=metadata,
