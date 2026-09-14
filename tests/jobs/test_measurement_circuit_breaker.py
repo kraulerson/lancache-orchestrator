@@ -49,6 +49,14 @@ async def _downward_count(pool) -> int:
     return int(row["n"])
 
 
+async def _breaker_count(pool) -> int:
+    """What the breaker itself counts: observed losses only, never commanded ones."""
+    row = await pool.read_one(
+        "SELECT COUNT(*) AS n FROM measurement_transitions WHERE downward=1 AND commanded=0"
+    )
+    return int(row["n"])
+
+
 async def test_trips_on_the_25th_downward_transition(pool):
     """The 25th downward transition raises, and writes nothing at all."""
     ids = await _seed_games(pool, 30, status="up_to_date")
@@ -382,12 +390,17 @@ async def test_a_commanded_change_is_never_refused(pool):
     assert row["status_measured_at"] is not None
 
 
-async def test_a_commanded_change_writes_no_transition_row(pool):
+async def test_a_commanded_change_is_logged_but_not_counted(pool):
     """Known cache truth is not evidence of unexplained mass loss.
 
     Counting commands would let a legitimate batch of purges arm the alarm
-    against the sweep that follows them; the commanded write's own audit trail
-    lives in validation_history, written by the caller in the same transaction.
+    against the sweep that follows them.
+
+    Until #310 that immunity was bought by writing no transition row at all,
+    which left the largest deliberate cache change the system can make absent
+    from the one immutable record of cache truth. The row is written now and
+    marked ``commanded``; the breaker's window count reads only unmarked rows, so
+    the immunity is unchanged and the history is no longer a blank.
     """
     ids = await _seed_games(pool, 30, status="up_to_date")
     for gid in ids[:24]:
@@ -395,13 +408,17 @@ async def test_a_commanded_change_writes_no_transition_row(pool):
 
     await record_measurement(pool, ids[24], "missing", commanded=True)
 
-    assert await _downward_count(pool) == 24  # unchanged: the command did not count
-    rows = await pool.read_all("SELECT id FROM measurement_transitions WHERE game_id=?", (ids[24],))
-    assert rows == []
+    assert await _breaker_count(pool) == 24, "the command must not arm the alarm"
+    rows = await pool.read_all(
+        "SELECT downward, commanded FROM measurement_transitions WHERE game_id=?", (ids[24],)
+    )
+    assert len(rows) == 1, "the command is cache truth and belongs in the log (#310)"
+    assert rows[0]["downward"] == 1, "losing a cached copy is a loss however it was caused"
+    assert rows[0]["commanded"] == 1
 
 
 async def test_a_commanded_change_logs_itself(pool):
-    """The transition row is skipped, so the log line is the operator's trail."""
+    """The log line names the operator action behind the marked transition row."""
     game_id = (await _seed_games(pool, 1, status="up_to_date"))[0]
 
     with capture_logs() as logs:

@@ -170,17 +170,22 @@ async def record_measurement(
     all, so the library keeps the last state a trustworthy measurement gave it.
     ``commanded`` writes are the exception to both, and the next paragraph is why.
 
-    ``commanded`` is the exception, and it exists because a purge had already
-    unlinked the files by the time it called this (security audit SEV-2): a
-    refusal there did not preserve truth, it destroyed the only record of a
-    change that really happened, leaving a green badge over an empty cache that
-    the halted sweep could not correct. An operator purge is KNOWN cache truth,
-    not an observation whose trustworthiness is in question — the breaker exists
-    to catch an agent lying about what it read, and must not veto a write about
-    files this system itself deleted. So a commanded change skips the breaker and
-    writes no transition row: the alarm counts unexplained mass loss, and the
-    purge's own ``validation_history`` row (written by the caller in the same
-    transaction) is its audit trail.
+    ``commanded`` is the exception to the *veto*, and it exists because a purge
+    had already unlinked the files by the time it called this (security audit
+    SEV-2): a refusal there did not preserve truth, it destroyed the only record
+    of a change that really happened, leaving a green badge over an empty cache
+    that the halted sweep could not correct. An operator purge is KNOWN cache
+    truth, not an observation whose trustworthiness is in question — the breaker
+    exists to catch an agent lying about what it read, and must not veto a write
+    about files this system itself deleted.
+
+    It is NOT an exception to the transition log. It was until #310, and that
+    omitted the largest deliberate cache change the system can make from the one
+    immutable record of cache truth. The row is written, and marked
+    ``commanded = 1``; the breaker's window count reads only unmarked rows, so a
+    library-sized purge still cannot arm the alarm against the next sweep's first
+    honest measurement — which was the real reason for dropping the row, and is
+    now handled where it belongs.
 
     Args:
         pool: DB pool. Used directly unless ``tx`` is given.
@@ -189,9 +194,10 @@ async def record_measurement(
         tx: an already-open write transaction to write inside, if the caller has
             one. The write then commits (or rolls back) with the caller's.
         commanded: this system caused the change and knows it happened (a purge),
-            rather than having observed it. Skips the breaker and the transition
-            log. No effect on the ``error`` path — an infrastructure failure is
-            not a measurement whatever commanded it.
+            rather than having observed it. Exempt from the breaker's veto; still
+            logged, with ``commanded = 1`` so the breaker's count skips it. No
+            effect on the ``error`` path — an infrastructure failure is not a
+            measurement whatever commanded it.
 
     Raises:
         CircuitBreakerTripped: too many games lost cache state inside the window.
@@ -220,9 +226,13 @@ async def record_measurement(
     if downward and not commanded:
         settings = get_settings()
         window = settings.measurement_breaker_window_minutes
+        # commanded = 0 (#310): a deliberate purge is not evidence of the failure
+        # this alarm counts, and a bulk purge that armed it would refuse the next
+        # sweep's first honest measurement. Matches the partial index built by
+        # migration 0016, so the predicate stays index-backed.
         recent = await read(
             "SELECT COUNT(*) AS n FROM measurement_transitions "
-            "WHERE downward = 1 "
+            "WHERE downward = 1 AND commanded = 0 "
             "  AND occurred_at >= datetime('now', ?)",
             (f"-{window} minutes",),
         )
@@ -263,19 +273,20 @@ async def record_measurement(
         "WHERE id=?",
         (new_status, game_id),
     )
-    if commanded:
-        # No transition row: the log counts unexplained loss, and a batch of
-        # deliberate purges arming the alarm against the next sweep would be a
-        # false positive. This line is the operator trail in its place.
-        _log.info("measurement.commanded", game_id=game_id, prior=prior, new_status=new_status)
-        return
     # Durable, because the breaker must survive a restart — a restart is exactly
     # the scenario that produced the 2026-09-01 corruption.
+    #
+    # Commanded changes are logged too (#310), marked so the breaker's count
+    # excludes them. The row is the audit trail for a deliberate cache change;
+    # the mark is what keeps it from reading as unexplained mass loss.
     await write(
-        "INSERT INTO measurement_transitions (game_id, prior, new_status, downward) "
-        "VALUES (?, ?, ?, ?)",
-        (game_id, prior or "unknown", new_status, 1 if downward else 0),
+        "INSERT INTO measurement_transitions "
+        "(game_id, prior, new_status, downward, commanded) VALUES (?, ?, ?, ?, ?)",
+        (game_id, prior or "unknown", new_status, 1 if downward else 0, 1 if commanded else 0),
     )
+    if commanded:
+        _log.info("measurement.commanded", game_id=game_id, prior=prior, new_status=new_status)
+        return
     _log.info(
         "measurement.recorded",
         game_id=game_id,

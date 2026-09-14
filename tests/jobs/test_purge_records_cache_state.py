@@ -31,10 +31,16 @@ pytestmark = pytest.mark.asyncio
 
 
 class _StubPurgeAgent:
-    def __init__(self, *, steam=None, epic=None, raise_exc=None):
+    """Since #310 the purge measures the disk afterwards, so the stub answers the
+    validate call too. ``validate`` defaults to a fully-emptied cache, which is
+    what these #293 tests are about; the cases where the measurement disagrees
+    with the delete report live in tests/jobs/test_purge_measures_the_disk.py."""
+
+    def __init__(self, *, steam=None, epic=None, raise_exc=None, validate=None):
         self._steam = steam
         self._epic = epic
         self._raise = raise_exc
+        self._validate = validate
 
     async def steam_purge(self, app_id: int):
         if self._raise is not None:
@@ -45,6 +51,23 @@ class _StubPurgeAgent:
         if self._raise is not None:
             raise self._raise
         return self._epic
+
+    def _measured(self, game_total: int):
+        if self._validate is not None:
+            return self._validate
+        return {
+            "chunks_total": game_total,
+            "chunks_cached": 0,
+            "chunks_missing": game_total,
+            "outcome": "missing",
+            "versions": "v1",
+        }
+
+    async def steam_validate(self, app_id: int, chunk_count=None):
+        return self._measured(chunk_count or 0)
+
+    async def epic_validate(self, **kwargs):
+        return self._measured(self._epic.get("deleted", 0) if self._epic else 0)
 
 
 def _job(game_id: int, platform: str = "steam") -> dict:
@@ -148,61 +171,79 @@ async def test_a_failed_purge_records_nothing(pool):
     )
 
 
-async def test_purge_with_no_prior_validation_records_nothing(pool):
-    """Nothing is known about chunk counts, so inventing a total would be a lie."""
+async def test_purge_with_no_prior_validation_measures_instead_of_inventing(pool):
+    """Inventing a total would be a lie — but #310 no longer has to guess one.
+
+    Before #310 the handler carried chunks_total forward from the previous
+    validation, so a game that had never been validated had no size to carry and
+    the only honest move was to write nothing. The purge now runs a real
+    validation, which enumerates the manifest itself, so the observation is
+    measured rather than fabricated and the row is legitimate.
+    """
     game_id = await _seed_game(pool, app_id="440")
 
-    agent = _StubPurgeAgent(steam={"deleted": 0, "failed": 0, "bytes_freed": 0})
+    agent = _StubPurgeAgent(
+        steam={"deleted": 0, "failed": 0, "bytes_freed": 0},
+        validate={
+            "chunks_total": 12,
+            "chunks_cached": 0,
+            "chunks_missing": 12,
+            "outcome": "missing",
+            "versions": "v1",
+        },
+    )
     await purge_handler(_job(game_id), Deps(pool=pool, agent_client=agent))
 
-    rows = await pool.read_all("SELECT id FROM validation_history WHERE game_id = ?", (game_id,))
-    assert rows == [], "with no manifest size known, purge must not fabricate an observation"
+    latest = await _latest_validation(pool, game_id)
+    assert latest["chunks_total"] == 12, "the size came from the measurement, not from thin air"
+    assert latest["chunks_cached"] == 0
 
     g = await pool.read_one("SELECT status FROM games WHERE id=?", (game_id,))
-    assert g["status"] == "validation_failed", "the re-prefill flag is set regardless"
+    assert g["status"] == "not_downloaded", "still in the set F5/F6 re-prefill from"
 
 
 async def test_the_status_and_the_observation_land_together(pool):
-    """Flagging for re-prefill and recording the empty cache are one atomic write.
+    """Flagging for re-prefill and recording the cache state are one atomic write.
 
     They were two separate execute_write calls. A crash or PoolError between them
-    left the files deleted, status='validation_failed', and the newest
-    validation_history row still reading 337/337 cached — exactly the badge #293
-    exists to fix, resurrected for up to 6h until the sweep revalidates.
+    left the files deleted, the status flipped, and the newest validation_history
+    row still reading 337/337 cached — exactly the badge #293 exists to fix,
+    resurrected for up to 6h until the sweep revalidates.
 
-    Asserted by failing the second write and requiring the first to roll back with
-    it: under one transaction neither lands, so the job fails visibly with the store
-    self-consistent, rather than half-applied.
+    Since #310 that pairing lives in ``validate_one_game``, which purge now shares
+    with the validate job and the sweep, so this asserts it there: fail the
+    measurement and the observation written beside it must roll back with it.
     """
     game_id = await _seed_game(pool, app_id="440")
     await _seed_validation(pool, game_id, total=337, cached=337)
 
     agent = _StubPurgeAgent(steam={"deleted": 337, "failed": 0, "bytes_freed": 999})
 
-    import orchestrator.jobs.handlers.purge as purge_mod
+    import orchestrator.jobs.handlers.validate as validate_mod
 
-    original = purge_mod._record_cache_emptied
+    original = validate_mod.record_measurement
 
-    async def boom(pool_arg, gid, tx=None):
+    async def boom(*a, **kw):
         raise RuntimeError("write failed between the two statements")
 
-    purge_mod._record_cache_emptied = boom
+    validate_mod.record_measurement = boom
     try:
         with pytest.raises(RuntimeError):
             await purge_handler(_job(game_id), Deps(pool=pool, agent_client=agent))
     finally:
-        purge_mod._record_cache_emptied = original
+        validate_mod.record_measurement = original
 
     g = await pool.read_one("SELECT status, status_measured_at FROM games WHERE id=?", (game_id,))
     assert g["status"] == "up_to_date", (
         "the status flip must roll back with the failed observation — otherwise the "
-        "game reads validation_failed while the newest row still claims 337/337"
+        "game reads not_downloaded while the newest row still claims 337/337"
     )
-    # The flip now runs through record_measurement inside the same transaction,
-    # so its timestamp and its transition row roll back with it.
-    assert g["status_measured_at"] is None
-    rows = await pool.read_all("SELECT id FROM measurement_transitions WHERE game_id=?", (game_id,))
-    assert rows == []
+    rows = await pool.read_all(
+        "SELECT chunks_cached FROM validation_history WHERE game_id = ? ORDER BY id", (game_id,)
+    )
+    assert [r["chunks_cached"] for r in rows] == [337], (
+        "the new observation must have rolled back too, leaving only the pre-purge row"
+    )
 
 
 async def _prime_breaker(pool, n: int = 24) -> None:
@@ -240,15 +281,22 @@ async def test_a_purge_is_never_refused_by_the_circuit_breaker(pool):
     await purge_handler(_job(game_id), Deps(pool=pool, agent_client=agent))
 
     g = await pool.read_one("SELECT status, status_measured_at FROM games WHERE id=?", (game_id,))
-    assert g["status"] == "validation_failed", (
+    assert g["status"] == "not_downloaded", (
         "the purge deleted the files; refusing to record that leaves a green badge "
-        "over an empty cache that no later sweep can correct"
+        "over an empty cache that no later sweep can correct. (The status is the "
+        "measured one since #310 — 'missing' on an emptied cache — where this used "
+        "to be a hard-coded 'partial'.)"
     )
     assert g["status_measured_at"] is not None
     latest = await _latest_validation(pool, game_id)
     assert latest["chunks_cached"] == 0
     assert latest["outcome"] == "missing"
-    # A command is not an observation: it neither feeds the mass-loss alarm nor
-    # is vetoed by it. The validation_history row above is the purge's audit trail.
-    rows = await pool.read_all("SELECT id FROM measurement_transitions WHERE game_id=?", (game_id,))
-    assert rows == []
+    # A command is not an observation: it is not vetoed by the mass-loss alarm and
+    # does not feed it. Since #310 it IS logged — a bulk purge leaving no trace in
+    # the record of cache truth was the wrong way to buy that immunity — and the
+    # mark is what keeps it out of the breaker's count.
+    rows = await pool.read_all(
+        "SELECT downward, commanded FROM measurement_transitions WHERE game_id=?", (game_id,)
+    )
+    assert len(rows) == 1
+    assert rows[0]["commanded"] == 1

@@ -19,6 +19,58 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — a purge that deleted nothing no longer reports an intact cache as gone — 2026-09-14
+
+- **`purge_handler` measures the disk after the deletes instead of assuming what
+  they did (#310, SEV-2).** It read `files_failed` and never acted on it: whatever
+  the agent reported, it recorded a hard-coded `partial` measurement and a
+  `chunks_cached = 0` observation. The agent returns HTTP 200 with
+  `{"deleted": 0, "failed": N}` when every unlink fails, which is exactly what
+  happens when it comes back as uid 1000 instead of `0:0` — a fault this project
+  has hit twice. Every unlink then returns EACCES, **the cache on disk is
+  completely intact**, and the orchestrator wrote `validation_failed` over it and
+  queued the whole set for re-download. Because the write was `commanded`, the
+  circuit breaker — built for exactly "the agent is lying about what it read" —
+  was skipped by construction, so a bulk purge of an intact library produced
+  **zero breaker signal**.
+- **Cache truth now comes from a real post-purge validation**, sharing
+  `validate_one_game()` with the validate job and the sweep. That also settles the
+  partial case honestly: 300 of 337 deleted records the 37 chunks that survived,
+  where "any failure is total failure" would have claimed an empty cache and
+  "infer it from the delete counts" would still have been trusting the agent's
+  report of its own work rather than the disk.
+- **Reversibility (ADR-0015) is unchanged.** A measured-empty cache is
+  `not_downloaded` and a measured-partial one `validation_failed`; both are in the
+  set F5/F6 re-prefill from, and the single writer still stamps
+  `status_measured_at`, which Epic's scheduled prefill also requires. The one
+  visible difference is that a clean purge now usually reads `not_downloaded`
+  where it used to read `validation_failed`.
+- **If the post-purge validation itself fails after files were really deleted**,
+  the handler falls back to the conservative `partial` plus the emptied-cache
+  observation. Leaving the pre-purge status would put a green badge over a cache
+  the system had just emptied — the mirror defect `commanded` was introduced to
+  fix. With no successful delete there is nothing to correct, so the attempt-only
+  write stands and the status is left alone.
+- **`_record_cache_emptied` ignores error rows when carrying the manifest size
+  forward** (`AND chunks_total > 0`). This is #308 one file over: the failed
+  validation that fallback path follows appends its own 0-chunk error row, so
+  taking the size from "the newest row" would have reported the game as 0 chunks.
+  An error measured nothing, so it carries no size information.
+
+### Data Model — migration 0016 marks a commanded transition — 2026-09-14
+
+- **`measurement_transitions.commanded`** (`INTEGER NOT NULL DEFAULT 0 CHECK (commanded IN (0, 1))`).
+  A commanded measurement is exempt from the circuit breaker's veto but is no
+  longer exempt from the log. It used to be both, which left the largest
+  deliberate cache change the system can make with no entry at all in the one
+  immutable record of cache truth.
+- **The breaker's window count and its partial index both exclude commanded
+  rows.** Writing the rows without marking them would leave a library-sized purge
+  sitting in the breaker's window, refusing the next sweep's first honest
+  measurement — a false alarm the operator caused themselves, which is how a
+  breaker stops being trusted. Every row written before this migration was an
+  observation, which is what the `DEFAULT 0` gives them.
+
 ### Documentation — three stale facts in CLAUDE.md, and the UAT archive path that silently discarded every archive — 2026-09-14
 
 - **`.gitignore`'s `test-results/` pattern is anchored to the repository root.**
