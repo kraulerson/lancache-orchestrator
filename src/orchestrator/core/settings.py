@@ -229,11 +229,18 @@ class Settings(BaseSettings):
     scheduler_library_sync_interval_sec: int = Field(default=21600, ge=60, le=86400)
     # F13 — scheduled validation sweep.
     validation_sweep_enabled: bool = True
-    # Every 6h at 03/09/15/21 UTC — offset from the prefill schedules so a
-    # sweep never overlaps a prefill burst: host steam cron 0/6/12/18 UTC, gog
-    # 4/16, and the orchestrator's own Epic prefill at :45 past these same
-    # hours (it starts once this ~39-min sweep has drained). 5-field cron
-    # (min hour dom mon dow), UTC.
+    # Every 6h at 03/09/15/21 UTC — originally offset from the prefill schedules
+    # so a sweep never overlapped a prefill burst: host steam cron 0/6/12/18 UTC,
+    # gog 4/16, and the orchestrator's own Epic prefill at :45 past these same
+    # hours. 5-field cron (min hour dom mon dow), UTC.
+    #
+    # That non-overlap guarantee NO LONGER HOLDS and this schedule cannot restore
+    # it. A sweep once drained in ~39 min; it now runs until the 6h job cap, and
+    # a full pass takes ~12.5h across several runs (#311). The :45 Epic prefill
+    # therefore starts squarely inside a running sweep, and validating an Epic
+    # game while its prefill is still writing reports a false partial. Tracked as
+    # the unbuilt sweep-defer feature — the fix is for the two jobs to coordinate,
+    # not for the cron to be nudged again.
     validation_sweep_cron: str = "0 3,9,15,21 * * *"
     # F8: the scheduled prefill driver (Epic-only — Steam is prefilled by the
     # host SteamPrefill cron). Wall-clock cron, NOT an interval: an interval
@@ -243,10 +250,9 @@ class Settings(BaseSettings):
     #
     # 45 min past 03/09/15/21 UTC = a fixed +3h45m after the host Steam cron
     # (00/06/12/18 UTC — the NAS runs MDT at 00/06/12/18 local, and the 6h
-    # offset and 6h cadence coincide). The :45 clears the validation sweep,
-    # which starts on the hour at those same hours and runs ~39 min: the sweep
-    # is platform-agnostic, so validating an Epic game while its prefill is
-    # still writing reports it as a false partial.
+    # offset and 6h cadence coincide). The :45 was chosen to clear the validation
+    # sweep on the same hours, back when a sweep drained in ~39 min. It no longer
+    # clears it — see validation_sweep_cron above.
     scheduled_prefill_enabled: bool = True
     scheduled_prefill_cron: str = "45 3,9,15,21 * * *"
 
@@ -292,6 +298,12 @@ class Settings(BaseSettings):
     # throughput each validate budget assumes -- budgets measured sequentially
     # are then wrong by the batch factor under a sweep (PR #303 review).
     sweep_batch_size: int = Field(default=2, ge=1)
+    # #311: how long before `job_max_runtime_sec` a sweep stops starting new
+    # games and returns a partial pass. The check happens BETWEEN games, so the
+    # margin has to cover the longest single validate or the job is hard-
+    # cancelled anyway: ARK ModKit (244 GB, 359,671 chunks) is ~22 min at the
+    # ~650 GiB/h the NAS sustains, hence 30. Raise it if a larger title lands.
+    sweep_deadline_margin_sec: float = Field(default=1800.0, ge=0.0)
     # The disk throughput validate budgets assume. A SETTING, not a constant:
     # it is a property of the hardware, and the 2026-09-01 incident was a
     # storage change silently invalidating a number nobody could see.
@@ -555,6 +567,31 @@ class Settings(BaseSettings):
         to re-read config from source via get_settings().
         """
         raise TypeError("Settings is not pickle-safe — re-read via get_settings()")
+
+    @model_validator(mode="after")
+    def _reject_sweep_margin_that_swallows_the_budget(self) -> Settings:
+        """A sweep deadline margin at or above the job budget makes every sweep
+        a no-op (#311).
+
+        The handler stops starting games at `job_max_runtime_sec - margin`. If
+        that instant has already passed when the sweep starts, it attempts
+        nothing, completes no pass, and still reports a healthy partial to
+        Uptime Kuma — a monitor that stays green while nothing is measured,
+        which is worse than the DOWN this work replaced. Fail at boot instead.
+
+        `job_max_runtime_sec = 0` disables the budget, so there is no deadline
+        and nothing to validate against.
+        """
+        if (
+            self.job_max_runtime_sec > 0
+            and self.sweep_deadline_margin_sec >= self.job_max_runtime_sec
+        ):
+            raise ValueError(
+                f"sweep_deadline_margin_sec ({self.sweep_deadline_margin_sec}) must be less "
+                f"than job_max_runtime_sec ({self.job_max_runtime_sec}); at or above it every "
+                "sweep stops before starting a single game"
+            )
+        return self
 
     @model_validator(mode="after")
     def _emit_config_warnings(self) -> Settings:
