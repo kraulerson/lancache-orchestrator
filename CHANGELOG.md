@@ -19,6 +19,73 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Data Model — a sweep pass is now a thing the database can express — 2026-09-14
+
+- **Migration 0017 adds the one-row `sweep_pass` marker** (`pass_number`,
+  `pass_started_at`), enforced single by `CHECK (id = 1)` — there is exactly one
+  pass in flight, and a schema that cannot express a second one cannot drift into
+  expressing one by accident. Additive `CREATE TABLE` plus one seeded row: no
+  existing table is touched and nothing is backfilled.
+- `pass_started_at` is seeded to `CURRENT_TIMESTAMP` at migration time, which
+  makes **every** existing game a candidate for pass 1. Deliberate: the live DB
+  has 3212 owned games and no NULL `last_measure_attempt_at`, so any earlier
+  stamp would let pass 1 "complete" within minutes without measuring a thing.
+
+### Fixed — the sweep monitor can go green again, because a pass can now finish — 2026-09-14
+
+- **No sweep could ever complete (#311, SEV-2).** A full pass costs ~12.5 h —
+  8.1 TiB of manifest-backed cache at the ~650 GiB/h the NAS sustains — against a
+  6 h `job_max_runtime_sec`. `sweep_handler` re-queried all 3212 candidates on
+  every run with no concept of a pass, so `sweep.completed` could only fire if one
+  6 h run covered the whole library. It never did: **15 of 16 sweeps since
+  migration 0015 were recorded `failed`**, the Uptime Kuma sweep monitor could
+  never go green, and nothing anywhere proved the library had been covered end to
+  end. (Twelve of those 15 were a second, unrelated cause — container recreates
+  reaping the running job. That one is an operational fix, not a code fix.)
+- **Candidates are gated on the pass, not on recency.** The sweep now selects
+  `last_measure_attempt_at IS NULL OR <= pass_started_at`, so an empty candidate
+  set is a *proof of coverage* rather than a coincidence. Draining the list emits
+  **`sweep.pass_completed`**, advances the marker, and pushes a clean pass to Kuma.
+  Resumability is unchanged — the ordering already guaranteed it, and no game can
+  starve.
+- **A cut-off sweep is now a success, not a failure.** `sweep_handler` watches its
+  own clock and stops starting new games `sweep_deadline_margin_sec` before the
+  worker's budget would cancel it, returning
+  `pass 3 partial: 1089/3212 games, 3.5 TiB of 8.1 TiB`. Progress is reported in
+  **bytes as well as games** because games/hour misled this project twice: 2455 of
+  3212 owned games have no manifest and cost nothing, while 3.6 TiB sits in 39
+  titles. The job succeeds and the monitor stays green, which is the honest answer
+  to the question Kuma actually asks — "is the schedule still running?"
+- **`failed` on a sweep means genuinely broken again.** The only remaining ways a
+  sweep reports DOWN are a tripped circuit breaker (still aborts, still re-raises,
+  and now additionally does **not** advance the pass) and an unhandled exception.
+- **Side effect: #314 is closed.** Stopping between games rather than being
+  cancelled mid-validate means attempt-writes can no longer land after the job row
+  is already terminal.
+- A `full` sweep (the Game_shelf "validate everything" button) is deliberately
+  **not** pass-gated and does not advance the marker — a manual run cannot stand in
+  as proof of pass coverage.
+
+### Added — 2026-09-14
+
+- **`ORCH_SWEEP_DEADLINE_MARGIN_SEC`** (default `1800`): how long before
+  `job_max_runtime_sec` a sweep stops starting new games. The check happens
+  *between* games, so the margin must cover the longest single validate or the job
+  is hard-cancelled anyway — ARK ModKit (244 GB, 359,671 chunks) is ~22 min at
+  current throughput, hence 30. A margin at or above `job_max_runtime_sec` is
+  **rejected at boot**: it would make every sweep a no-op that still reported
+  healthy, which is worse than the DOWN it replaced (security audit finding 1,
+  SEV-3, fixed in this change).
+
+### Documentation — 2026-09-14
+
+- Corrected the "~39 min sweep" claim in `settings.py`, which documented a
+  sweep/prefill non-overlap guarantee the schedule has not provided since a pass
+  became 12.5 h. The `:45` Epic prefill now lands squarely inside a running sweep;
+  the comment says so, and points at the unbuilt sweep-defer feature rather than
+  implying the cron should be nudged again.
+
+
 ### Fixed — a purge that deleted nothing no longer reports an intact cache as gone — 2026-09-14
 
 - **`purge_handler` measures the disk after the deletes instead of assuming what

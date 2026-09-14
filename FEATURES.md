@@ -1575,3 +1575,84 @@ test files were rewritten onto the new writers. Full suite: **1835 passing**.
     2026-09-04) until the recovery sweep — expected to take days — has re-measured
     the library, and must not be re-enabled before one sweep has completed
     without tripping the breaker.
+
+---
+
+## Feature 26: Sweep Pass Marker (#311)
+
+**Phase Built:** 2 (Construction)
+**Status:** Complete — pending live UAT (2026-09-14)
+
+**Summary:** Gives the validation sweep a **pass boundary that outlives a single
+run**, and replaces the hard runtime cancellation with a cooperative deadline. A
+full pass costs ~12.5 h (8.1 TiB at the ~650 GiB/h the NAS sustains) against a 6 h
+`job_max_runtime_sec`, and `sweep_handler` re-queried all 3212 candidates every
+run with no concept of a pass — so `sweep.completed` could only fire if one 6 h run
+covered the whole library. It never fired: 15 of 16 sweeps since migration 0015
+were recorded `failed` and the Uptime Kuma sweep monitor could never go green.
+Candidates are now gated on `pass_started_at`, so an empty candidate set is a
+*proof of coverage*; and a sweep that runs out of time stops between games and
+reports honest partial progress instead of being cancelled mid-validate.
+
+**Key Interfaces:**
+  - `src/orchestrator/db/migrations/0017_sweep_pass.sql` — one-row `sweep_pass`
+    marker (`pass_number`, `pass_started_at`), single-row by `CHECK (id = 1)`,
+    seeded at `CURRENT_TIMESTAMP` so every existing game is a pass-1 candidate
+  - `src/orchestrator/jobs/sweep_pass.py` — `SweepPass`, `read_pass()`,
+    `complete_pass()` (guarded on the pass number the caller read)
+  - `src/orchestrator/jobs/handlers/sweep.py` — pass-gated `_CANDIDATE_SQL`, the
+    deadline check, `sweep.pass_completed` / `sweep.pass_progressed`, and a
+    `JobSummary` describing the **pass**, not the run
+  - `src/orchestrator/core/settings.py` — `sweep_deadline_margin_sec` and the
+    boot guard that rejects a margin at or above `job_max_runtime_sec`
+
+**Locked decisions:**
+  - **Cooperative deadline, not a special-cased timeout.** The handler stops
+    starting games `sweep_deadline_margin_sec` before the worker would cancel it
+    and returns a partial summary, so the job SUCCEEDS. The alternative — teaching
+    `worker.py` that a timed-out `sweep` is expected — was rejected: it puts a
+    handler-specific rule in the generic worker, leaves the job recorded `failed`,
+    and would have had to reconstruct the progress message from the DB after the
+    handler was already gone.
+  - **A pass means "every owned game was ATTEMPTED", not "measured cleanly."** An
+    `error` outcome still stamps `last_measure_attempt_at` and so leaves the
+    candidate set; the alternative is one unmeasurable game blocking every future
+    pass forever.
+  - **`<=` not `<` on the pass gate.** `CURRENT_TIMESTAMP` has one-second
+    resolution, so `<` would excuse a game stamped in the same second the pass
+    began from the entire pass. `<=` re-measures a handful of boundary games
+    instead — wrong in the safe direction.
+  - **`full` mode is not pass-gated and does not advance the pass.** The
+    Game_shelf "validate everything" button is a manual override; a run that
+    ignores the pass cannot stand in as proof of pass coverage. Same reasoning as
+    `monitor_url_for()` refusing to heartbeat a non-scheduler run.
+  - **Progress is reported in bytes as well as games.** Games/hour misled this
+    project twice — 2455 of 3212 owned games have no manifest and cost nothing,
+    while 3.6 TiB of the 8.1 TiB total sits in 39 titles.
+
+**Test Coverage:** 19 new tests — migration 0017 (table, single-row CHECK, seeded
+pass 1, seeded stamp precedes every existing attempt stamp), the marker
+(`read_pass`, advance, stale-view idempotency), candidate gating (attempted this
+pass / never attempted / full-mode bypass), pass completion (drained list, nothing
+left, an errored game still completes), the deadline (stops the run, leaves the
+marker alone, succeeds; partial message names bytes and games; no budget =
+no deadline), and the breaker (still raises, still does not advance the pass).
+Full suite: 1903 passed, 3 deselected. ruff/mypy/semgrep/gitleaks clean.
+
+**Related:** issue #311; closes #314 as a side effect (nothing is hard-cancelled,
+so orphaned attempt-writes can no longer land after the job row is terminal).
+Security audit: `docs/security-audits/sweep-pass-marker-security-audit.md`.
+
+**Known Limitations:**
+  - **A pass still takes ~12.5 h.** This makes a multi-run pass legible and the
+    monitor meaningful; it does not make validation faster. The throughput lever
+    is the NVMe bcache re-attach — the NAS is disk-bound (load 2.02 on 4 cores,
+    agent at 10.7% CPU), and raising `sweep_batch_size` 2→4 bought nothing.
+  - **The Kuma sweep monitor's interval must exceed the sweep cadence, not the
+    pass length.** A partial heartbeat now arrives every scheduled run
+    (03/09/15/21 UTC), so the monitor answers "is the schedule running?" — it does
+    NOT alarm on a pass that stops advancing. Coverage staleness needs its own
+    check.
+  - **Container recreates still reap a running sweep** (12 of the 15 failures).
+    That is operational, not code: recreate in the gap after a sweep ends.
+  - **Not yet exercised in production** — verified by tests only until deploy.
