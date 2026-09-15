@@ -107,3 +107,56 @@ async def test_a_long_message_is_truncated() -> None:
     sent = rec.requests[0].url.params["msg"]
     assert len(sent) <= heartbeat.MSG_MAX_CHARS
     assert len(sent) >= 100, "truncation must still leave something diagnostic"
+
+
+# ---------------------------------------------------------------------------
+# #313 — push reports whether it actually delivered
+# ---------------------------------------------------------------------------
+
+
+async def test_push_reports_a_successful_delivery() -> None:
+    """The breaker's dedupe stamp is only safe to burn on a delivery that
+    happened. Swallowing failures silently is what made one unreachable moment
+    silence a whole incident."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="OK")
+
+    delivered = await heartbeat.push(
+        "http://kuma.test/api/push/abc", status="up", transport=httpx.MockTransport(handler)
+    )
+    assert delivered is True
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError("refused"), httpx.ReadTimeout("slow"), RuntimeError("boom")],
+)
+async def test_push_reports_a_network_failure_as_undelivered(failure: Exception) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise failure
+
+    delivered = await heartbeat.push(
+        "http://kuma.test/api/push/abc", status="down", transport=httpx.MockTransport(handler)
+    )
+    assert delivered is False, "a push that raised did not reach the monitor"
+
+
+async def test_push_reports_an_error_response_as_undelivered() -> None:
+    """A mistyped push token returns 404. The request completed, but nobody was
+    told — which for this caller is the same thing as a network failure."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="not found")
+
+    delivered = await heartbeat.push(
+        "http://kuma.test/api/push/wrong", status="down", transport=httpx.MockTransport(handler)
+    )
+    assert delivered is False
+
+
+async def test_push_with_no_url_reports_nothing_to_retry() -> None:
+    """No URL is a deliberate disable, not a delivery failure. Reporting False
+    would make the breaker retry a push it is never going to send."""
+    assert await heartbeat.push(None, status="up") is True
+    assert await heartbeat.push("   ", status="up") is True
