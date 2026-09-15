@@ -1656,3 +1656,55 @@ Security audit: `docs/security-audits/sweep-pass-marker-security-audit.md`.
   - **Container recreates still reap a running sweep** (12 of the 15 failures).
     That is operational, not code: recreate in the gap after a sweep ends.
   - **Not yet exercised in production** — verified by tests only until deploy.
+
+---
+
+## Feature 27: Heartbeat Delivery Gates the Breaker Dedupe Stamp (#313)
+
+**Phase Built:** 2 (Construction)
+**Status:** Complete — pending live UAT (2026-09-15)
+
+**Summary:** The cache-loss circuit breaker announces a trip by pushing DOWN to
+Uptime Kuma once per window. The dedupe clock was stamped **before** the push was
+attempted, against a `heartbeat.push` that swallowed every failure internally — so
+a push that never arrived silenced a library-wide incident for the full 60-minute
+window. `push()` now reports delivery and the clock is stamped afterwards: the
+whole window if the operator was told, a 60-second retry backoff if not.
+
+**Key Interfaces:**
+  - `src/orchestrator/clients/heartbeat.py` — `push(...) -> bool` (still never
+    raises); an HTTP status >= 400 counts as undelivered
+  - `src/orchestrator/jobs/measurement.py` — `_breaker_notice_due()` (checks, no
+    longer stamps), `_stamp_breaker_notice(delivered=, window_minutes=)`,
+    `_BREAKER_RETRY_SEC`, `_notify_breaker(...) -> bool`, and the
+    `measurement.breaker_notice_undelivered` warning
+
+**Locked decisions:**
+  - **A failed push backs off; it does not retry per game.** Stamping only on
+    success would have reopened the defect the stamp was introduced for: a
+    refused write records no transition row, so the count stays frozen and every
+    later downward measurement recomputes the same trip — ~1000 Kuma GETs and
+    ~20 min of pure 10-second timeouts inside one incident-scale sweep.
+  - **No URL configured counts as delivered.** That is an operator's deliberate
+    disable, not a lost notification; retrying it every 60 s is pure waste.
+  - **An HTTP error response is undelivered.** A mistyped push token answers 404
+    — the request completed and nobody was told. Previously indistinguishable
+    from success, which silently disabled breaker alerting forever.
+
+**Test Coverage:** 9 new tests — `push` delivery reporting (200, three network
+failure shapes, 404, and the no-URL case), plus the breaker dedupe behaviours: an
+undelivered push is retried rather than silencing the incident, a delivered push
+still suppresses for the whole window, and a permanently dead monitor is attempted
+once rather than once per game. Full suite: 1912 passed, 3 deselected.
+semgrep/gitleaks/ruff/mypy clean.
+
+**Related:** issue #313 (UAT15-B6). Security audit:
+`docs/security-audits/313-heartbeat-delivery-gates-dedupe-stamp-security-audit.md`.
+
+**Known Limitations:**
+  - **Not exercised in production** — the breaker has not tripped since deploy,
+    so both the trip path and this fix remain verified by tests only. Related:
+    #317 tracks the same gap for `record_job_outcome()`.
+  - The refused-write log line still reports the same frozen `in_window` count on
+    every refusal, so it cannot convey how large an incident actually is. Known
+    and called out in #313; not addressed here.

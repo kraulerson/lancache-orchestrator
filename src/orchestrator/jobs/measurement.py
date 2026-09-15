@@ -37,7 +37,15 @@ _log = structlog.get_logger(__name__)
 _ERROR_TRUNCATE = 200
 
 # When the open breaker was last announced (monotonic seconds), or None.
-_last_breaker_notice_at: float | None = None
+# Monotonic deadline before which no further breaker notice is attempted.
+_next_breaker_notice_at: float | None = None
+
+# How long to wait before re-attempting a breaker notice that did NOT arrive
+# (#313). Deliberately far shorter than the dedupe window: a lost notification
+# about library-wide cache loss is worth retrying soon, but retrying it once per
+# refused write is the original defect the dedupe stamp was introduced to fix —
+# an incident-scale sweep would emit ~1000 GETs and ~20 minutes of pure timeout.
+_BREAKER_RETRY_SEC = 60.0
 
 # outcome -> games.status. 'error' is absent by design: an infrastructure failure
 # is not a measurement and must never overwrite cache truth. 'missing' and
@@ -101,47 +109,62 @@ def _is_downward(prior: str | None, new: str) -> bool:
     return n < p
 
 
-def _breaker_notice_due(window_minutes: int) -> bool:
-    """True at most once per window; stamps the clock when it says yes.
+def _breaker_notice_due() -> bool:
+    """Whether a breaker notice may be attempted now. Does NOT stamp the clock.
 
     A refused write records no transition row, so the count stays frozen at the
     threshold and EVERY later downward measurement recomputes the same trip. The
     only production caller keeps going after the exception (the sweep catches it
-    per game), so without this an incident-scale sweep would emit one ERROR line
-    and one 10-second-timeout Kuma GET per remaining game — on the order of a
-    thousand, and ~20 minutes of pure timeout if Kuma is unreachable.
+    per game), so without suppression an incident-scale sweep would emit one
+    ERROR line and one 10-second-timeout Kuma GET per remaining game — on the
+    order of a thousand, and ~20 minutes of pure timeout if Kuma is unreachable.
+
+    Checking and stamping are separate (#313) because the stamp used to be set
+    before the push was attempted, against a helper that swallowed its own
+    failures. One unreachable moment then silenced the whole incident for the
+    full window — and an unreachable NAS is precisely correlated with the mass
+    eviction that trips the breaker, so the two faults are not independent.
+    """
+    return _next_breaker_notice_at is None or time.monotonic() >= _next_breaker_notice_at
+
+
+def _stamp_breaker_notice(*, delivered: bool, window_minutes: int) -> None:
+    """Silence further notices — for the whole window if the operator was told,
+    for a short backoff if the push did not arrive and is worth retrying.
 
     Time-boxed rather than latched: a breaker still open an hour later is still
     news, and Kuma needs a fresh DOWN to stay red.
     """
-    global _last_breaker_notice_at
-    now = time.monotonic()
-    if _last_breaker_notice_at is not None and now - _last_breaker_notice_at < window_minutes * 60:
-        return False
-    _last_breaker_notice_at = now
-    return True
+    global _next_breaker_notice_at
+    delay = window_minutes * 60 if delivered else _BREAKER_RETRY_SEC
+    _next_breaker_notice_at = time.monotonic() + delay
 
 
 def reset_breaker_notice() -> None:
     """Forget that a trip was announced, so the next one notifies. Tests only."""
-    global _last_breaker_notice_at
-    _last_breaker_notice_at = None
+    global _next_breaker_notice_at
+    _next_breaker_notice_at = None
 
 
-async def _notify_breaker(count: int) -> None:
-    """Best-effort push to Uptime Kuma. Never raises.
+async def _notify_breaker(count: int) -> bool:
+    """Best-effort push to Uptime Kuma. Never raises. Reports delivery.
 
     Delivery (email, Discord, whatever the operator wired up) is Kuma's job, so
     this is one push and no notification logic of its own. A dead monitor must
     not suppress the exception that actually halts writing — hence the guard
     around a helper that already swallows its own failures.
+
+    Returns True if the operator was told (or no monitor is configured, which is
+    a deliberate disable and nothing to retry), False if the push did not arrive.
+    The caller uses this to decide whether to silence further notices for the
+    whole window or only for a short retry backoff (#313).
     """
     settings = get_settings()
     url = settings.kuma_push_measurement_breaker
     if not url:
-        return
+        return True
     try:
-        await heartbeat.push(
+        return await heartbeat.push(
             url,
             status="down",
             msg=(
@@ -150,7 +173,10 @@ async def _notify_breaker(count: int) -> None:
             ),
         )
     except Exception as exc:
+        # heartbeat.push does not raise, so this covers a fault in the lookup
+        # itself. Treat it as undelivered: nobody was told.
         _log.warning("measurement.breaker_notify_failed", reason=str(exc)[:_ERROR_TRUNCATE])
+        return False
 
 
 async def record_measurement(
@@ -238,7 +264,7 @@ async def record_measurement(
         )
         in_window = (int(recent["n"]) if recent else 0) + 1
         if in_window >= settings.measurement_breaker_threshold:
-            if _breaker_notice_due(window):
+            if _breaker_notice_due():
                 _log.error(
                     "measurement.breaker_tripped",
                     game_id=game_id,
@@ -247,7 +273,16 @@ async def record_measurement(
                     downward_in_window=in_window,
                     threshold=settings.measurement_breaker_threshold,
                 )
-                await _notify_breaker(in_window)
+                delivered = await _notify_breaker(in_window)
+                # Stamp AFTER the attempt, and only for the full window if the
+                # operator actually heard about it (#313).
+                _stamp_breaker_notice(delivered=delivered, window_minutes=window)
+                if not delivered:
+                    _log.warning(
+                        "measurement.breaker_notice_undelivered",
+                        downward_in_window=in_window,
+                        retry_in_sec=_BREAKER_RETRY_SEC,
+                    )
             else:
                 # Already announced. Still refuse the write — just quietly, so
                 # the scale stays recoverable from the log without a thousand

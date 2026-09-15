@@ -19,6 +19,27 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — a breaker alert that never arrived no longer silences the incident — 2026-09-15
+
+- **A failed Kuma push burned the dedupe stamp and silenced a library-wide
+  incident (#313, SEV-3).** `_breaker_notice_due()` stamped its once-per-window
+  clock **before** attempting the push, and `heartbeat.push` swallowed every
+  failure internally — so `_notify_breaker`'s own `except` never fired in
+  production. Measured in UAT 15: 2 trips, 1 push attempt, the second silent.
+  It compounds: the sweep aborts on the **first** trip, so a sweep makes exactly
+  one push attempt, and an unreachable NAS is precisely correlated with the mass
+  eviction that trips the breaker. The two failure modes are not independent.
+- **`heartbeat.push` now reports delivery** (`-> bool`, still never raises), and
+  the breaker stamps its clock **after** the attempt: the full window if the
+  operator was told, a short `_BREAKER_RETRY_SEC = 60` backoff if not. The naive
+  fix — stamp only on success — would have reopened the defect the stamp exists
+  to prevent: ~1000 pushes and ~20 min of pure timeout inside one incident-scale
+  sweep. A new `measurement.breaker_notice_undelivered` warning records the miss.
+- **Also closes a latent defect nobody had noticed:** an HTTP error response is
+  now treated as undelivered. A mistyped `ORCH_KUMA_PUSH_MEASUREMENT_BREAKER`
+  answers 404 — the request completed and nobody was told — which was previously
+  indistinguishable from success, silently disabling breaker alerting forever.
+
 ### Documentation — a client can ignore lancache entirely, and IPv6 is why — 2026-09-15
 
 - **`docs/deploy/live-configuration.md` §3.3 (new).** A SteamOS handheld reported
