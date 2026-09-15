@@ -375,6 +375,54 @@ definition does.
 
 ---
 
+## 3.3 Client-side: a machine that ignores lancache entirely
+
+Not orchestrator config, but this cost a full afternoon on 2026-09-15 and the
+symptom is badly misleading: **Game_shelf correctly reports a game as cached, and
+the client downloads it from the internet anyway.**
+
+**Check IPv6 on the client first.** Steam runs a dual-stack connectivity check
+before it will register a caching proxy. If the client has no working IPv6, that
+check fails and Steam silently falls back to the public CDN over HTTPS — which
+lancache cannot cache, because it cannot spoof TLS. Steam writes its own verdict
+into its config:
+
+```sh
+grep -i ipv6check ~/.steam/steam/config/config.vdf
+# "ipv6check_http_state"   "bad"     <- the smoking gun
+```
+
+Confirm from the client's content log:
+
+```sh
+grep -E "caching proxies|local content cache" ~/.steam/steam/logs/content_log.txt | tail
+# "Got 40 download sources and 0 caching proxies ..."   <- broken
+# no "Enabling local content cache" line at all          <- broken
+```
+
+**Fix: enable IPv6 on the client.** Verified on a SteamOS handheld 2026-09-15 —
+immediately afterwards, 12,850 HITs and 0 MISSes in the lancache access log.
+
+**Do NOT "fix" this by pointing `cache*.steamcontent.com` at lancache** (hosts
+file or DNS). Tested live and it does not work: Steam connects to lancache on
+:443, lancache forwards the TLS stream upstream untouched, nothing is cached, and
+all download traffic now detours through the NAS for no benefit. Upstream rejects
+this for the same reason (`lancachenet/monolithic#85`, `uklans/cache-domains#151`).
+Only `lancache.steamcontent.com` belongs in `steam.txt`; one entry is correct.
+
+**Confirming a client is actually using the cache** — the one query that settles it:
+
+```sh
+ssh karl@192.168.1.30 \
+  'grep "<client-ip>" /volume2/@home/karl/lancache-host/logs/access.log \
+   | grep "\[steam\]" | grep -oE "\"(HIT|MISS)\"" | sort | uniq -c'
+```
+
+Nothing at all means the client never reached lancache — that is a client
+problem, not a cache problem. Note that lancache serves cached content over plain
+**HTTP on port 80**; a client showing only :443 connections to Valve/Akamai is
+bypassing the cache.
+
 ## 4 — Verify after any change
 
 | # | Check | Command | Expect |

@@ -19,6 +19,28 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Documentation — a client can ignore lancache entirely, and IPv6 is why — 2026-09-15
+
+- **`docs/deploy/live-configuration.md` §3.3 (new).** A SteamOS handheld reported
+  a cached game as downloading from the internet, with Game_shelf correctly
+  showing it cached. Root cause was **no IPv6 on the client**: Steam runs a
+  dual-stack connectivity check before it will register a caching proxy, and
+  when that check fails it reports `0 caching proxies`, never logs
+  `Enabling local content cache`, and falls back to the public CDN over HTTPS —
+  which lancache cannot cache because it cannot spoof TLS. Steam records its own
+  verdict as `"ipv6check_http_state" "bad"` in `config.vdf`; grep that first.
+  Enabling IPv6 on the client fixed it: **12,850 HITs, 0 MISSes** immediately
+  after.
+- Documented the anti-fix too, because it is the obvious thing to reach for and
+  it is wrong: pointing `cache*.steamcontent.com` at lancache (hosts file or DNS)
+  was tested live and does nothing but detour traffic — Steam connects on :443
+  and lancache forwards the TLS stream untouched. Only
+  `lancache.steamcontent.com` belongs in `steam.txt`.
+- Added the one query that settles "is this client actually using the cache?",
+  and the note that lancache serves cached content over plain **HTTP on :80** —
+  a client showing only :443 to Valve/Akamai is bypassing it.
+
+
 ### Data Model — a sweep pass is now a thing the database can express — 2026-09-14
 
 - **Migration 0017 adds the one-row `sweep_pass` marker** (`pass_number`,
