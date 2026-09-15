@@ -35,23 +35,42 @@ async def push(
     status: str,
     msg: str = "",
     transport: httpx.AsyncBaseTransport | None = None,
-) -> None:
-    """Send one heartbeat. Never raises.
+) -> bool:
+    """Send one heartbeat. Never raises. Reports whether it was delivered.
+
+    The return value exists for the circuit breaker (#313). It used to stamp its
+    once-per-window dedupe clock BEFORE pushing, against a helper that swallowed
+    every failure — so a single unreachable moment silenced a library-wide
+    incident for the full window. A caller that must know cannot find out unless
+    this says so.
 
     Args:
         url: the monitor's push URL, or None/blank to disable this heartbeat.
         status: ``"up"`` or ``"down"``.
         msg: short human-readable detail, truncated to ``MSG_MAX_CHARS``.
         transport: injected by tests; production passes nothing.
+
+    Returns:
+        True if the monitor accepted the push, or if no URL is configured —
+        a deliberate disable is nothing to retry. False only when a send was
+        attempted and did not arrive.
     """
     if url is None or not url.strip():
-        return
+        return True
 
     # Keep the tail: for an error the specific failure is at the end, not the start.
     trimmed = msg[-MSG_MAX_CHARS:] if len(msg) > MSG_MAX_CHARS else msg
 
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SEC, transport=transport) as client:
-            await client.get(url.strip(), params={"status": status, "msg": trimmed})
+            resp = await client.get(url.strip(), params={"status": status, "msg": trimmed})
     except Exception as exc:
         _log.warning("heartbeat.push_failed", status=status, error=str(exc)[:MSG_MAX_CHARS])
+        return False
+
+    # A mistyped push token answers 404: the request completed, and nobody was
+    # told. For every caller that is the same outcome as a connection failure.
+    if resp.status_code >= 400:
+        _log.warning("heartbeat.push_rejected", status=status, http_status=resp.status_code)
+        return False
+    return True
