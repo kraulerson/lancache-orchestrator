@@ -72,6 +72,7 @@ print or copy the secret values anywhere — `ORCH_TOKEN` and the five
 | `ORCH_AGENT_ENABLED` | `true` | |
 | `ORCH_SCHEDULED_PREFILL_ENABLED` | `true` | Epic scheduled prefill. Was `false` through the post-#305 convergence period; re-enabled once the recovery sweeps completed |
 | `ORCH_SWEEP_BATCH_SIZE` | `2` | see below |
+| `ORCH_SWEEP_DEADLINE_MARGIN_SEC` | *(absent — default `1800`)* | see below |
 | `ORCH_KUMA_PUSH_LIBRARY_SYNC` | *(secret URL)* | job heartbeat → Kuma 179 |
 | `ORCH_KUMA_PUSH_SWEEP` | *(secret URL)* | → Kuma 180 |
 | `ORCH_KUMA_PUSH_SCHEDULED_PREFILL` | *(secret URL)* | → Kuma 181 |
@@ -92,6 +93,33 @@ per-call timeout budget starts running while the request is still waiting for a
 worker, so a wider batch makes calls *time out* that would otherwise have
 succeeded. It distorts every timing signal the sweep has. If the agent's pool
 size ever changes, change this to match it — they are one number in two files.
+
+**`ORCH_SWEEP_DEADLINE_MARGIN_SEC` — absent, and should usually stay absent
+(#311).** A sweep stops starting new games this long before `job_max_runtime_sec`
+(6 h) would cancel it, then reports a partial pass and **succeeds**. The check
+happens *between* games, so the margin has to cover the longest single validate
+or the job gets hard-cancelled anyway: ARK ModKit (244 GB, 359,671 chunks) is
+~22 min at current throughput, hence the 1800 s default. Raise it if a larger
+title lands. A value at or above `job_max_runtime_sec` is **refused at boot** —
+it would make every sweep a no-op that still reported healthy, which is worse
+than the DOWN it replaced.
+
+**What the sweep monitor (Kuma 180) now means.** Since #311 a sweep pushes `up`
+on *every* scheduled run: `pass N partial: 1089/3212 games, 3.5 TiB of 8.1 TiB`
+while a pass is still in flight, and `pass N complete: ...` when it finishes — a
+pass spans roughly two to three runs at ~12.5 h per pass against the 6 h cap. So:
+
+- **green** → the schedule is running. It does **not** mean the library was
+  covered; read the message for that.
+- **red** → a tripped circuit breaker or an unhandled exception. Hitting the
+  runtime cap is no longer a failure, so red is a real fault again.
+- **red because nothing arrived** → the scheduler, the container, or the LXC is
+  down, exactly as before.
+
+A pass that silently stops *advancing* — the same partial percentage run after
+run — is not something this monitor can see. Check `sweep.pass_completed` in the
+logs, or the `sweep_pass` row, if you need coverage freshness rather than
+liveness.
 
 ### 1.2 `/etc/cron.d/orch-breaker-heartbeat`
 

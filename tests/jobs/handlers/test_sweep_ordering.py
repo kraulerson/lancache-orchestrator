@@ -13,6 +13,7 @@ import pytest
 
 from orchestrator.jobs.handlers.sweep import _CANDIDATE_SQL, sweep_handler
 from orchestrator.jobs.measurement import record_measurement
+from orchestrator.jobs.sweep_pass import read_pass
 from orchestrator.jobs.worker import Deps
 
 pytestmark = pytest.mark.asyncio
@@ -44,8 +45,13 @@ async def _seed_games(pool, *, status="unknown", owned=1, last_measure_attempt_a
 
 
 async def _candidate_ids(pool) -> list[int]:
-    """Run the handler's actual gated candidate SQL and return ids in order."""
-    rows = await pool.read_all(_CANDIDATE_SQL)
+    """Run the handler's actual gated candidate SQL and return ids in order.
+
+    The SQL is pass-gated since #311, so it takes the current pass_started_at.
+    Ordering within a pass is what these tests are about, and it is unchanged.
+    """
+    current = await read_pass(pool)
+    rows = await pool.read_all(_CANDIDATE_SQL, (current.started_at,))
     return [int(r["id"]) for r in rows]
 
 

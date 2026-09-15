@@ -800,3 +800,37 @@ def test_epic_cache_identifiers_env_comma_split(monkeypatch):
     monkeypatch.setenv("ORCH_EPIC_CACHE_IDENTIFIERS", "epicgames, foo.example.com ,")
     s = Settings(orchestrator_token="a" * 32)
     assert s.epic_cache_identifiers == ["epicgames", "foo.example.com"]
+
+
+# ---------------------------------------------------------------------------
+# #311 — the sweep deadline margin must leave a sweep something to do
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_deadline_margin_at_or_above_the_job_budget_is_rejected():
+    """A margin that swallows the whole budget makes every sweep a no-op.
+
+    The handler stops starting games once `job_max_runtime_sec - margin` has
+    elapsed. If the margin is >= the budget, that instant is already past when
+    the sweep starts, so it attempts nothing, completes no pass — and still
+    reports a healthy partial to Uptime Kuma forever. A monitor that stays green
+    while nothing is measured is worse than the DOWN it replaced, so this is a
+    boot-time error, not a warning.
+    """
+    with pytest.raises(ValidationError):
+        Settings(
+            orchestrator_token="a" * 32,
+            job_max_runtime_sec=1800.0,
+            sweep_deadline_margin_sec=1800.0,
+        )
+
+
+def test_sweep_deadline_margin_is_unconstrained_when_the_budget_is_disabled():
+    """`job_max_runtime_sec = 0` disables the worker budget, so there is no
+    deadline for the margin to swallow and nothing to validate against."""
+    s = Settings(
+        orchestrator_token="a" * 32,
+        job_max_runtime_sec=0.0,
+        sweep_deadline_margin_sec=99999.0,
+    )
+    assert s.sweep_deadline_margin_sec == 99999.0
