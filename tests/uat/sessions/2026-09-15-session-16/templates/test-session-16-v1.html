@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>UAT Session 16</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0f0f17; color: #cdd6f4; line-height: 1.5; padding: 24px; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin-bottom: 4px; }
+  .meta { color: #a6adc8; font-size: 0.9rem; margin-bottom: 24px; }
+  .progress-bar { background: #1e1e2e; border-radius: 8px; height: 8px; margin-bottom: 24px; overflow: hidden; }
+  .progress-fill { background: #a6e3a1; height: 100%; width: 0%; transition: width 0.3s; }
+  .progress-text { text-align: center; color: #a6adc8; font-size: 0.85rem; margin-bottom: 24px; }
+  h2 { font-size: 1.2rem; color: #89b4fa; margin: 32px 0 16px; padding-bottom: 8px; border-bottom: 1px solid #313244; }
+  .fixture-ref { background: #11111b; border: 1px solid #313244; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 0.85rem; color: #a6adc8; }
+  .fixture-ref strong { color: #cdd6f4; }
+  .fixture-ref code { background: #313244; padding: 2px 6px; border-radius: 3px; color: #f9e2af; }
+  .scenario { background: #1e1e2e; border-radius: 8px; margin-bottom: 12px; overflow: hidden; border-left: 4px solid #45475a; transition: border-color 0.2s; }
+  .scenario.pass { border-left-color: #a6e3a1; }
+  .scenario.fail { border-left-color: #f38ba8; }
+  .scenario-header { padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+  .scenario-num { background: #313244; color: #a6adc8; font-size: 0.8rem; font-weight: 600; padding: 2px 8px; border-radius: 4px; min-width: 28px; text-align: center; }
+  .scenario-title { flex: 1; font-weight: 500; }
+  .btn-group { display: flex; gap: 4px; }
+  .btn { padding: 6px 14px; border: 1px solid #45475a; border-radius: 4px; background: transparent; color: #cdd6f4; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
+  .btn:hover { background: #313244; }
+  .btn.pass-btn.active { background: #a6e3a1; color: #1e1e2e; border-color: #a6e3a1; font-weight: 600; }
+  .btn.fail-btn.active { background: #f38ba8; color: #1e1e2e; border-color: #f38ba8; font-weight: 600; }
+  .btn.skip-btn.active { background: #f9e2af; color: #1e1e2e; border-color: #f9e2af; font-weight: 600; }
+  .scenario-details { padding: 0 16px 8px 16px; display: none; }
+  .scenario-details.open { display: block; }
+  .steps { background: #11111b; padding: 10px 14px; border-radius: 4px; font-size: 0.85rem; color: #a6adc8; margin-bottom: 8px; }
+  .steps strong { color: #cdd6f4; }
+  .scenario-notes { padding: 4px 16px 12px 16px; }
+  .notes-input { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; resize: vertical; min-height: 36px; }
+  .notes-input:focus { outline: none; border-color: #89b4fa; }
+  .toggle-details { background: none; border: none; color: #6c7086; cursor: pointer; font-size: 0.75rem; padding: 4px 8px; }
+  .toggle-details:hover { color: #89b4fa; }
+  .bugs-section { margin-top: 40px; }
+  .bug-entry { background: #1e1e2e; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #f38ba8; }
+  .bug-row { display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .bug-field { flex: 1; min-width: 200px; }
+  .bug-field label { display: block; color: #a6adc8; font-size: 0.8rem; margin-bottom: 4px; }
+  .bug-field input, .bug-field select, .bug-field textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; }
+  .bug-field textarea { resize: vertical; min-height: 60px; }
+  .bug-field input:focus, .bug-field select:focus, .bug-field textarea:focus { outline: none; border-color: #89b4fa; }
+  .bug-field select { appearance: auto; }
+  .add-bug-btn { background: #313244; border: 1px dashed #45475a; color: #a6adc8; padding: 10px; border-radius: 8px; width: 100%; cursor: pointer; font-size: 0.85rem; margin-bottom: 12px; }
+  .add-bug-btn:hover { border-color: #f38ba8; color: #f38ba8; }
+  .remove-bug { background: none; border: none; color: #f38ba8; cursor: pointer; font-size: 0.8rem; float: right; }
+  .overall-notes { margin-top: 32px; }
+  .overall-notes textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 12px; border-radius: 8px; font-size: 0.9rem; font-family: inherit; resize: vertical; min-height: 100px; }
+  .overall-notes textarea:focus { outline: none; border-color: #89b4fa; }
+  .export-section { margin-top: 32px; text-align: center; padding: 24px; }
+  .export-btn { background: #89b4fa; color: #1e1e2e; border: none; padding: 12px 32px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; }
+  .export-btn:hover { background: #74c7ec; }
+  .export-btn:active { transform: scale(0.98); }
+  .copy-msg { color: #a6e3a1; margin-top: 8px; font-size: 0.85rem; display: none; }
+</style>
+</head>
+<body>
+
+
+<h1>UAT Session 16</h1>
+
+
+<div class="meta">Date: 2026-09-15 | Features: Sweep Pass Marker, Breaker Heartbeat Delivery, Cache Purge | Tester: <input id="tester-name" type="text" placeholder="Your name" style="background:#1e1e2e;border:1px solid #45475a;color:#cdd6f4;padding:4px 8px;border-radius:4px;font-size:0.85rem;width:140px;"></div>
+
+<div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+<div class="progress-text" id="progress-text">0 / 0 completed</div>
+
+
+<h2>Feature 26: Sweep Pass Marker (#311 / PR #322) — DEPLOYED 2026-09-15 03:03 UTC</h2>
+<div id="feature26"></div>
+
+<h2>Feature 27: Breaker Heartbeat Delivery (#313 / PR #327) — NOT DEPLOYED, code only</h2>
+<div id="feature27"></div>
+
+<h2>Feature 18: Cache Purge delete-then-validate (#310 / PR #321) — deployed, never exercised live</h2>
+<div id="feature18"></div>
+
+<div class="bugs-section">
+  <h2>Bugs Found</h2>
+  <div id="bugs-list"></div>
+  <button class="add-bug-btn" onclick="addBug()">+ Add Bug</button>
+</div>
+
+<div class="overall-notes">
+  <h2>Overall Notes</h2>
+  <textarea id="overall-notes" placeholder="Free-form observations, UX concerns, suggestions, things that felt wrong even if they technically worked..."></textarea>
+</div>
+
+<div class="export-section">
+  <button class="export-btn" onclick="exportResults()">Copy Results to Clipboard</button>
+  <div class="copy-msg" id="copy-msg">Copied! Paste into terminal or save to submissions folder.</div>
+</div>
+
+<script>
+const scenarios = [
+  {
+    "id": 1,
+    "feature": 26,
+    "title": "Uptime Kuma sweep monitor (180) is GREEN for the first time since migration 0015",
+    "steps": "1. Open Uptime Kuma at 10.100.23.57:3001\\n2. Find the orchestrator validation-sweep push monitor (monitor 180)\\n3. Read its current status AND the text of its most recent heartbeat message\\n4. Note how long it has been green",
+    "expected": "Monitor is UP/green. The message reads like 'pass 1 partial: N/3213 games, X TiB of Y TiB' (or 'pass N complete: ...'). Before this change the monitor could NEVER go green, because a sweep could not finish inside the 6h cap. If it is still red, this feature failed its whole purpose."
+  },
+  {
+    "id": 2,
+    "feature": 26,
+    "title": "A cut-off sweep is recorded as SUCCEEDED, not failed",
+    "steps": "1. Open Game_shelf (or the CLI: orchestrator-cli jobs list --kind sweep)\\n2. Look at the sweep jobs from today, 2026-09-15, starting 09:00 and 15:00 UTC\\n3. Note the state of each",
+    "expected": "Sweeps show 'succeeded'. Historically 15 of the last 16 were 'failed'. A sweep that runs out of time is now a success that reports partial progress. If you see 'failed', read the error \u2014 only a tripped circuit breaker should produce one now."
+  },
+  {
+    "id": 3,
+    "feature": 26,
+    "title": "Cache badges in Game_shelf are unchanged and still trustworthy",
+    "steps": "1. Open Game_shelf and filter to Steam games\\n2. Spot-check 5 games you KNOW are installed/cached, and 3 you know are not\\n3. Compare each badge against reality\\n4. Specifically check Mad Max and Suicide Squad: Kill the Justice League",
+    "expected": "Badges match reality. The pass marker changed WHEN games are measured, not HOW. Mad Max and Suicide Squad should both read fully cached \u2014 that was independently verified today (25,690/25,690 and 101,240/101,240 chunks)."
+  },
+  {
+    "id": 4,
+    "feature": 26,
+    "title": "No game is starved \u2014 measurement stays fresh across the pass",
+    "steps": "1. In Game_shelf, sort or filter by cache-status-measured date if available\\n2. Look for any owned game whose measurement is older than ~2 days\\n3. Note the oldest you can find",
+    "expected": "No owned game should be much older than a full pass (~12.5h of sweep time, spread over 2-3 scheduled runs). The pass gate is designed so a game cannot be skipped repeatedly. Anything stale by days is a real defect \u2014 report it."
+  },
+  {
+    "id": 5,
+    "feature": 27,
+    "title": "Breaker monitor (Kuma 216) is green from the daily cron heartbeat",
+    "steps": "1. In Uptime Kuma, open the measurement-breaker push monitor (216)\\n2. Confirm it is green and note the last heartbeat time and message\\n3. Confirm the message looks like the daily 'breaker armed' cron push, not a trip",
+    "expected": "Green, with a heartbeat within the last ~24h reading 'breaker armed daily heartbeat'. A RED here means either the breaker actually tripped (investigate the sweep immediately) or the LXC/cron is dead."
+  },
+  {
+    "id": 6,
+    "feature": 27,
+    "title": "Decide whether PR #327 ships (this fix is NOT live yet)",
+    "steps": "1. Open PR #327 on GitHub\\n2. Read the description \u2014 particularly why 'stamp only on success' was rejected\\n3. Decide: merge and deploy now, or hold\\n4. Record your decision and reasoning in the notes",
+    "expected": "This is a decision scenario, not a test. The fix means a Kuma push that never arrives no longer silences a cache-loss incident for the full hour. It is unproven in production because the breaker has not tripped since deploy. PASS = you have made a decision either way."
+  },
+  {
+    "id": 7,
+    "feature": 18,
+    "title": "Purge a disposable game and confirm the cache is really measured afterwards",
+    "steps": "1. WARNING: this DELETES cached data. Pick a SMALL game you are willing to re-download.\\n2. Note its current cache badge and size\\n3. Purge it from Game_shelf\\n4. Wait for the purge job to finish, then re-check the badge\\n5. Note the resulting status string exactly",
+    "expected": "After a clean purge the game reports 'not_downloaded' (NOT 'validation_failed' \u2014 that changed in #310). The status must come from a real post-purge measurement of the disk, not from the agent's delete counts. This path has NEVER run in production since the change, so treat any surprise as a real finding."
+  },
+  {
+    "id": 8,
+    "feature": 18,
+    "title": "The purge did not arm the circuit breaker",
+    "steps": "1. Immediately after scenario 7, check Kuma monitor 216 (breaker)\\n2. Check that the next scheduled sweep still runs and is not refused\\n3. Note anything unusual in the job list",
+    "expected": "Breaker stays green. A purge writes a transition row marked 'commanded', and the breaker deliberately ignores commanded rows \u2014 so even purging a large game must not trip the mass-loss alarm or block the next sweep's honest measurements."
+  },
+  {
+    "id": 9,
+    "feature": 18,
+    "title": "A purged game re-prefills on the next scheduled cycle",
+    "steps": "1. After scenario 7, leave the game alone\\n2. Check back after the next Epic/Steam prefill cycle (03/09/15/21 UTC +45min for Epic)\\n3. Confirm the game is queued or downloaded again\\n4. Confirm its badge returns to cached afterwards",
+    "expected": "A purged game is eligible for prefill again and its badge recovers without manual intervention. If it stays not_downloaded forever, the purge left it in a state prefill cannot pick up."
+  }
+];
+
+function renderScenarios() {
+  scenarios.forEach(s => {
+    const container = document.getElementById('feature' + s.feature);
+    if (!container) return;
+    container.innerHTML += '<div class="scenario" id="scenario-' + s.id + '">' +
+      '<div class="scenario-header">' +
+        '<span class="scenario-num">' + s.id + '</span>' +
+        '<span class="scenario-title">' + s.title + '</span>' +
+        '<button class="toggle-details" onclick="toggleDetails(' + s.id + ')">details</button>' +
+        '<div class="btn-group">' +
+          '<button class="btn pass-btn" onclick="setResult(' + s.id + ',\'pass\',this)">Pass</button>' +
+          '<button class="btn fail-btn" onclick="setResult(' + s.id + ',\'fail\',this)">Fail</button>' +
+          '<button class="btn skip-btn" onclick="setResult(' + s.id + ',\'skip\',this)">Skip</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="scenario-details" id="details-' + s.id + '">' +
+        '<div class="steps"><strong>Steps:</strong><br>' + s.steps.replace(/\n/g,'<br>') + '</div>' +
+        '<div class="steps"><strong>Expected:</strong><br>' + s.expected + '</div>' +
+      '</div>' +
+      '<div class="scenario-notes">' +
+        '<textarea class="notes-input" id="notes-' + s.id + '" placeholder="Notes — observations, issues, anything worth recording"></textarea>' +
+      '</div>' +
+    '</div>';
+  });
+}
+
+const results = {};
+
+function setResult(id, result, btn) {
+  results[id] = result;
+  const sc = document.getElementById('scenario-' + id);
+  sc.className = 'scenario ' + (result === 'skip' ? '' : result);
+  sc.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  updateProgress();
+}
+
+function toggleDetails(id) {
+  document.getElementById('details-' + id).classList.toggle('open');
+}
+
+function updateProgress() {
+  const done = Object.keys(results).length;
+  const pct = (done / scenarios.length * 100).toFixed(0);
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent = done + ' / ' + scenarios.length + ' completed';
+}
+
+var bugCount = 0;
+function addBug() {
+  bugCount++;
+  var n = bugCount;
+  document.getElementById('bugs-list').innerHTML +=
+    '<div class="bug-entry" id="bug-' + n + '">' +
+      '<button class="remove-bug" onclick="document.getElementById(\'bug-' + n + '\').remove()">remove</button>' +
+      '<div class="bug-row">' +
+        '<div class="bug-field"><label>Severity</label><select id="bug-sev-' + n + '">' +
+          '<option>SEV-1 (crash/data loss)</option><option>SEV-2 (broken, workaround exists)</option>' +
+          '<option selected>SEV-3 (minor UX)</option><option>SEV-4 (polish/enhancement)</option>' +
+        '</select></div>' +
+        '<div class="bug-field"><label>Feature</label><select id="bug-feat-' + n + '">' +
+          '<option>26 - Sweep Pass Marker (#311 / PR #322)</option><option>27 - Breaker Heartbeat Delivery (#313 / PR #327)</option><option>18 - Cache Purge delete-then-validate (#310 / PR #321)</option>' +
+        '</select></div>' +
+      '</div>' +
+      '<div class="bug-field"><label>Description</label><input id="bug-desc-' + n + '" placeholder="What went wrong?"></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Steps to Reproduce</label><textarea id="bug-steps-' + n + '" placeholder="1. ...\n2. ...\n3. ..."></textarea></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Expected vs Actual</label><textarea id="bug-exp-' + n + '" placeholder="Expected: ...\nActual: ..."></textarea></div>' +
+    '</div>';
+}
+
+function exportResults() {
+  var tester = document.getElementById('tester-name').value || 'Unknown';
+  var md = '# ' + document.querySelector('h1').textContent + ' Results\n\n';
+  md += '**Date:** 2026-09-15\n';
+  md += '**Tester:** ' + tester + '\n';
+  md += '**Features:** Sweep Pass Marker, Breaker Heartbeat Delivery, Cache Purge\n\n';
+
+  var pass = 0, fail = 0, skip = 0;
+  for (var k in results) {
+    if (results[k] === 'pass') pass++;
+    else if (results[k] === 'fail') fail++;
+    else if (results[k] === 'skip') skip++;
+  }
+  var untested = scenarios.length - Object.keys(results).length;
+  md += '**Summary:** ' + pass + ' passed, ' + fail + ' failed, ' + skip + ' skipped, ' + untested + ' not tested\n\n---\n\n';
+
+  md += '## Scenarios\n\n';
+  md += '| # | Scenario | Result | Notes |\n';
+  md += '|---|---|---|---|\n';
+  scenarios.forEach(function(s) {
+    var r = results[s.id] || 'not tested';
+    var icon = r === 'pass' ? 'PASS' : r === 'fail' ? 'FAIL' : r === 'skip' ? 'SKIP' : '-';
+    var el = document.getElementById('notes-' + s.id);
+    var notes = el ? el.value.replace(/\|/g, '/').replace(/\n/g, ' ').replace(/`/g, "'").replace(/\[/g, '(').replace(/\]/g, ')').replace(/\*/g, '-') : '';
+    md += '| ' + s.id + ' | ' + s.title + ' | ' + icon + ' | ' + notes + ' |\n';
+  });
+
+  var bugEntries = document.querySelectorAll('.bug-entry');
+  if (bugEntries.length > 0) {
+    md += '\n---\n\n## Bugs Found\n\n';
+    var i = 0;
+    bugEntries.forEach(function(el) {
+      i++;
+      var id = el.id.split('-')[1];
+      var sev = document.getElementById('bug-sev-' + id);
+      var feat = document.getElementById('bug-feat-' + id);
+      var desc = document.getElementById('bug-desc-' + id);
+      var steps = document.getElementById('bug-steps-' + id);
+      var exp = document.getElementById('bug-exp-' + id);
+      md += '### Bug ' + i + '\n';
+      md += '- **Severity:** ' + (sev ? sev.value : '') + '\n';
+      md += '- **Feature:** ' + (feat ? feat.value : '') + '\n';
+      md += '- **Description:** ' + (desc ? desc.value : '') + '\n';
+      md += '- **Steps:** ' + (steps ? steps.value.replace(/\n/g, '; ') : '') + '\n';
+      md += '- **Expected vs Actual:** ' + (exp ? exp.value.replace(/\n/g, '; ') : '') + '\n\n';
+    });
+  }
+
+  var overall = document.getElementById('overall-notes').value;
+  if (overall) {
+    md += '\n---\n\n## Overall Notes\n\n' + overall + '\n';
+  }
+
+  navigator.clipboard.writeText(md).then(function() {
+    var msg = document.getElementById('copy-msg');
+    msg.style.display = 'block';
+    setTimeout(function() { msg.style.display = 'none'; }, 3000);
+  });
+}
+
+renderScenarios();
+// Refresh the counter at LOAD, not only from setResult(). Without this the
+// header keeps its static '0 / 0 completed' until the tester clicks a result —
+// which is exactly what a page whose JavaScript died looks like, and is how a
+// perfectly good checklist gets mistaken for a broken one (UAT-14).
+updateProgress();
+</script>
+</body>
+</html>
