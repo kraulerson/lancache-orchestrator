@@ -104,6 +104,39 @@ async def _purge_epic_game(
     )
 
 
+def _as_count(result: dict[str, Any], key: str, *, job_id: object, game_id: int) -> int:
+    """One count from the agent's purge response, or 0 if it is unusable (#332).
+
+    Never raises. A malformed field is logged and treated as 0 rather than
+    allowed to abort the handler, because by the time this runs the files are
+    already deleted: raising would leave cache truth unwritten and the game
+    wearing its stale pre-purge badge.
+
+    0 is the safe default in both directions. Too low only ever means the
+    `outcome == "error"` fallback declines to claim a delete it cannot prove,
+    leaving the attempt-only write to stand; it never invents a delete that did
+    not happen.
+    """
+    raw = result.get(key, 0)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        value = None
+    else:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = None
+    if value is None or value < 0:
+        _log.warning(
+            "purge.count_unusable",
+            job_id=job_id,
+            game_id=game_id,
+            field=key,
+            raw=repr(raw)[:80],
+        )
+        return 0
+    return value
+
+
 async def purge_handler(job: dict[str, Any], deps: Deps) -> None:
     """Purge one game's cached chunks (F18), then flag it for re-prefill.
 
@@ -139,10 +172,6 @@ async def purge_handler(job: dict[str, Any], deps: Deps) -> None:
     else:  # epic
         result = await _purge_epic_game(agent, deps.pool, game_id, game["app_id"])
 
-    files_deleted = int(result.get("deleted", 0))
-    files_failed = int(result.get("failed", 0))
-    bytes_freed = int(result.get("bytes_freed", 0))
-
     # Delete, THEN measure (#310). The agent returns HTTP 200 with
     # {"deleted": 0, "failed": N} when every unlink fails — which is what happens
     # when it comes back as uid 1000 instead of 0:0, as it has twice in this
@@ -176,6 +205,18 @@ async def purge_handler(job: dict[str, Any], deps: Deps) -> None:
     # observation behind it can never disagree.
     settings = get_settings()
     measured = await validate_one_game(deps.pool, deps, game_id, settings, commanded=True)
+
+    # Parsed AFTER the measurement, and defensively, because of #332. These three
+    # are reporting metadata; `measured` is cache truth. agent_client casts
+    # resp.json() to dict[str, Any] with no validation, so a null or a
+    # non-numeric string used to raise here — after the files were unlinked and
+    # before anything measured the disk — stranding the stale pre-purge status
+    # with no validation_history and no transition row. That is #310's exact
+    # failure mode reached through a different door, and a database that looks
+    # like no purge was attempted is the worst of the available outcomes.
+    files_deleted = _as_count(result, "deleted", job_id=job_id, game_id=game_id)
+    files_failed = _as_count(result, "failed", job_id=job_id, game_id=game_id)
+    bytes_freed = _as_count(result, "bytes_freed", job_id=job_id, game_id=game_id)
 
     if measured.outcome == "error" and files_deleted > 0:
         # The deletes happened; only the measurement failed. Leaving the pre-purge
