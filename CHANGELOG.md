@@ -19,6 +19,30 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — a malformed purge response no longer strands a false green — 2026-09-16
+
+- **#332, SEV-2.** `purge_handler` coerced the agent's counts with `int()`
+  **before** running the post-delete measurement, and `agent_client` casts
+  `resp.json()` to `dict[str, Any]` with no validation. A response carrying
+  `null` or a non-numeric string therefore raised *after* the files were
+  unlinked and *before* anything measured the disk — leaving `games.status` at
+  its stale pre-purge value, with **no** `validation_history` row and **no**
+  `measurement_transitions` row. The database was indistinguishable from "no
+  purge was ever attempted" until the next sweep reached that game, which since
+  #311 can be a full pass away (~16.4 h observed).
+- That is **#310's exact failure mode** — deleted files under a green badge —
+  reached eight days later through unvalidated input rather than wrong counts.
+- **Two independent hardenings, because one would not have been enough.** The
+  counts are now parsed by `_as_count()`, which never raises and logs
+  `purge.count_unusable` for anything it cannot use; and the parse **moved to
+  after** `validate_one_game()`, since the values are only read afterwards. The
+  ordering is the real fix: a reporting-metadata parse failure can no longer
+  suppress the cache-truth write, which had the two backwards.
+- 0 is the safe default in both directions: too low only makes the
+  `outcome == "error"` fallback decline to claim a delete it cannot prove, never
+  invents one that did not happen.
+
+
 ### Fixed — a breaker alert that never arrived no longer silences the incident — 2026-09-15
 
 - **A failed Kuma push burned the dedupe stamp and silenced a library-wide
