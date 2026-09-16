@@ -1,13 +1,15 @@
 # UAT Session 16 — triage
 
-**Status: PROVISIONAL.** CLAUDE.md requires triage with the Orchestrator. Karl
+**Status: APPROVED by the Orchestrator 2026-09-16.** Decisions below are his.
+
+> Original note (kept for the record): PROVISIONAL — CLAUDE.md requires triage with the Orchestrator. Karl
 delegated execution of the session ("Run the UAT yourself"), not the Fix
 Now / Defer / Won't Fix decisions. Everything below is a recommendation awaiting
 sign-off, except where a severity rule removes the choice.
 
 | Issue | Sev | Title | Recommendation |
 |---|---|---|---|
-| #329 | SEV-2 | Measurement gate excludes 1351 of 3217 games from prefill | **Fix Now** — needs a design decision first |
+| #329 | SEV-2 | Measurement gate excludes 1351 of 3217 games from prefill | **Fix Now** — Karl chose **option 3, a separate first-time path** |
 | #332 | SEV-2 | Malformed agent purge response strands a false green | **Fix Now** |
 | #330 | SEV-3 | Epic prefill monitor DOWN; silence conflates two states | Defer — blocked behind #329 |
 | #331 | SEV-3 | Operator purge queues for hours with no feedback | Defer |
@@ -18,6 +20,7 @@ sign-off, except where a severity rule removes the choice.
 | #316 | SEV-4 | 19 games stuck at `failed` | Blocked on Karl's EA-subgroup decision |
 | #317 | SEV-4 | `record_job_outcome()` never exercised | Carry to session 17 |
 | #326 | SEV-4 | Sweep monitoring sees liveness, not coverage | Defer — now has a real threshold (16.4h/pass) |
+| NEW | SEV-3 | Partial badge has no testable surface in the UI | **Fix Now** — Karl: "fix it properly" |
 
 **No SEV-1.** Per CLAUDE.md, SEV-1 cannot be deferred; none was found.
 
@@ -49,3 +52,23 @@ existed.
 Do **not** reset the feature counter yet. Two of nine scenarios remain
 unexecuted, and #329 arguably warrants its own remediation cycle before more
 feature work begins.
+
+
+## Orchestrator sign-off — 2026-09-16
+
+Karl's decisions, verbatim intent:
+
+1. **#329** — build the **first-time path** (option 3). Not the permissive
+   fallback, not manifest-sourcing alone: a separate, explicitly-marked path for
+   games with no measurement history, kept distinct from the drift-repair path
+   the gate protects.
+2. **Partial badge blind spot** — "fix it properly". Filing an issue is not
+   sufficient; the badge must become testable without depending on a live
+   partially-cached game happening to exist.
+3. **This triage** — approved as written.
+4. **Scenarios 7-9** — deferred until the current issues are fixed.
+5. **PR for this session** — hold until the work is done.
+
+Remediation order: #329 first (largest, and the one blocking real prefill), then
+#332 (the purge false-green), then #333 (tests that do not prove their property),
+then the partial-badge coverage.
