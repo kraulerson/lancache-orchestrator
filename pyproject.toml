@@ -31,7 +31,15 @@ src = ["src", "tests"]
 # suppression comment off the line it suppresses. Excluding Markdown restores
 # the pre-0.16 file set exactly (250 files). This is the approach Astral's own
 # formatter docs prescribe for opting out.
-extend-exclude = ["spikes", "tests/uat/sessions", "*.md"]
+# tools/cache_catcher/fanotify_guard.py is a VENDORED operational artifact: the
+# copy that runs inside the cache-catcher container on the NAS, brought under
+# version control by #337. It is excluded rather than reformatted because it is
+# the tripwire guarding the cache against the 2026-07-31 mass-deletion class,
+# and rewriting 36 lines of its style for lint cleanliness is risk with no
+# benefit — the deployed file must stay byte-identical to the reviewed one.
+# The decision logic it depends on lives in delete_actor.py, which IS linted
+# and tested.
+extend-exclude = ["spikes", "tests/uat/sessions", "*.md", "tools/cache_catcher/fanotify_guard.py"]
 force-exclude = true
 
 [tool.ruff.format]
