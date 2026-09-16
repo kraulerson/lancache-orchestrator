@@ -168,6 +168,7 @@ async def test_trip_pushes_down_to_kuma(pool, monkeypatch):
 
     async def _record(url, *, status, msg="", transport=None):
         calls.append({"url": url, "status": status, "msg": msg})
+        return True
 
     monkeypatch.setattr(heartbeat, "push", _record)
 
@@ -206,6 +207,7 @@ async def test_repeated_refusals_notify_once(pool, monkeypatch):
 
     async def _record(url, *, status, msg="", transport=None):
         calls.append(status)
+        return True
 
     monkeypatch.setattr(heartbeat, "push", _record)
 
@@ -249,6 +251,7 @@ async def test_notification_repeats_once_the_dedupe_window_elapses(pool, monkeyp
 
     async def _record(url, *, status, msg="", transport=None):
         calls.append(status)
+        return True
 
     monkeypatch.setattr(heartbeat, "push", _record)
 
@@ -256,8 +259,9 @@ async def test_notification_repeats_once_the_dedupe_window_elapses(pool, monkeyp
     await _refuse_everything(pool, ids)
     assert len(calls) == 1
 
-    # 61 minutes since the notice, against the 60-minute default window.
-    monkeypatch.setattr(measurement, "_last_breaker_notice_at", time.monotonic() - 61 * 60)
+    # Push the next-allowed deadline into the past: the 60-minute window that
+    # one delivered notice bought has elapsed.
+    monkeypatch.setattr(measurement, "_next_breaker_notice_at", time.monotonic() - 1)
 
     with pytest.raises(CircuitBreakerTripped):
         await record_measurement(pool, ids[25], "missing")
@@ -271,6 +275,7 @@ async def test_no_push_when_no_url_configured(pool, monkeypatch):
 
     async def _record(url, *, status, msg="", transport=None):
         calls.append(status)
+        return True
 
     monkeypatch.setattr(heartbeat, "push", _record)
 
@@ -445,3 +450,87 @@ async def test_commanded_does_not_change_the_error_path(pool):
     assert row["status"] == "up_to_date"
     assert row["status_measured_at"] is None
     assert row["last_measure_attempt_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# #313 — a push that never arrived must not burn the dedupe window
+# ---------------------------------------------------------------------------
+
+
+async def test_an_undelivered_push_does_not_silence_the_incident(pool, monkeypatch):
+    """The defect: the stamp was set BEFORE the push was attempted, and
+    heartbeat.push swallowed its own failures, so one unreachable moment
+    silenced a library-wide incident for the whole 60-minute window.
+
+    This matters more than it sounds: the sweep aborts on the FIRST trip, so a
+    sweep makes exactly one push attempt — and a NAS or network fault is
+    precisely correlated with the mass eviction that trips the breaker. The two
+    failure modes are not independent.
+    """
+    monkeypatch.setenv("ORCH_KUMA_PUSH_MEASUREMENT_BREAKER", "http://kuma.test/api/push/abc123")
+    get_settings.cache_clear()
+
+    delivered: list[bool] = [False, True]
+    attempts: list[str] = []
+
+    async def _flaky(url, *, status, msg="", transport=None):
+        attempts.append(status)
+        return delivered.pop(0) if delivered else True
+
+    monkeypatch.setattr(heartbeat, "push", _flaky)
+    monkeypatch.setattr(measurement, "_BREAKER_RETRY_SEC", 0.0)
+
+    ids = await _seed_games(pool, 30, status="up_to_date")
+    await _refuse_everything(pool, ids)
+
+    assert len(attempts) >= 2, (
+        f"the failed push must be retried, not swallowed for the window: {attempts}"
+    )
+
+
+async def test_a_delivered_push_still_suppresses_for_the_window(pool, monkeypatch):
+    """The stamp exists for a reason: a refused write records no transition, so
+    the count stays frozen and every later downward measurement recomputes the
+    same trip. Without suppression an incident-scale sweep emits one 10-second
+    Kuma GET per remaining game. Fixing #313 must not reopen that."""
+    monkeypatch.setenv("ORCH_KUMA_PUSH_MEASUREMENT_BREAKER", "http://kuma.test/api/push/abc123")
+    get_settings.cache_clear()
+
+    attempts: list[str] = []
+
+    async def _ok(url, *, status, msg="", transport=None):
+        attempts.append(status)
+        return True
+
+    monkeypatch.setattr(heartbeat, "push", _ok)
+
+    ids = await _seed_games(pool, 30, status="up_to_date")
+    await _refuse_everything(pool, ids)
+
+    assert attempts == ["down"], f"one delivered push should suppress the rest: {attempts}"
+
+
+async def test_a_failed_push_backs_off_instead_of_retrying_every_game(pool, monkeypatch):
+    """The honest middle: retry a lost notification, but not once per game.
+
+    With the retry backoff intact, a Kuma that is down for the whole incident
+    must not produce one 10-second-timeout GET per refused write — that is the
+    original defect the stamp was introduced to fix.
+    """
+    monkeypatch.setenv("ORCH_KUMA_PUSH_MEASUREMENT_BREAKER", "http://kuma.test/api/push/abc123")
+    get_settings.cache_clear()
+
+    attempts: list[str] = []
+
+    async def _always_fails(url, *, status, msg="", transport=None):
+        attempts.append(status)
+        return False
+
+    monkeypatch.setattr(heartbeat, "push", _always_fails)
+
+    ids = await _seed_games(pool, 40, status="up_to_date")
+    await _refuse_everything(pool, ids)
+
+    assert len(attempts) == 1, (
+        f"a dead monitor must not be retried once per game inside the backoff: {attempts}"
+    )
