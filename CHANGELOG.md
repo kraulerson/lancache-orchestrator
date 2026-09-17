@@ -19,6 +19,31 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — a purged Steam game comes back again — 2026-09-17
+
+- **#339, SEV-2.** Purging a Steam game deleted its chunks and left SteamPrefill's
+  `successfullyDownloadedDepots.json` untouched, so the next host cron run saw
+  "already fetched", skipped it, and the cache stayed empty **permanently**.
+  `purge.py` claims reversibility because an emptied cache lands in the set
+  prefill selects on — true for Epic, where the orchestrator owns prefill; false
+  for Steam (2540 of 3217 owned games), where prefill is the host cron driven by
+  that file.
+- Found by executing UAT session 16 scenario 9 against production — the first
+  end-to-end run of the purge path since #310/#321 shipped. Alien Shooter was
+  purged 19:24; the cron ran and completed OK the next day at 12:29 and issued
+  **zero** depot requests for it.
+- The agent now clears the purged app's depot entries after a **successful**
+  delete (`clear_downloaded_depots`), so the next prefill re-fetches. Verified by
+  hand first: removing the key made the very next run pull the game back — 584
+  depot requests, 583/583 chunks cached afterwards.
+- **Safety choices.** Only runs when something was actually deleted. An
+  unparseable file is left exactly as found — rewriting what we could not read
+  would discard SteamPrefill's record of the entire library to re-fetch one game.
+  The write is atomic. On the unavoidable race with SteamPrefill's own rewrite,
+  the worst case is our removal being lost, which is precisely today's behaviour
+  and never corruption.
+
+
 ### Fixed — a commanded purge no longer raises an eviction alarm — 2026-09-16
 
 - **#337, SEV-3.** cache-catcher emailed `cache eviction detected (583 deletes/60s)`
