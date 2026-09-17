@@ -19,6 +19,38 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — a commanded purge no longer raises an eviction alarm — 2026-09-16
+
+- **#337, SEV-3.** cache-catcher emailed `cache eviction detected (583 deletes/60s)`
+  for purge job 46589 deliberately deleting Alien Shooter's 583 chunks. Its own
+  log named the culprit on every line — `cmd=[/app/.venv/bin/python -m
+  orchestrator.agent]` — and the alert decision ignored it. The cost is not one
+  email: every future purge cries wolf, and the alert that matters (nginx's
+  cache-manager evicting from a full `keys_zone`, the 2026-07-31 mass-deletion
+  signature) arrives in an inbox trained to dismiss it.
+- Deletes are now classified by the deleting process. A commanded purge is
+  counted separately, reported as a **NOTICE** on its own cooldown so it can
+  never suppress a real eviction alert, and **excluded from the eviction
+  counter** — the same distinction the circuit breaker already makes via
+  `commanded = 1`. Eviction alerts now name the actor.
+- **Unknown alerts.** Only a positively identified orchestrator agent is treated
+  as commanded; nginx, nfsd, a stray `rm`, or a process whose `/proc` entry
+  vanished all still count. Matching is on the exact `-m orchestrator.agent`
+  invocation, not the bare word — a `rm -rf /opt/orchestrator-backup` must not
+  be able to silence the alarm.
+
+### Infrastructure — cache-catcher is under version control — 2026-09-16
+
+- The guard ran **only** from the container's `/log` volume: no history, no
+  review, no way to test a change before it was the thing guarding the cache.
+  Now vendored at `tools/cache_catcher/` with a deployment runbook.
+- `fanotify_guard.py` loads `libc.so.6` at import and cannot run off the NAS, so
+  the decision logic lives in a stdlib-only `delete_actor.py` that is linted,
+  tested (11 tests) and runs in CI. The guard itself is ruff-excluded and
+  deliberately **not** reformatted: the deployed file must stay byte-identical to
+  the reviewed one.
+
+
 ### Fixed — a malformed purge response no longer strands a false green — 2026-09-16
 
 - **#332, SEV-2.** `purge_handler` coerced the agent's counts with `int()`
