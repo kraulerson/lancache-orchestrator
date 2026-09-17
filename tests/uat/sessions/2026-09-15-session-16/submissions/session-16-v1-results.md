@@ -23,11 +23,11 @@ yourself. I currently don't have time.", 2026-09-16)
 | 4 | 26 | No game starved | **PASS** |
 | 5 | 27 | Kuma breaker monitor 216 green | **PASS** |
 | 6 | 27 | Decide whether PR #327 ships | **PASS** — merged + deployed 02:33 UTC |
-| 7 | 18 | Purge a disposable game | **BLOCKED** — job queued behind running sweep |
-| 8 | 18 | Purge did not arm the breaker | **BLOCKED** — depends on 7 |
-| 9 | 18 | Purged game re-prefills | **BLOCKED** — depends on 7 |
+| 7 | 18 | Purge a disposable game | **PASS** (resolved 2026-09-16 19:24) |
+| 8 | 18 | Purge did not arm the breaker | **PASS** (resolved 2026-09-16 19:24) |
+| 9 | 18 | Purged game re-prefills | **FAIL** — see #339, SEV-2 |
 
-**6 of 9 attempted, 5 clean passes, 1 partial, 3 blocked.**
+**9 of 9 attempted, 7 passes, 1 partial, 1 FAIL.**
 
 ### 1 — Sweep monitor 180: PASS
 
@@ -74,13 +74,50 @@ Decision taken and executed: merged, then deployed at 02:33 UTC in the gap after
 sweep 46579 completed. `jobs.reaper.no_orphans` confirms no job was killed.
 Verified live in the running container: `push -> bool`, `_BREAKER_RETRY_SEC` 60.0.
 
-### 7-9 — Purge: BLOCKED
+### 7 — Purge: PASS (resolved 2026-09-16 19:24:03)
 
 Purge triggered on **Alien Shooter** (id 300, 101 MB, smallest fully-cached Steam
-title) via `POST /api/v1/games/300/purge` → job 46589. Still `queued` after 150s
-of polling, because the single jobs worker is occupied by the running sweep. See
-Finding 3. The job remains queued and will execute when the sweep ends; scenarios
-8 and 9 depend on it.
+title) via `POST /api/v1/games/300/purge` → job 46589. It sat `queued` for over
+five hours behind the running sweep (Finding 3, now #331), then ran in **four
+seconds** once the worker freed up.
+
+| evidence | value |
+|---|---|
+| job 46589 | **succeeded**, 19:23:59 → 19:24:03 |
+| status after | **`not_downloaded`** — not `validation_failed` |
+| post-purge measurement | 657 chunks total, **0 cached**, outcome `missing` |
+| deletes observed by cache-catcher | **583**, matching the 583 chunks it held |
+
+This is the first production exercise of the #310/#321 delete-then-validate path.
+It behaved exactly as designed: cache truth came from a real measurement of the
+disk, not from the agent's delete counts.
+
+### 8 — Breaker not armed: PASS
+
+The transition row reads `up_to_date → not_downloaded`, `downward = 1`,
+**`commanded = 1`**. In the hour that followed: **0** breaker-visible downward
+transitions, 1 commanded (exempt), no trip and no refusal logged, Kuma 216 still
+green on its daily heartbeat. Migration 0016's `commanded` flag did precisely its
+job.
+
+### 9 — Purged game re-prefills: **FAIL** (#339, SEV-2)
+
+It does not. Verified over the following day:
+
+- `2026-09-17 12:29:48` — the host SteamPrefill cron ran and completed OK.
+- It **skipped Alien Shooter entirely**: zero depot requests for 33100/33101/33102
+  in the lancache access log on 17/Sep; the most recent is `06/Aug/2026`.
+- Cause: SteamPrefill's own `successfullyDownloadedDepots.json` (2375 entries)
+  still records app 33100 as downloaded. The cache was emptied underneath it.
+
+`handlers/purge.py` claims reversibility via "both in the set F5/F6 select on".
+That holds for **Epic**, where the orchestrator owns prefill and selects on
+status. It does not hold for **Steam** — 2540 of 3217 owned games — where prefill
+is the host cron driven by state the orchestrator never touches on purge.
+
+**Alien Shooter is currently purged and will not return on its own.** That is the
+real cost of running this scenario, and it is exactly what the scenario existed to
+discover.
 
 ## Findings
 
@@ -139,6 +176,8 @@ Observed directly: job 46589 still `queued` 150s after a 200-response trigger.
 
 ## Overall
 
+**Updated 2026-09-17** after the blocked scenarios resolved.
+
 The two features under test both work. #322 is proven end to end in production —
 a pass completed, the arithmetic closes, the monitor is green, zero evictions.
 #313 is deployed and verified present, though still unexercised because the
@@ -146,3 +185,21 @@ breaker has not tripped.
 
 The session's real value was elsewhere: Finding 1 is a bigger problem than either
 feature it was meant to test, and it was invisible until a full pass finished.
+
+
+## Addendum — 2026-09-17
+
+Scenarios 7 and 8 resolved overnight and both PASS: the purge path is now proven
+in production for the first time, and the `commanded` flag kept the breaker
+quiet as designed.
+
+Scenario 9 FAILED, and it is the most valuable result in this session. A purged
+**Steam** game never re-downloads, because SteamPrefill still records it as
+already fetched. Filed as **#339 (SEV-2)**. It was invisible until now precisely
+because the purge path had never run in production — which is the argument for
+running scenarios that look like formalities.
+
+One further finding came out of the purge landing: cache-catcher emailed an
+eviction alarm for the commanded delete, having logged the responsible process on
+every line and ignored it. Filed as #337, fixed, deployed and verified the same
+day.

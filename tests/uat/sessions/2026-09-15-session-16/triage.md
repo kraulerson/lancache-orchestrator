@@ -49,3 +49,34 @@ existed.
 Do **not** reset the feature counter yet. Two of nine scenarios remain
 unexecuted, and #329 arguably warrants its own remediation cycle before more
 feature work begins.
+
+
+## Addendum — 2026-09-17, after the blocked scenarios resolved
+
+| Issue | Sev | Title | Disposition |
+|---|---|---|---|
+| #339 | SEV-2 | A purged Steam game never re-downloads | **NEW — needs triage.** Found by scenario 9. |
+| #337 | SEV-3 | cache-catcher alarms on a commanded purge | **FIXED, deployed, closed** 2026-09-16 |
+| #332 | SEV-2 | Malformed purge response strands a false green | **FIXED, merged, closed** |
+| #329 | SEV-2 | Measurement gate excludes 1351 games | **CLOSED AS INVALID** — my analytical error |
+| Partial badge | SEV-3 | No testable surface in the UI | **FIXED** — Game_shelf PR #35 merged |
+
+### On #329
+
+Karl approved building a first-time prefill path for it. The design work
+disproved the premise before any code was written: the games are excluded by
+SteamPrefill's selection list, not by the measurement gate, and the population is
+681 DLC, 618 unidentified and 35 nominal games of which 8 are already blocked.
+Building the approved fix would have queued ~1341 downloads of DLC and Proton
+runtimes. Closed as invalid; 15 genuine coverage candidates recorded for the
+operator to decide on.
+
+### Remaining Fix Now work
+
+**#333** (three tests that pass without proving their property) is the only item
+still carrying a Fix Now recommendation and not yet done.
+
+### Gate
+
+Still should NOT be reset. Nine of nine scenarios have now been executed, but
+scenario 9 FAILED with a SEV-2, and #339 has not been triaged.
