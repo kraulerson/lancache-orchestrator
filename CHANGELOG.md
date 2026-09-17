@@ -19,6 +19,35 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — concurrent breaker trips notified six times, not once — 2026-09-17
+
+- **Found by writing the test #333 asked for.** `_breaker_notice_due()` checked,
+  then the Kuma push was **awaited**, then the clock was stamped. Two coroutines
+  could pass the check before either stamped — and the sweep validates games
+  concurrently (`sweep_batch_size` defaults to 2), so this is the shape
+  production runs. Measured: **six concurrent trips, six Kuma GETs**, against a
+  dedupe mechanism whose entire purpose is to emit one.
+- The slot is now **reserved before anything is awaited**. Check and reserve are
+  both synchronous, so no other coroutine can pass the check in between.
+  Reserving for the short backoff first keeps #313 intact: a push that turns out
+  to have failed costs 60 s of silence, not the whole window, and the
+  reservation is extended to the full window only on delivery.
+
+### Fixed — three tests now prove the property they are named for (#333) — 2026-09-17
+
+- **The backoff bound** was asserted by a tight sequential loop whose real elapsed
+  time is milliseconds; it would have passed identically if `_BREAKER_RETRY_SEC`
+  were an hour, or absent. Now driven by a controllable clock: suppressed at 59 s,
+  retried at 61 s, and a *delivered* push proved to hold for the full window
+  rather than the backoff.
+- **The check/stamp race** was never exercised concurrently. Now is — and it
+  failed, which is how the defect above was found.
+- **The sweep deadline** was only ever asserted at `sweep_batch_size: 1`, forced
+  in every test "for deterministic ordering", while production runs 2. Now proved
+  at 2: no game starts validating at or after the deadline. That property held —
+  it simply had never been demonstrated.
+
+
 ### Fixed — a purged Steam game comes back again — 2026-09-17
 
 - **#339, SEV-2.** Purging a Steam game deleted its chunks and left SteamPrefill's

@@ -265,6 +265,17 @@ async def record_measurement(
         in_window = (int(recent["n"]) if recent else 0) + 1
         if in_window >= settings.measurement_breaker_threshold:
             if _breaker_notice_due():
+                # RESERVE the slot before awaiting anything (#333). The check and
+                # this stamp are both synchronous, so no other coroutine can pass
+                # the check in between — under the concurrency the sweep actually
+                # runs (sweep_batch_size defaults to 2), several games trip in the
+                # same instant and every one of them used to push. Measured: six
+                # concurrent trips, six Kuma GETs.
+                #
+                # Reserving for the SHORT backoff keeps #313 intact: if the push
+                # turns out to have failed, the cost is 60s of silence, not the
+                # whole window.
+                _stamp_breaker_notice(delivered=False, window_minutes=window)
                 _log.error(
                     "measurement.breaker_tripped",
                     game_id=game_id,
@@ -274,9 +285,10 @@ async def record_measurement(
                     threshold=settings.measurement_breaker_threshold,
                 )
                 delivered = await _notify_breaker(in_window)
-                # Stamp AFTER the attempt, and only for the full window if the
-                # operator actually heard about it (#313).
-                _stamp_breaker_notice(delivered=delivered, window_minutes=window)
+                # Extend the reservation to the full window only once the operator
+                # has actually heard about it (#313).
+                if delivered:
+                    _stamp_breaker_notice(delivered=True, window_minutes=window)
                 if not delivered:
                     _log.warning(
                         "measurement.breaker_notice_undelivered",
