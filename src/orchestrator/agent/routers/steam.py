@@ -16,6 +16,7 @@ from orchestrator.agent.background import track_background_task
 from orchestrator.agent.manifest_archive import sync_manifests_to_archive
 from orchestrator.agent.manifest_locator import list_prefilled_app_ids, locate_manifest_bins
 from orchestrator.agent.manifest_parser import parse_chunk_shas, parse_shas
+from orchestrator.platform.steam.downloaded_depots import clear_downloaded_depots
 from orchestrator.platform.steam.selection_file import reconcile_selection
 from orchestrator.validator.cache_key import (
     cache_key,
@@ -573,11 +574,26 @@ async def steam_purge(body: SteamPurgeRequest, request: Request) -> dict[str, in
     paths = [p for dpaths in depot_paths.values() for p in dpaths]
     safe = under_cache_root(Path(settings.lancache_nginx_cache_path), paths)
     deleted, failed, freed = await purge_chunks(safe)
+
+    # #339: SteamPrefill skips any depot listed in successfullyDownloadedDepots
+    # .json, so emptying the cache underneath that record leaves the game gone
+    # for good — the next cron run sees "already fetched" and never re-fetches.
+    # Verified in production 2026-09-16/17: a purged game was skipped by a run
+    # that completed OK, and removing its depot key made the very next run pull
+    # it back. Only on a real delete: if nothing was removed there is nothing to
+    # undo, and rewriting the file would be pure risk.
+    cleared = 0
+    if deleted > 0:
+        cleared = await clear_downloaded_depots(
+            Path(settings.steam_prefill_config_dir) / "successfullyDownloadedDepots.json",
+            depot_paths.keys(),
+        )
     _log.info(
         "agent.steam_purge",
         app_id=body.app_id,
         deleted=deleted,
         failed=failed,
         bytes_freed=freed,
+        prefill_records_cleared=cleared,
     )
     return {"deleted": deleted, "failed": failed, "bytes_freed": freed}

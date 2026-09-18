@@ -78,6 +78,7 @@ print or copy the secret values anywhere — `ORCH_TOKEN` and the five
 | `ORCH_KUMA_PUSH_SCHEDULED_PREFILL` | *(secret URL)* | → Kuma 181 |
 | `ORCH_KUMA_PUSH_FETCH_MANIFESTS` | *(secret URL)* | → Kuma 182 |
 | `ORCH_KUMA_PUSH_MEASUREMENT_BREAKER` | *(secret URL)* | → Kuma 216, and read by the cron heartbeat in §1.2 |
+| `ORCH_KUMA_PUSH_DISK` | *(secret URL)* | → Kuma **217**, read by the disk cron in §1.3 |
 
 **Deliberately absent:** `ORCH_VALIDATION_SWEEP_ENABLED`. It defaults to `true`,
 so the scheduled validation sweep is on. Do not "helpfully" add it set to
@@ -198,6 +199,57 @@ gigabyte-scale DB; prune old ones deliberately, and keep at least the one
 matching the currently-deployed image tag.
 
 ---
+
+### 1.3 `/etc/cron.d/orch-disk-heartbeat`
+
+```
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/15 * * * * root U=$(grep '^ORCH_KUMA_PUSH_DISK=' /root/orch-lxc.env | cut -d= -f2-); \
+  P=$(df --output=pcent / | tail -1 | tr -dc '0-9'); \
+  [ -n "$U" ] && [ -n "$P" ] && { if [ "$P" -ge 85 ]; then \
+      curl -fsS -m 15 "$U?status=down&msg=LXC+root+${P}\%25+full" >/dev/null 2>&1; else \
+      curl -fsS -m 15 "$U?status=up&msg=LXC+root+${P}\%25+used" >/dev/null 2>&1; fi; }
+```
+
+**Every `%` MUST be backslash-escaped as `\%`.** crontab translates an unescaped
+`%` to a newline and passes everything after it to the command as stdin. The
+first version of this line used a bare `%25` (the URL-encoded `%` for the
+percentage sign), installed cleanly, reported no error anywhere, and **never
+ran** — the silent failure this monitor exists to prevent, in the monitor itself.
+It was caught only by waiting for a scheduled run instead of trusting a manual
+test. The breaker cron in §1.2 never hit this because its message contains no
+`%`.
+
+**Why this exists.** On 2026-09-18 the LXC root was found at **94% used, 1.3 GB
+free** — and the only warning was `pool.disk_low`, which the orchestrator had
+logged **939 times** into a file nobody reads. A full disk stops SQLite writing,
+which stops cache truth being recorded at all. The system knew for hours and had
+no way to say so.
+
+**Why a cron and not the application**, when `db/pool.py` already computes this:
+a filling disk is a **host** condition that takes the orchestrator down with it,
+so an in-app alert dies exactly when it is needed. The cron keeps pushing. It
+also needs no rebuild and no container recreate, so it never has to be scheduled
+around a running sweep.
+
+**Why 85%** — about 3 GB free on this 20 GB disk, which is roughly a week of
+headroom rather than the hours that were left when this was found.
+
+**Why every run pushes, up or down.** Kuma treats silence as DOWN, so a dead
+cron, a dead LXC or a wrong URL all surface as red. Same property that makes the
+breaker monitor (216) meaningful.
+
+**What actually fills this disk** — measured, because the obvious answers were
+wrong. The database is ~1.1 GB and 92% of it is the `manifests` table's
+compressed blobs (978 MB across 923 rows; ARK ModKit alone is 63 MB). Only
+**73.6 MB** of that is superseded versions, so the long-deferred "keep latest 3
+per game" pruning would recover ~7%. `measurement_transitions`, which
+PROJECT_BIBLE §5 long named as the retention concern, is **1.0 MB**.
+
+The 2026-09-18 incident was not the database at all: it was **3.3 GB of
+deploy-time DB backups**, 25 stale rollback images and a 1.96 GB Docker build
+cache. Clean those up after a deploy, or this recurs.
 
 ## 2 — NAS `192.168.1.30`: data-plane agent
 

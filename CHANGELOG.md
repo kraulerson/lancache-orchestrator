@@ -19,6 +19,137 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — the disk cron was installed broken and never ran — 2026-09-18
+
+- The first version of `/etc/cron.d/orch-disk-heartbeat` used a bare `%25` in the
+  push URL. **crontab translates an unescaped `%` to a newline** and passes the
+  remainder as stdin, so the command was silently truncated. It installed
+  cleanly, logged no error, and never fired — the exact silent failure the
+  monitor exists to prevent, occurring in the monitor itself.
+- Caught only by **waiting for a scheduled run** rather than trusting the manual
+  test, which had passed. Now escaped as `\%25`, with `SHELL`/`PATH` set to match
+  the working breaker cron, and verified firing autonomously at `14:00:01`.
+
+### Infrastructure — the disk can now tell you it is filling — 2026-09-18
+
+- **Kuma monitor 217 (`host:orch-lxc-disk`) + `/etc/cron.d/orch-disk-heartbeat`.**
+  The LXC root was found at **94% used, 1.3 GB free**, having logged
+  `pool.disk_low` **939 times** into a file nobody reads. A full disk stops
+  SQLite writing, which stops cache truth being recorded at all — the system knew
+  for hours and had no way to say so.
+- Every 15 minutes the cron pushes **down at >=85%**, up otherwise. 85% leaves
+  ~3 GB on this 20 GB disk: about a week of warning instead of hours. Because
+  every run pushes, a dead cron, a dead LXC or a wrong URL all surface as red,
+  the same property that makes the breaker monitor meaningful.
+- **Deliberately a cron, not application code**, even though `db/pool.py` already
+  computes this: a filling disk is a host condition that takes the orchestrator
+  down with it, so an in-app alert dies exactly when it is needed. It also needs
+  no rebuild or container recreate, so it never has to be scheduled around a
+  running sweep. Verified end to end — green push, then a forced red proving the
+  Telegram notification fires, then restored.
+
+### Documentation — the Bible named the wrong table for database growth — 2026-09-18
+
+- `PROJECT_BIBLE.md` §5 called `measurement_transitions` the retention concern at
+  "~1.7M rows/year". Measured: **18,766 rows, 1.0 MB** — wrong by two orders of
+  magnitude. The estimate assumed a row per measurement, but only a *transition*
+  writes one, and a converged library is mostly unchanged measurements.
+- The real consumer is **`manifests` at 978.8 MB — 92%** of the ~1.1 GB database
+  — from 923 blob rows. Only 73.6 MB is superseded versions, so the deferred
+  "keep latest 3 per game" pruning would recover ~7%; the rest is current and
+  needed. Growth is event-driven (649 MB during August's backfill, nothing
+  fetched since 2026-09-01), not a steady leak.
+- Recorded in `live-configuration.md` §1.3 that the 2026-09-18 disk incident was
+  **not** the database: 3.3 GB of deploy-time DB backups, 25 stale rollback
+  images and a 1.96 GB build cache. Clean up after a deploy or it recurs.
+
+
+### Fixed — concurrent breaker trips notified six times, not once — 2026-09-17
+
+- **Found by writing the test #333 asked for.** `_breaker_notice_due()` checked,
+  then the Kuma push was **awaited**, then the clock was stamped. Two coroutines
+  could pass the check before either stamped — and the sweep validates games
+  concurrently (`sweep_batch_size` defaults to 2), so this is the shape
+  production runs. Measured: **six concurrent trips, six Kuma GETs**, against a
+  dedupe mechanism whose entire purpose is to emit one.
+- The slot is now **reserved before anything is awaited**. Check and reserve are
+  both synchronous, so no other coroutine can pass the check in between.
+  Reserving for the short backoff first keeps #313 intact: a push that turns out
+  to have failed costs 60 s of silence, not the whole window, and the
+  reservation is extended to the full window only on delivery.
+
+### Fixed — three tests now prove the property they are named for (#333) — 2026-09-17
+
+- **The backoff bound** was asserted by a tight sequential loop whose real elapsed
+  time is milliseconds; it would have passed identically if `_BREAKER_RETRY_SEC`
+  were an hour, or absent. Now driven by a controllable clock: suppressed at 59 s,
+  retried at 61 s, and a *delivered* push proved to hold for the full window
+  rather than the backoff.
+- **The check/stamp race** was never exercised concurrently. Now is — and it
+  failed, which is how the defect above was found.
+- **The sweep deadline** was only ever asserted at `sweep_batch_size: 1`, forced
+  in every test "for deterministic ordering", while production runs 2. Now proved
+  at 2: no game starts validating at or after the deadline. That property held —
+  it simply had never been demonstrated.
+
+
+### Fixed — a purged Steam game comes back again — 2026-09-17
+
+- **#339, SEV-2.** Purging a Steam game deleted its chunks and left SteamPrefill's
+  `successfullyDownloadedDepots.json` untouched, so the next host cron run saw
+  "already fetched", skipped it, and the cache stayed empty **permanently**.
+  `purge.py` claims reversibility because an emptied cache lands in the set
+  prefill selects on — true for Epic, where the orchestrator owns prefill; false
+  for Steam (2540 of 3217 owned games), where prefill is the host cron driven by
+  that file.
+- Found by executing UAT session 16 scenario 9 against production — the first
+  end-to-end run of the purge path since #310/#321 shipped. Alien Shooter was
+  purged 19:24; the cron ran and completed OK the next day at 12:29 and issued
+  **zero** depot requests for it.
+- The agent now clears the purged app's depot entries after a **successful**
+  delete (`clear_downloaded_depots`), so the next prefill re-fetches. Verified by
+  hand first: removing the key made the very next run pull the game back — 584
+  depot requests, 583/583 chunks cached afterwards.
+- **Safety choices.** Only runs when something was actually deleted. An
+  unparseable file is left exactly as found — rewriting what we could not read
+  would discard SteamPrefill's record of the entire library to re-fetch one game.
+  The write is atomic. On the unavoidable race with SteamPrefill's own rewrite,
+  the worst case is our removal being lost, which is precisely today's behaviour
+  and never corruption.
+
+
+### Fixed — a commanded purge no longer raises an eviction alarm — 2026-09-16
+
+- **#337, SEV-3.** cache-catcher emailed `cache eviction detected (583 deletes/60s)`
+  for purge job 46589 deliberately deleting Alien Shooter's 583 chunks. Its own
+  log named the culprit on every line — `cmd=[/app/.venv/bin/python -m
+  orchestrator.agent]` — and the alert decision ignored it. The cost is not one
+  email: every future purge cries wolf, and the alert that matters (nginx's
+  cache-manager evicting from a full `keys_zone`, the 2026-07-31 mass-deletion
+  signature) arrives in an inbox trained to dismiss it.
+- Deletes are now classified by the deleting process. A commanded purge is
+  counted separately, reported as a **NOTICE** on its own cooldown so it can
+  never suppress a real eviction alert, and **excluded from the eviction
+  counter** — the same distinction the circuit breaker already makes via
+  `commanded = 1`. Eviction alerts now name the actor.
+- **Unknown alerts.** Only a positively identified orchestrator agent is treated
+  as commanded; nginx, nfsd, a stray `rm`, or a process whose `/proc` entry
+  vanished all still count. Matching is on the exact `-m orchestrator.agent`
+  invocation, not the bare word — a `rm -rf /opt/orchestrator-backup` must not
+  be able to silence the alarm.
+
+### Infrastructure — cache-catcher is under version control — 2026-09-16
+
+- The guard ran **only** from the container's `/log` volume: no history, no
+  review, no way to test a change before it was the thing guarding the cache.
+  Now vendored at `tools/cache_catcher/` with a deployment runbook.
+- `fanotify_guard.py` loads `libc.so.6` at import and cannot run off the NAS, so
+  the decision logic lives in a stdlib-only `delete_actor.py` that is linted,
+  tested (11 tests) and runs in CI. The guard itself is ruff-excluded and
+  deliberately **not** reformatted: the deployed file must stay byte-identical to
+  the reviewed one.
+
+
 ### Fixed — a malformed purge response no longer strands a false green — 2026-09-16
 
 - **#332, SEV-2.** `purge_handler` coerced the agent's counts with `int()`
