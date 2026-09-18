@@ -203,12 +203,23 @@ matching the currently-deployed image tag.
 ### 1.3 `/etc/cron.d/orch-disk-heartbeat`
 
 ```
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 */15 * * * * root U=$(grep '^ORCH_KUMA_PUSH_DISK=' /root/orch-lxc.env | cut -d= -f2-); \
   P=$(df --output=pcent / | tail -1 | tr -dc '0-9'); \
   [ -n "$U" ] && [ -n "$P" ] && { if [ "$P" -ge 85 ]; then \
-      curl -fsS -m 15 "$U?status=down&msg=LXC+root+${P}%25+full" >/dev/null 2>&1; else \
-      curl -fsS -m 15 "$U?status=up&msg=LXC+root+${P}%25+used" >/dev/null 2>&1; fi; }
+      curl -fsS -m 15 "$U?status=down&msg=LXC+root+${P}\%25+full" >/dev/null 2>&1; else \
+      curl -fsS -m 15 "$U?status=up&msg=LXC+root+${P}\%25+used" >/dev/null 2>&1; fi; }
 ```
+
+**Every `%` MUST be backslash-escaped as `\%`.** crontab translates an unescaped
+`%` to a newline and passes everything after it to the command as stdin. The
+first version of this line used a bare `%25` (the URL-encoded `%` for the
+percentage sign), installed cleanly, reported no error anywhere, and **never
+ran** — the silent failure this monitor exists to prevent, in the monitor itself.
+It was caught only by waiting for a scheduled run instead of trusting a manual
+test. The breaker cron in §1.2 never hit this because its message contains no
+`%`.
 
 **Why this exists.** On 2026-09-18 the LXC root was found at **94% used, 1.3 GB
 free** — and the only warning was `pool.disk_low`, which the orchestrator had

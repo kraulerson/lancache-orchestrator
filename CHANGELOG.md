@@ -19,6 +19,17 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — the disk cron was installed broken and never ran — 2026-09-18
+
+- The first version of `/etc/cron.d/orch-disk-heartbeat` used a bare `%25` in the
+  push URL. **crontab translates an unescaped `%` to a newline** and passes the
+  remainder as stdin, so the command was silently truncated. It installed
+  cleanly, logged no error, and never fired — the exact silent failure the
+  monitor exists to prevent, occurring in the monitor itself.
+- Caught only by **waiting for a scheduled run** rather than trusting the manual
+  test, which had passed. Now escaped as `\%25`, with `SHELL`/`PATH` set to match
+  the working breaker cron, and verified firing autonomously at `14:00:01`.
+
 ### Infrastructure — the disk can now tell you it is filling — 2026-09-18
 
 - **Kuma monitor 217 (`host:orch-lxc-disk`) + `/etc/cron.d/orch-disk-heartbeat`.**
