@@ -46,10 +46,11 @@
     "cache-validation-integrity",
     "validate-timeout-recalibration",
     "sweep-pass-marker",
-    "313-heartbeat-delivery-gates-dedupe-stamp"
+    "313-heartbeat-delivery-gates-dedupe-stamp",
+    "keys-zone-alarm"
   ],
-  "features_since_last_test": 0,
-  "features_since_last_health_check": 1,
+  "features_since_last_test": 1,
+  "features_since_last_health_check": 2,
   "test_interval": 2,
   "last_test_session": "2026-09-18",
   "testing_required": false,
