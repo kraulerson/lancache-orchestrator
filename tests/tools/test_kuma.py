@@ -13,9 +13,11 @@ guard at all.
 
 from __future__ import annotations
 
+import pathlib
 import urllib.parse
 
 import pytest
+import tools.cache_catcher.kuma as kuma_module
 from tools.cache_catcher.kuma import MSG_MAX_CHARS, push
 
 
@@ -89,3 +91,25 @@ def test_a_long_message_keeps_its_tail():
     query = urllib.parse.parse_qs(urllib.parse.urlparse(calls[0]).query)
     assert query["msg"][0].endswith("THE-REASON")
     assert len(query["msg"][0]) == MSG_MAX_CHARS
+
+
+def test_the_nosemgrep_suppression_names_the_fully_qualified_rule_id():
+    """A bare rule id in the suppression passes here and fails CI.
+
+    `no-urllib-on-main-loop` guards the orchestrator's asyncio loop (TM-015,
+    ADR-0001); this module has no event loop and cannot install httpx, so the
+    finding is suppressed on the import. But CI pins semgrep 1.36.0, which
+    matches nosemgrep comments only against the fully-qualified
+    `semgrep.`-prefixed id -- the namespace comes from loading the custom rules
+    out of `.semgrep/`. The semgrep used locally accepts the bare form, so a
+    bare id passes the pre-commit hook and then fails the SAST job on the exact
+    line carrying the suppression.
+
+    Shortening this back to a single id would re-break CI with no local signal,
+    which is why the invariant is pinned here rather than left to a comment.
+    """
+    source = pathlib.Path(kuma_module.__file__).read_text()
+    suppressed = [ln for ln in source.splitlines() if "nosemgrep" in ln and "import" in ln]
+
+    assert len(suppressed) == 1, "expected exactly one suppressed import"
+    assert "semgrep.no-urllib-on-main-loop" in suppressed[0]
