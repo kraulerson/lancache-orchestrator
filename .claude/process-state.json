@@ -1,13 +1,16 @@
 {
   "build_loop": {
-    "feature": null,
-    "step": 0,
-    "steps_completed": [],
-    "started_at": null
+    "feature": "keys-zone-alarm",
+    "step": 2,
+    "steps_completed": [
+      "tests_written",
+      "tests_verified_failing"
+    ],
+    "started_at": "2026-09-18T21:36:10Z"
   },
   "uat_session": {
     "session_id": 16,
-    "step": 7,
+    "step": 9,
     "steps_completed": [
       "agents_dispatched",
       "template_generated",
@@ -15,7 +18,9 @@
       "results_received",
       "completeness_verified",
       "bugs_consolidated",
-      "triage_complete"
+      "triage_complete",
+      "remediation_complete",
+      "gate_passed"
     ],
     "started_at": "2026-09-15T19:39:05Z"
   },
