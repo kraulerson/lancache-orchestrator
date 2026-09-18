@@ -46,10 +46,11 @@ the steps:
    Step 8 and Step 10 verifications; `log()` flushes stdout and also persists the
    line to `/log/deletions.log`.
 
-Two counts in this plan were off, harmlessly: the tests are **40**, not 29
-(pytest expands the parametrized cases to 8 + 32), and the pre-existing suite
-baseline is **1944**, not the 1867 quoted in `CLAUDE.md`. Full suite after this
-work: **1984 passed, 3 deselected**.
+Two counts in this plan were off, harmlessly: the tests are **41**, not 29
+(pytest expands the parametrized cases to 9 + 32, including a regression test
+added for the nosemgrep fix), and the pre-existing suite baseline is **1944**,
+not the 1867 quoted in `CLAUDE.md`. Full suite after this work: **1985 passed,
+3 deselected**.
 
 ## Global Constraints
 

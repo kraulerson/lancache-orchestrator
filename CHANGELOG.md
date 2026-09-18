@@ -47,7 +47,7 @@ for handoff clarity. Categories are ordered by impact severity.
   **shrinking** trend projects nothing, because a falling object count means
   eviction is already under way and extrapolating it answers a reassuring
   "never"; and an unknown sample, ceiling or trend pushes DOWN rather than
-  staying silent. 40 tests.
+  staying silent. 41 tests.
 
 ### Changed — the eviction tripwire can now prove it is alive — 2026-09-18
 

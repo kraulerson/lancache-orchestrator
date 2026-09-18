@@ -1773,12 +1773,12 @@ is alive.
     files/sec on this NAS under sweep load; a 54k-file walk took over five
     minutes during design.
 
-**Test Coverage:** 40 tests — `tests/tools/test_kuma.py` (8) and
+**Test Coverage:** 41 tests — `tests/tools/test_kuma.py` (9) and
 `tests/tools/test_key_budget.py` (32), weighted toward the degenerate cases
 rather than the happy path, because the metric is derived and a derived metric is
 only as trustworthy as its edges. `key_budget_probe.py` has no unit tests by
 design: every decision it could get wrong was moved into `key_budget.py` so it
-would not need them. Full suite: 1984 passed, 3 deselected. ruff / semgrep /
+would not need them. Full suite: 1985 passed, 3 deselected. ruff / semgrep /
 gitleaks clean.
 
 **Related:** spec

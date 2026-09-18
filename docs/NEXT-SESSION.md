@@ -51,7 +51,7 @@ Branch **`design/keys-zone-alarm`**, PR **#347**, 6 commits. Build Loop closed
 | `tools/cache_catcher/key_budget_probe.py` | I/O shell — dirs, `/proc`, CSV history, push |
 | `tools/cache_catcher/fanotify_guard.py` | two daemon threads beside the fanotify loop |
 
-Tests: **40** (8 + 32). Full suite **1984 passed, 3 deselected**. Phase 2.4
+Tests: **41** (9 + 32). Full suite **1985 passed, 3 deselected**. Phase 2.4
 audit: **0 findings** — `docs/security-audits/keys-zone-alarm-security-audit.md`.
 
 **Three Kuma monitors**, group 119, notification 3. DB backed up first to
