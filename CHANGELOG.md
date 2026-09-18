@@ -19,6 +19,40 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Infrastructure — the disk can now tell you it is filling — 2026-09-18
+
+- **Kuma monitor 217 (`host:orch-lxc-disk`) + `/etc/cron.d/orch-disk-heartbeat`.**
+  The LXC root was found at **94% used, 1.3 GB free**, having logged
+  `pool.disk_low` **939 times** into a file nobody reads. A full disk stops
+  SQLite writing, which stops cache truth being recorded at all — the system knew
+  for hours and had no way to say so.
+- Every 15 minutes the cron pushes **down at >=85%**, up otherwise. 85% leaves
+  ~3 GB on this 20 GB disk: about a week of warning instead of hours. Because
+  every run pushes, a dead cron, a dead LXC or a wrong URL all surface as red,
+  the same property that makes the breaker monitor meaningful.
+- **Deliberately a cron, not application code**, even though `db/pool.py` already
+  computes this: a filling disk is a host condition that takes the orchestrator
+  down with it, so an in-app alert dies exactly when it is needed. It also needs
+  no rebuild or container recreate, so it never has to be scheduled around a
+  running sweep. Verified end to end — green push, then a forced red proving the
+  Telegram notification fires, then restored.
+
+### Documentation — the Bible named the wrong table for database growth — 2026-09-18
+
+- `PROJECT_BIBLE.md` §5 called `measurement_transitions` the retention concern at
+  "~1.7M rows/year". Measured: **18,766 rows, 1.0 MB** — wrong by two orders of
+  magnitude. The estimate assumed a row per measurement, but only a *transition*
+  writes one, and a converged library is mostly unchanged measurements.
+- The real consumer is **`manifests` at 978.8 MB — 92%** of the ~1.1 GB database
+  — from 923 blob rows. Only 73.6 MB is superseded versions, so the deferred
+  "keep latest 3 per game" pruning would recover ~7%; the rest is current and
+  needed. Growth is event-driven (649 MB during August's backfill, nothing
+  fetched since 2026-09-01), not a steady leak.
+- Recorded in `live-configuration.md` §1.3 that the 2026-09-18 disk incident was
+  **not** the database: 3.3 GB of deploy-time DB backups, 25 stale rollback
+  images and a 1.96 GB build cache. Clean up after a deploy or it recurs.
+
+
 ### Fixed — concurrent breaker trips notified six times, not once — 2026-09-17
 
 - **Found by writing the test #333 asked for.** `_breaker_notice_due()` checked,

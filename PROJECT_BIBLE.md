@@ -271,7 +271,8 @@ Numbered `.sql` files in `src/orchestrator/db/migrations/` (ships as Python pack
 - `jobs`: 90-day prune for non-error rows, daily. Error rows kept indefinitely.
 - `manifests`: keep latest 3 versions per game, weekly prune.
 - `cache_observations`: 30-day prune, weekly (no-op in MVP).
-- `measurement_transitions`: **no retention policy yet** — one row per cache-truth write, observed or commanded (#310 added the commanded ones, which are bounded by operator purges and do not change the order of magnitude), on the order of 1.7M rows/year at current sweep rates. Only rows inside the breaker window are ever read; a periodic prune is a known follow-up.
+- `measurement_transitions`: no retention policy, and **measured 2026-09-18 as a non-issue**: 18,766 rows and **1.0 MB**. The earlier estimate here of ~1.7M rows/year was wrong by two orders of magnitude — it assumed a row per measurement, but only a *transition* writes one, and a converged library is mostly unchanged measurements. Only rows inside the breaker window are ever read. A prune remains possible but would reclaim nothing worth the risk.
+- **What actually consumes the database** (measured 2026-09-18, total ~1.1 GB): `manifests` is **978.8 MB — 92%** — from just 923 rows, because each stores a compressed manifest blob averaging ~1 MB (ARK ModKit alone is 63 MB). `validation_history` is 53.7 MB across 415,176 rows; everything else is under 4 MB combined. Of the manifest bytes only **73.6 MB** is superseded versions, so the long-deferred "keep latest 3 per game" pruning would recover ~7%; the remaining ~903 MB is the current manifest for each of 757 games and is needed. Growth is event-driven, not steady — 649 MB arrived in August during the manifest-fetcher backfill, and nothing has been fetched since 2026-09-01. Disk headroom is watched by Kuma monitor 217 (see `docs/deploy/live-configuration.md` §1.3).
 - `platforms`, `games`, `block_list`: never auto-pruned.
 
 ### 5.6 Concurrency model
