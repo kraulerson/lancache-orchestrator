@@ -317,6 +317,32 @@ Names and non-secret values: `ORCH_TOKEN` *(secret, matches the LXC)*,
 breaks Epic specifically, not Steam, so the failure looks platform-shaped rather
 than config-shaped. Env changes require a container **recreate**, not a restart.
 
+### 2.2a `cache-catcher`: `/log/alert.env` and `/log/keybudget.env` (not version controlled)
+
+Both live in the container's `/log` volume, which survives `docker rm`. Both hold
+credentials and are root-owned, mode `600`. `alert.env` holds the Gmail SMTP
+config; `keybudget.env` holds the three Kuma push URLs plus the gauge's tuning
+values:
+
+`KUMA_PUSH_KEY_BUDGET`, `KUMA_PUSH_CACHE_GUARD`, `KUMA_PUSH_CACHE_EVICTION`
+*(all three secret — a push URL is the whole credential)*, `SAMPLE_LEAVES=256`,
+`RAM_BUDGET_BYTES=9663676416`, `FLOOR=0.75`, `HORIZON_DAYS=90`,
+`PROBE_INTERVAL_SEC=86400`.
+
+Every key has a default in `key_budget_probe.DEFAULTS`, so a missing file is a
+working configuration with all three monitors disabled — an unset push URL
+disables that heartbeat rather than erroring. Write the file **directly on the
+NAS**; never paste a push URL into a commit, a log or a chat.
+
+`RAM_BUDGET_BYTES` is the honest ceiling on this host, not the configured one.
+`keys_zone=10000m` would need ~10 GiB of shared memory on a 15.4 GiB NAS that
+also carries an 8 GiB agent limit, so the host OOMs before the index fills
+(**#346** — needs a lancache restart, deliberately out of scope for the alarm).
+
+Changes to `keybudget.env` need a `docker restart cache-catcher`, not a recreate.
+That restart touches nothing that serves traffic or runs jobs, so it does not
+have to wait for an inter-sweep gap.
+
 ### 2.3 Before any recreate: sync manifests to the archive
 
 **Do this first, every time.** SteamPrefill's live manifest cache is
@@ -405,6 +431,27 @@ Uptime Kuma **v2.4.0**, systemd unit `uptime-kuma`, database
   bound to notification 3 on **2026-09-09**; before that they had **no
   notification binding at all** — they turned red on the dashboard and told
   nobody. If you add a monitor, binding it to a notification is not optional.
+
+- **`lancache:key-budget`** — push type, group **119**, notification **3**. Fed
+  every 24 h by the `key_budget_probe` thread inside `cache-catcher`. DOWN means
+  the cache index is over `FLOOR` (0.75 of the binding ceiling), or projected to
+  reach it inside `HORIZON_DAYS` (90), or that the sample or the ceiling could
+  not be read. Silence means the probe thread died.
+- **`lancache:cache-guard`** — push type, group **119**, notification **3**. Fed
+  every 15 min by the liveness thread. It answers **only** "is the guard process
+  running". Silence means the guard is dead.
+- **`lancache:cache-eviction`** — push type, group **119**, notification **3**.
+  Fed by the same 15-min thread, and immediately on an alert. It answers **only**
+  "is cache loss happening now": DOWN on an `eviction` or `mode000` alert,
+  latched DOWN for 1 h after the last one, UP otherwise.
+
+**Why `cache-guard` and `cache-eviction` are two monitors and not one:** a single
+monitor carrying both signals cannot distinguish "the guard is dead" from "the
+cache is being evicted". That is the same defect #326, #330 and #337 each
+describe, and it would have been the fourth instance. The latch exists because
+Kuma treats silence as DOWN, so the eviction monitor needs a heartbeat of its
+own — and without a latch the next heartbeat would flip it green 15 minutes into
+an incident that was still running.
 
 Verified live 2026-09-10: 176–182 and 216 all carry `notification_id = 3`.
 

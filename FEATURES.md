@@ -1708,3 +1708,94 @@ semgrep/gitleaks/ruff/mypy clean.
   - The refused-write log line still reports the same frozen `in_window` count on
     every refusal, so it cannot convey how large an incident actually is. Known
     and called out in #313; not addressed here.
+
+---
+
+## Feature 28: keys_zone Alarm (#346-adjacent)
+
+**Phase Built:** 2 (Construction)
+**Status:** Complete — pending live verification (2026-09-18)
+
+**Summary:** The cache index now has an alarm. The 2026-07-31 mass deletion was
+nginx's cache-manager evicting live game data from a ~94%-full `keys_zone`, and
+nothing in the system could see it coming: `df` does not measure the cache index,
+nginx OSS publishes no gauge for it, and the error log logged nothing at all
+through the full nine days. Two instruments now cover it — a **leading gauge**
+that derives occupancy by sampling leaf directories and compares it against the
+nearest real ceiling, and the **existing eviction tripwire** promoted from
+email-only to Uptime Kuma with a liveness heartbeat, so it can finally prove it
+is alive.
+
+**Key Interfaces:**
+  - `tools/cache_catcher/key_budget.py` — `summarise_sample`,
+    `zone_capacity_keys`, `ram_capacity_keys`, `effective_capacity`,
+    `project_days_to`, `verdict`; `KEYS_PER_MB = 8000` (nginx OSS),
+    `TOTAL_LEAVES = 65536` (`levels=2:2`)
+  - `tools/cache_catcher/kuma.py` — `push(url, status, msg) -> bool`, never raises
+  - `tools/cache_catcher/key_budget_probe.py` — `load_cfg`, `sample_cache`,
+    `nginx_rss_bytes`, `nginx_index_size_mb`, `run_once`, `probe_loop`
+  - `tools/cache_catcher/fanotify_guard.py` — `liveness_loop`,
+    `EVICT_ALERT_KINDS`, `LIVENESS_INTERVAL_SEC`, `EVICT_LATCH_SEC`
+  - `/log/keybudget.env` on the NAS (not version controlled)
+  - Kuma monitors `lancache:key-budget`, `lancache:cache-guard`,
+    `lancache:cache-eviction`, group 119, notification 3
+
+**Locked decisions:**
+  - **The ceiling is measured, not configured.** `keys_zone=10000m` would need
+    ~10 GiB of shared memory on a 15.4 GiB host that also carries an 8 GiB agent
+    limit, so the host OOMs before the index fills — the configured capacity is
+    unreachable. The gauge takes `min(zone_keys, ram_keys)` and **names** which
+    one binds, because a monitor that reports a number without saying what bounds
+    it cannot tell the operator what to do. Right-sizing the zone is #346 and
+    needs a lancache restart, so it was kept out.
+  - **An unreadable leaf is a read failure, never an empty one.** The first
+    measurement taken during design came out **13× low** (2.6M vs 35.6M) because
+    a permission-denied read on a mode-`0700` leaf looked exactly like an empty
+    directory, and it was internally plausible — the tell was that 72% of sampled
+    leaves reported "missing", which is impossible for uniform MD5.
+  - **A shrinking trend projects nothing.** A falling object count means eviction
+    is already under way; extrapolating it yields a negative slope and an answer
+    of "never", the single most dangerous output the function could produce.
+  - **Unknown never reads as safe.** A failed sample, an unreadable ceiling and
+    an insufficient history all push DOWN or say `trend unknown` in words. The
+    July incident ran for nine days on the strength of an absent signal being
+    read as a quiet one.
+  - **Two monitors for the tripwire, not one.** `cache-guard` answers only "is
+    the process running", `cache-eviction` only "is cache loss happening now". A
+    single monitor could not distinguish them — the defect #326, #330 and #337
+    each describe. `cache-eviction` latches DOWN for an hour after an alert,
+    because Kuma treats silence as DOWN so it needs its own heartbeat, and
+    without the latch the next one would flip it green mid-incident.
+  - **Threads inside the guard, not cron.** Each instrument gets its own monitor
+    so a partial failure stays visible, and it avoids the crontab `%`-escaping
+    trap that silently killed the first LXC disk monitor.
+  - **`listdir` only, never `stat`, on the daily path.** `stat` runs at ~180
+    files/sec on this NAS under sweep load; a 54k-file walk took over five
+    minutes during design.
+
+**Test Coverage:** 40 tests — `tests/tools/test_kuma.py` (8) and
+`tests/tools/test_key_budget.py` (32), weighted toward the degenerate cases
+rather than the happy path, because the metric is derived and a derived metric is
+only as trustworthy as its edges. `key_budget_probe.py` has no unit tests by
+design: every decision it could get wrong was moved into `key_budget.py` so it
+would not need them. Full suite: 1984 passed, 3 deselected. ruff / semgrep /
+gitleaks clean.
+
+**Related:** spec
+`docs/superpowers/specs/2026-09-18-keys-zone-alarm-design.md`; plan
+`docs/superpowers/plans/2026-09-18-keys-zone-alarm.md`; issue #346.
+
+**Known Limitations:**
+  - **The growth rate is not yet knowable.** 30.7M (Jul 31) → 34.4M (Aug 12) →
+    35.6M (Sep 18); the Aug→Sep delta is only ~3× the ±1% sampling error, so any
+    runway figure quoted today sits inside the noise of its own measurement. The
+    gauge reports `trend unknown` until its own consistently-sampled history
+    accumulates, and the static floor carries the load meanwhile.
+  - **The weekly mean-object-size measurement is deferred** — context-only in the
+    spec and never alarmed on, but it needs the expensive `stat` walk. Without it
+    `disk_keys` stays `unknown`, which the spec already permits. To be filed as a
+    follow-up issue.
+  - Mean object size measured 718 KiB against a 708 KiB break-even, so the disk
+    and key ceilings are only **1.4% apart** — any drift toward smaller
+    Epic-style objects tips the binding constraint from healthy LRU into silent
+    eviction.

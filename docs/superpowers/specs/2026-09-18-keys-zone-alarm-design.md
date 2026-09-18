@@ -306,3 +306,54 @@ unambiguously pathological and a gauge on it *can* tell healthy from broken. The
 substantive reason not to use a bare percentage is different — a percentage of
 the **configured** capacity is a number this host cannot reach, and 45 %-flat and
 45 %-climbing need different responses. Hence `min(zone, RAM)` plus a trend.
+
+---
+
+## Amendment — 2026-09-18, during implementation
+
+**The tripwire gets two monitors, not one.** Approved by Karl while executing the
+plan; it supersedes the single `lancache:cache-guard` row in the Kuma monitors
+table above.
+
+The design as written had `alert()` push DOWN and a liveness thread push UP, both
+to `lancache:cache-guard`, on a 15-minute clock. Those two facts together mean a
+real eviction turns the monitor red and the **next liveness tick turns it green
+again within 15 minutes**, while the eviction is still running. The email channel
+is unaffected and each down-transition still notifies, so nothing is lost
+outright — but the dashboard reads "resolved" when it is not, which is precisely
+the class of defect this whole feature exists to remove.
+
+Splitting the signal fixes it at the source rather than papering over it:
+
+| monitor | answers | silence means |
+|---|---|---|
+| `lancache:key-budget` | is the index filling | the probe thread died |
+| `lancache:cache-guard` | is the guard process running | the guard died |
+| `lancache:cache-eviction` | is cache loss happening now | the guard died |
+
+`cache-eviction` needs a heartbeat of its own, because Kuma treats silence as
+DOWN and a monitor that only ever receives DOWN pushes would sit permanently red.
+It therefore gets one from the same 15-minute thread, plus a latch:
+`EVICT_LATCH_SEC = 3600`, so it stays DOWN for an hour after the last `eviction`
+or `mode000` alert instead of flipping green mid-incident. `alert()` also pushes
+DOWN immediately, so the alarm is never delayed by up to a heartbeat interval.
+
+Both monitors are pushed from one thread and never with the same value, so a
+liveness tick cannot paint over a live eviction. A commanded `purge` still moves
+no monitor, unchanged — that was the point of #337.
+
+### Two corrections found while implementing
+
+- **The plan's alert `kind` strings were wrong.** It guessed `("evict",
+  "attrib")`; the call sites actually pass `"eviction"`, `"mode000"`, `"purge"`
+  and `"external"`. Implemented as `EVICT_ALERT_KINDS = ("eviction", "mode000")`,
+  read off the code. Had the guess shipped, no alert would ever have reached
+  Kuma — the tripwire promotion would have been silently inert, which is the
+  failure mode this feature is about.
+- **`no-urllib-on-main-loop` fires on `kuma.py`.** The custom Semgrep rule bans
+  `import urllib.request` outright, citing TM-015 and ADR-0001 — blocking I/O
+  starving the orchestrator's asyncio loop. `kuma.py` has no event loop and runs
+  in a container where `httpx` cannot be installed, so the rule's premise does
+  not hold. Suppressed at line level, with the rationale in the file, rather than
+  excluding the directory from the rule — the rule stays armed for every future
+  file in `tools/cache_catcher/`.

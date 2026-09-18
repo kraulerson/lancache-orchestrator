@@ -10,6 +10,47 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-18-keys-zone-alarm-design.md`
 
+## Execution record — 2026-09-18
+
+Tasks 1–4 are complete and committed; Task 5 is complete through Step 4. The
+seven remaining unticked boxes are all live-system steps. **Five things were
+built differently from what is written below** — the code that shipped is the
+authority, and the deviations are recorded here rather than by silently editing
+the steps:
+
+1. **The alert `kind` strings in Task 4 Step 2 were wrong.** The plan guessed
+   `("evict", "attrib")`; the call sites actually pass `"eviction"`, `"mode000"`,
+   `"purge"` and `"external"`. Shipped as
+   `EVICT_ALERT_KINDS = ("eviction", "mode000")`. Had the guess shipped, no alert
+   would ever have reached Kuma and the promotion would have been silently inert.
+   Task 4 Step 2 told the implementer to verify this against the code; it paid
+   for itself.
+2. **Three monitors, not two.** Approved by Karl during execution and recorded as
+   an amendment to the spec. `alert()` pushing DOWN and a liveness thread pushing
+   UP to the *same* monitor meant an eviction would go green again within 15
+   minutes while still running. `lancache:cache-eviction` is now its own monitor
+   with a 1 h latch (`EVICT_LATCH_SEC`), and `lancache:cache-guard` carries
+   liveness alone. Task 5 Steps 5 and 6 therefore cover **three** monitors and
+   three `KUMA_PUSH_*` keys.
+3. **f-strings, not `%` formatting,** in the three new modules. `tools/` is
+   excluded from CI lint but **not** from the local pre-commit hook, which runs
+   `ruff check` on staged files — and `UP031` rejects `%` formatting. Only
+   `fanotify_guard.py` is exempt in `pyproject.toml`, so the guard's own edits
+   keep `%` to match their surroundings. Behaviour is identical.
+4. **`no-urllib-on-main-loop` had to be adjudicated.** The custom Semgrep rule
+   fires on `kuma.py`. Suppressed at line level with the rationale in the file;
+   see the spec amendment and
+   `docs/security-audits/keys-zone-alarm-security-audit.md`.
+5. **`probe_loop` is given the guard's `log`, not the default `print`.** print
+   may sit in a buffer and never reach `docker logs`, which would break the
+   Step 8 and Step 10 verifications; `log()` flushes stdout and also persists the
+   line to `/log/deletions.log`.
+
+Two counts in this plan were off, harmlessly: the tests are **40**, not 29
+(pytest expands the parametrized cases to 8 + 32), and the pre-existing suite
+baseline is **1944**, not the 1867 quoted in `CLAUDE.md`. Full suite after this
+work: **1984 passed, 3 deselected**.
+
 ## Global Constraints
 
 - **Stdlib only.** Every file deployed into `cache-catcher` must import nothing beyond the Python standard library. The container has no `pip` packages.
@@ -73,7 +114,7 @@ Sampling maths lives in `key_budget.py`, **not** in the probe, so the part that 
 - Consumes: nothing.
 - Produces: `push(url: str | None, status: str, msg: str = "", opener=None) -> bool`. Returns `True` when delivered **or when no URL is configured** (a deliberate disable is nothing to retry); `False` only when a send was attempted and did not arrive. `MSG_MAX_CHARS = 200`, `TIMEOUT_SEC = 10.0`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 """Kuma push for cache-catcher — stdlib only, and it must never raise.
@@ -161,12 +202,12 @@ def test_a_long_message_keeps_its_tail():
     assert len(query["msg"][0]) == MSG_MAX_CHARS
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest tests/tools/test_kuma.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'tools.cache_catcher.kuma'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```python
 """Uptime Kuma push heartbeats for cache-catcher.
@@ -225,12 +266,12 @@ def push(url, status, msg="", opener=None):
         return False
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest tests/tools/test_kuma.py -v`
 Expected: PASS, 7 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 .venv/bin/ruff format tools/cache_catcher/kuma.py tests/tools/test_kuma.py
@@ -262,7 +303,7 @@ git commit -m "feat(cache-catcher): stdlib Kuma push helper"
 
   `history` is `[(epoch_seconds, objects), ...]` oldest first.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 """The keys_zone gauge's decision logic.
@@ -450,12 +491,12 @@ def test_the_message_names_the_binding_ceiling():
     assert "ram" in v.msg.lower()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest tests/tools/test_key_budget.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'tools.cache_catcher.key_budget'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```python
 """Is the lancache cache index running out of room, and how fast?
@@ -624,19 +665,19 @@ def verdict(sample, ceiling, history, floor=0.75, horizon_days=90.0):
     return Verdict("up", detail)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest tests/tools/test_key_budget.py -v`
 Expected: PASS, 22 tests.
 
-- [ ] **Step 5: Mark the Build Loop test steps**
+- [x] **Step 5: Mark the Build Loop test steps**
 
 ```bash
 scripts/process-checklist.sh --complete-step build_loop:tests_written
 scripts/process-checklist.sh --complete-step build_loop:tests_verified_failing
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 .venv/bin/ruff format tools/cache_catcher/key_budget.py tests/tools/test_key_budget.py
@@ -657,7 +698,7 @@ git commit -m "feat(cache-catcher): key-budget decision logic"
 
 This task has no unit tests: it is the I/O shell, and every decision it could get wrong was moved into Task 2 precisely so it would not need them. It is verified live in Task 5.
 
-- [ ] **Step 1: Write the implementation**
+- [x] **Step 1: Write the implementation**
 
 ```python
 """The keys_zone gauge: sample the cache, compare against the nearest ceiling,
@@ -851,7 +892,7 @@ def probe_loop(cfg, log=print):
         time.sleep(interval)
 ```
 
-- [ ] **Step 2: Verify it at least imports and the maths wires up**
+- [x] **Step 2: Verify it at least imports and the maths wires up**
 
 Run:
 ```bash
@@ -865,7 +906,7 @@ print('history of missing file:', p.read_history('/nonexistent'))
 ```
 Expected: `defaults ok: 0.75 256` and `history of missing file: []`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 .venv/bin/ruff format tools/cache_catcher/key_budget_probe.py
@@ -884,7 +925,7 @@ git commit -m "feat(cache-catcher): keys_zone gauge probe"
 - Consumes: `kuma.push`, `key_budget_probe.probe_loop`, `key_budget_probe.load_cfg`.
 - Produces: no new public API. Behaviour change only.
 
-- [ ] **Step 1: Add the imports and constants**
+- [x] **Step 1: Add the imports and constants**
 
 After the `delete_actor` import (line 26), add:
 
@@ -904,7 +945,7 @@ After `COOLDOWN = 900` (line 52), add:
 LIVENESS_INTERVAL_SEC = 900
 ```
 
-- [ ] **Step 2: Make an eviction alert reach Kuma**
+- [x] **Step 2: Make an eviction alert reach Kuma**
 
 In `alert()` (line 149), after `send_email(subject, body)`, add:
 
@@ -918,7 +959,7 @@ In `alert()` (line 149), after `send_email(subject, body)`, add:
 
 Confirm the `kind` strings against the two `alert(...)` calls at lines 293 and 311 and use whatever they actually pass; the commanded-purge call at line 277 must NOT be included.
 
-- [ ] **Step 3: Add the liveness thread and start both threads**
+- [x] **Step 3: Add the liveness thread and start both threads**
 
 Add above `main()`:
 
@@ -943,7 +984,7 @@ At the top of `main()` (line 321), after the existing startup log line, add:
         threading.Thread(target=target, args=(cfg,), daemon=True).start()
 ```
 
-- [ ] **Step 4: Verify the guard still parses**
+- [x] **Step 4: Verify the guard still parses**
 
 `fanotify_guard.py` cannot be imported off the NAS (it loads `libc.so.6` at module scope), so syntax is all that can be checked here:
 
@@ -952,12 +993,12 @@ PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m py_compile tools/cache_catcher/f
 ```
 Expected: `syntax OK`
 
-- [ ] **Step 5: Run the whole suite to prove nothing regressed**
+- [x] **Step 5: Run the whole suite to prove nothing regressed**
 
 Run: `PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest`
 Expected: 1867 + 29 new tests passing, 3 deselected.
 
-- [ ] **Step 6: Mark implementation and commit**
+- [x] **Step 6: Mark implementation and commit**
 
 ```bash
 scripts/process-checklist.sh --complete-step build_loop:implemented
@@ -973,19 +1014,19 @@ git commit -m "feat(cache-catcher): push eviction and liveness to Kuma"
 **Files:**
 - Modify: `tools/cache_catcher/README.md`, `CHANGELOG.md`, `FEATURES.md`, `docs/deploy/live-configuration.md`
 
-- [ ] **Step 1: Update the README**
+- [x] **Step 1: Update the README**
 
 Add a section documenting: the two instruments and which Kuma monitor each feeds; that `/log/keybudget.env` holds `KUMA_PUSH_KEY_BUDGET`, `KUMA_PUSH_CACHE_GUARD`, `RAM_BUDGET_BYTES`, `FLOOR`, `HORIZON_DAYS`, `SAMPLE_LEAVES` and is **not** version controlled; and that counting the cache must be done as root inside a container because some leaf dirs are mode 0700 and a denied read looks identical to an empty one.
 
-- [ ] **Step 2: Update CHANGELOG.md and FEATURES.md**
+- [x] **Step 2: Update CHANGELOG.md and FEATURES.md**
 
 `CHANGELOG.md` under `[Unreleased]` → **Added** and **Infrastructure**. `FEATURES.md` gains the feature row. Reference the spec, this plan, and issue #346.
 
-- [ ] **Step 3: Update `docs/deploy/live-configuration.md`**
+- [x] **Step 3: Update `docs/deploy/live-configuration.md`**
 
 Add the two monitors to §3.1 and the `/log/keybudget.env` variables to the secrets table. Record that both are bound to notification 3.
 
-- [ ] **Step 4: Mark documentation and commit**
+- [x] **Step 4: Mark documentation and commit**
 
 ```bash
 scripts/process-checklist.sh --complete-step build_loop:security_audit
