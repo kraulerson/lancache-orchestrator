@@ -68,26 +68,30 @@ or 24 hours past the last commit touching this file.
   in 24 h, and `ORCH_MEASUREMENT_BREAKER_THRESHOLD` is no longer set in
   `/root/orch-lxc.env`, so the code default of 25 applies again — the temporary
   raise used during the convergence passes has been removed.
-- **Recent work (2026-09-14) — the sweep pass marker (#311, merged, NOT yet
-  deployed):** a full pass costs ~12.5 h (8.1 TiB at ~650 GiB/h) against a 6 h
-  `job_max_runtime_sec`, so `sweep.completed` could never fire and 15 of 16
-  sweeps since 0015 were recorded `failed`. Migration 0017 adds a one-row
-  `sweep_pass` marker; candidates are gated on `pass_started_at`, so an empty
-  candidate set is a proof of coverage and emits **`sweep.pass_completed`**. A
-  sweep that runs out of time now stops **between games** at
-  `job_max_runtime_sec - ORCH_SWEEP_DEADLINE_MARGIN_SEC` (default 1800) and
-  returns `pass N partial: X/Y games, A of B TiB` — the job **succeeds** and the
-  Kuma sweep monitor goes green on a partial. Consequences: **`failed` on a
-  sweep now means genuinely broken** (only a tripped breaker or an unhandled
-  exception), and green on Kuma 180 means "the schedule is running", NOT "the
-  library is covered" — read the message for that. Also closes #314. `full`
-  sweeps are not pass-gated and never advance the marker. A pass is still
-  ~12.5 h; this makes it legible, not faster.
-- **Known live rough edge:** container recreates reap the running sweep — 12 of
-  the 15 failures, two of them self-inflicted during UAT 15. Recreate in the gap
-  after a sweep ends, never mid-pass. `ORCH_SWEEP_BATCH_SIZE` is back to `2`
-  (the 2 → 4 raise on 2026-09-11 bought nothing; the NAS is disk-bound and the
-  real lever is the NVMe bcache re-attach).
+- **Recent work (2026-09-15 → 18) — see `docs/NEXT-SESSION.md` for the full
+  handoff.** Nine issues closed, six fixes deployed and verified live: #311 sweep
+  pass marker (migration 0017), #313 breaker heartbeat delivery, #332 purge count
+  parsing, #333 breaker notice race, #337 cache-catcher commanded-vs-eviction,
+  #339 purge reversibility, plus Kuma monitor **217** for LXC disk.
+- **#311 is proven in production.** Pass 1 completed 2026-09-16 01:22; **10 sweeps
+  succeeded and 0 failed** since, against a baseline of 15 of 16 FAILED. A real
+  pass takes **~16.4 h across 3 runs** — use that figure, not the old ~12.5 h
+  estimate. Now on pass 5.
+- **Purging a Steam game is reversible again (#339).** It previously deleted the
+  cache while SteamPrefill still recorded the depot as downloaded, so the game
+  never came back. The agent now clears that record on a successful delete.
+- **GATE IS BLOCKED** — `test-gate.sh --check-batch` fails; UAT 16 ran but never
+  closed (9 scenarios executed: 7 pass, 1 partial, 1 FAIL). Its artifacts and
+  checklist state are on the **unmerged branch `uat/session-16`**, which is why
+  `process-checklist.sh --status` misreports "Session: 15".
+- **Known live rough edges:** container recreates still reap a running sweep, and
+  inter-sweep gaps are only ~30 min — stage slow deploy steps while the old
+  container serves. `ORCH_SWEEP_BATCH_SIZE` stays at `2`; the NVMe bcache
+  re-attach is the real throughput lever.
+- **Highest-value open work:** the **keys_zone alarm** — the 2026-07-31 mass
+  deletion was nginx evicting because the in-memory key index filled, which `df`
+  cannot see. Still unfiled. Do NOT copy the LXC disk alarm for it: `/volume1` is
+  meant to fill and evict.
 
 **Authoritative sources — prefer these over this summary, which is a snapshot:**
 `FEATURES.md` (what exists) · `CHANGELOG.md` (what changed) · `PROJECT_BIBLE.md`
