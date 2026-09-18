@@ -22,7 +22,13 @@ import urllib.parse
 # module runs in the cache-catcher container, which has no event loop, no
 # asyncio and no pip packages -- httpx.AsyncClient is not installable there. The
 # call blocks one dedicated daemon thread for at most TIMEOUT_SEC.
-import urllib.request  # nosemgrep: no-urllib-on-main-loop
+#
+# Both spellings of the id are listed because CI pins semgrep 1.36.0, which
+# matches only the fully-qualified `semgrep.`-prefixed form -- the namespace
+# comes from loading the rules out of `.semgrep/` -- while the 1.175 used
+# locally accepts the bare one. An id that matches nothing is ignored, so
+# listing both works on either version and survives a CI upgrade.
+import urllib.request  # nosemgrep: semgrep.no-urllib-on-main-loop,no-urllib-on-main-loop
 
 # Kuma stores the message and shows it on the monitor. An unbounded blob does not
 # belong in a URL, and the useful part of a failure is its tail.
