@@ -80,18 +80,23 @@ or 24 hours past the last commit touching this file.
 - **Purging a Steam game is reversible again (#339).** It previously deleted the
   cache while SteamPrefill still recorded the depot as downloaded, so the game
   never came back. The agent now clears that record on a successful delete.
-- **GATE IS BLOCKED** — `test-gate.sh --check-batch` fails; UAT 16 ran but never
-  closed (9 scenarios executed: 7 pass, 1 partial, 1 FAIL). Its artifacts and
-  checklist state are on the **unmerged branch `uat/session-16`**, which is why
-  `process-checklist.sh --status` misreports "Session: 15".
+- **Gate is CLEAR again (2026-09-18).** `uat/session-16` merged as PR #345, and
+  Karl closed UAT 16 at 9/9 — `test-gate.sh --check-batch` returns 0. The old
+  "misreports Session: 15" warning is obsolete; the checklist is accurate.
 - **Known live rough edges:** container recreates still reap a running sweep, and
   inter-sweep gaps are only ~30 min — stage slow deploy steps while the old
   container serves. `ORCH_SWEEP_BATCH_SIZE` stays at `2`; the NVMe bcache
   re-attach is the real throughput lever.
-- **Highest-value open work:** the **keys_zone alarm** — the 2026-07-31 mass
-  deletion was nginx evicting because the in-memory key index filled, which `df`
-  cannot see. Still unfiled. Do NOT copy the LXC disk alarm for it: `/volume1` is
-  meant to fill and evict.
+- **Highest-value open work — the keys_zone alarm, now HALF BUILT
+  (2026-09-18).** Design approved and plan written; 29 tests committed and
+  deliberately failing. Resume from **`docs/NEXT-SESSION.md`**, branch
+  `design/keys-zone-alarm`, Build Loop `keys-zone-alarm` at 2/6. Spec:
+  `docs/superpowers/specs/2026-09-18-keys-zone-alarm-design.md`.
+  **Measured while designing it: the zone is provisioned beyond what the NAS has
+  RAM to hold** — `10000m` needs ~10 GiB on a 15.4 GiB host carrying an 8 GiB
+  agent limit, so the host OOMs before the index fills (**issue #346**, out of
+  scope for the alarm because it needs a lancache restart). The alarm therefore
+  measures its ceiling from live RAM, not from the configured number.
 
 **Authoritative sources — prefer these over this summary, which is a snapshot:**
 `FEATURES.md` (what exists) · `CHANGELOG.md` (what changed) · `PROJECT_BIBLE.md`
