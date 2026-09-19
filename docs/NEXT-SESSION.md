@@ -10,33 +10,41 @@ survives at commit `c5046c5`.
 
 ## Start here
 
-The keys_zone alarm is **merged, deployed and running**. PR #347 and PR #349 both
-landed on 2026-09-19. There is no half-built feature to resume and nothing is
-blocked.
+The keys_zone alarm is **merged, deployed and running, and both of its schedules
+are now proven on real slots**. PR #347 and PR #349 landed 2026-09-19. There is
+no half-built feature to resume and nothing is blocked.
 
-**One thing is still unverified.** Confirm the **24 h gauge fired on a real
-slot**. The liveness thread is now thoroughly proven — after 18 h 15 m, monitors
-219 and 220 had **74 heartbeats each, 0 down**, exactly on the 15-minute cadence
-with no drift and no gaps. But the daily gauge on monitor **218 has run only
-once, at startup**. A manual invocation proves nothing about a schedule; the LXC
-disk monitor's `%` bug passed its manual test and then never ran once.
+The 24 h gauge fired unattended at **`2026-09-19T22:37:18`**:
 
-It is next due around **22:37 UTC** each day (the probe sleeps 86400 s from
-process start, so the slot moves if the container is restarted).
-
-```sh
-ssh karl@192.168.1.30 'docker exec cache-catcher tail -3 /log/key_budget.csv'
-# expect a SECOND row roughly 24h after 1789771023
+```
+2026-09-18T22:37:10+0000 KEY-BUDGET up: 35.8M objects, 48% of ram ceiling 75.2M, trend unknown
+2026-09-19T22:37:18+0000 KEY-BUDGET up: 35.7M objects, 48% of ram ceiling 75.0M, trend unknown
 ```
 
-```sh
-ssh root@10.100.23.57 'python3 -c "
-import sqlite3
-c = sqlite3.connect(\"file:/opt/uptime-kuma/data/kuma.db?mode=ro\", uri=True)
-for r in c.execute(\"SELECT monitor_id,count(*) FROM heartbeat WHERE monitor_id IN (218,219,220) GROUP BY monitor_id\"):
-    print(r)"'
-# 218 should be >1 by then; 219 and 220 climb every 15 min
 ```
+218 key-budget        2 beats, 0 down | last 2026-09-19 22:37:18
+219 cache-guard      97 beats, 0 down | last 2026-09-19 22:37:04
+220 cache-eviction   97 beats, 0 down | last 2026-09-19 22:37:04
+```
+
+Two things that cycle taught, both worth keeping:
+
+- **The 8-second drift is expected, not a defect.** 86,408 s measured against a
+  configured 86,400 s. `probe_loop` is work-then-sleep, so each cycle starts one
+  sampling-duration later than the last. Do not "fix" it with a wall-clock
+  scheduler; nothing here needs that precision.
+- **The negative-slope guard ran in production on its first real cycle.** Day
+  two read lower than day one (35,782,656 → 35,670,016, −0.31 %, inside the ±1 %
+  sampling error, so noise rather than eviction). A falling count makes
+  `project_days_to()` return `None`, so the verdict says `trend unknown` instead
+  of extrapolating a decline into a reassuring "never". Previously unit-tested
+  only.
+
+**What is still unproven: monitor 220 actually going DOWN.** No eviction or
+mode-000 alert has fired since the promotion, so the alarm path is tests-only —
+the same shape of gap #317 tracks for `record_job_outcome()`. Exercising it
+safely means creating and deleting 10+ md5-named files inside a scratch
+directory on the watched filesystem within 60 s.
 
 ---
 
@@ -82,19 +90,26 @@ the guess shipped, no alert would ever have reached Kuma and the whole tripwire
 promotion would have been silently inert. The plan's own instruction to verify
 them against the code is what caught it.
 
-## Live numbers, 2026-09-18 — re-verify before trusting
+## Live numbers, 2026-09-19 — re-verify before trusting
 
 ```
-first run   KEY-BUDGET up: 35.8M objects, 48% of ram ceiling 75.2M, trend unknown
+day 1       KEY-BUDGET up: 35.8M objects, 48% of ram ceiling 75.2M, trend unknown
+day 2       KEY-BUDGET up: 35.7M objects, 48% of ram ceiling 75.0M, trend unknown
 hand count  90 leaves, 0 read failures, 50366 files -> 36.7M  (agrees within 2.5%)
-bytes/key   128.5 measured live  (design measured 146; re-measured every run)
-history     /log/key_budget.csv -> 1789771023,35782656,4598390784,128.50892857142858
+bytes/key   128.5 then 128.9 measured live  (design measured 146; re-measured every run)
+history     /log/key_budget.csv
+              1789771023,35782656,4598390784,128.50892857142858
+              1789857431,35670016,4598689792,128.9231210885916
 ```
 
-`trend unknown` is correct and will stay so until the history file accumulates.
-**Do not quote a runway number as fact** — 30.7 M (Jul 31) → 34.4 M (Aug 12) →
-35.6 M (Sep 18), and the Aug→Sep delta is only ~3× the sampling error, so any
-runway figure sits inside the noise of its own measurement.
+The RAM ceiling moved 75.2M → 75.0M purely because measured `bytes_per_key` rose
+128.5 → 128.9. That is the design working, not drift to investigate.
+
+`trend unknown` is correct and will stay so for a while yet. **Do not quote a
+runway number as fact** — 30.7 M (Jul 31) → 34.4 M (Aug 12) → 35.8 M (Sep 18) →
+35.7 M (Sep 19). Two of those gaps are smaller than the ±1 % sampling error, and
+the most recent is *negative*, so any runway figure sits inside the noise of its
+own measurement.
 
 ---
 
