@@ -10,18 +10,19 @@ survives at commit `c5046c5`.
 
 ## Start here
 
-The keys_zone alarm is **built, deployed and verified live**. There is no
-half-built feature to resume. Two things need attention:
+The keys_zone alarm is **merged, deployed and running**. PR #347 and PR #349 both
+landed on 2026-09-19. There is no half-built feature to resume and nothing is
+blocked.
 
-1. **Merge PR #349 first, then PR #347.** #349 bumps `anyio` 4.13.0 → 4.14.2 for
-   two newly-published CVEs pinned on `main` and unrelated to the alarm. Until it
-   lands, #347's Dependencies check stays red and branch protection blocks the
-   merge. Every other check on #347 passes.
-2. **Confirm the 24 h gauge fired on a real slot.** The 15-minute liveness tick
-   was verified firing on schedule — 22:52:02, exactly 900 s after startup — but
-   the daily gauge has run only once, at startup. A manual invocation proves
-   nothing about a schedule; the LXC disk monitor's `%` bug passed its manual
-   test and then never ran once.
+**One thing is still unverified.** Confirm the **24 h gauge fired on a real
+slot**. The liveness thread is now thoroughly proven — after 18 h 15 m, monitors
+219 and 220 had **74 heartbeats each, 0 down**, exactly on the 15-minute cadence
+with no drift and no gaps. But the daily gauge on monitor **218 has run only
+once, at startup**. A manual invocation proves nothing about a schedule; the LXC
+disk monitor's `%` bug passed its manual test and then never ran once.
+
+It is next due around **22:37 UTC** each day (the probe sleeps 86400 s from
+process start, so the slot moves if the container is restarted).
 
 ```sh
 ssh karl@192.168.1.30 'docker exec cache-catcher tail -3 /log/key_budget.csv'
@@ -41,8 +42,11 @@ for r in c.execute(\"SELECT monitor_id,count(*) FROM heartbeat WHERE monitor_id 
 
 ## What was built
 
-Branch **`design/keys-zone-alarm`**, PR **#347**, 6 commits. Build Loop closed
-**6/6**; the feature gate is clear at 1 of 2 until the next UAT session.
+PR **#347**, merged 2026-09-19 (branch `design/keys-zone-alarm`, now deleted).
+Build Loop closed **6/6**; the feature gate is clear at 1 of 2 until the next UAT
+session. All four deployed files are byte-identical to `main` — `kuma.py` was
+re-synced after the merge **without a container restart**, since the only
+difference was a comment and a restart would have reset the 24 h probe timer.
 
 | file | role |
 |---|---|
