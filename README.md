@@ -10,14 +10,34 @@ Existing cache-prefill tools (SteamPrefill, EpicPrefill) track what they *think*
 
 ## Quickstart
 
-Deployment instructions land in Phase 4 (`docs/INCIDENT_RESPONSE.md`, `RELEASE_NOTES.md`, and `HANDOFF.md`). Until then, the service is built and tested but not yet packaged for production install. Developers wanting to run the test suite locally:
+**This system runs in production.** It has been live since 2026-08 across two
+hosts — a Proxmox LXC control plane and a NAS data-plane agent beside lancache
+itself — tracking roughly 35.7 million cached objects. It is a personal
+deployment, not a packaged product: there is no installer, no published image
+tag you should pull blindly, and no multi-tenant story.
+
+To install or rebuild it: **[`docs/deploy/INSTALL.md`](docs/deploy/INSTALL.md)**.
+For what the running system is configured to do right now, including the values
+that are load-bearing: [`docs/deploy/live-configuration.md`](docs/deploy/live-configuration.md).
+
+Some Phase 3/4 paperwork is still missing — `docs/INCIDENT_RESPONSE.md`,
+`HANDOFF.md`, `USER_GUIDE.md`, `SECURITY.md` and `sbom.json` do not exist yet,
+and no version has been tagged (every `CHANGELOG.md` entry is still under
+`[Unreleased]`). The project is in Phase 2 (Construction). That is a gap in the
+paperwork, not in the deployment.
+
+To run the test suite locally:
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest tests/
+PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest
 ```
+
+The `PATH` prefix is required: without it `tests/test_licenses.py` false-fails on
+a `pip-licenses` binary that is installed in `.venv/bin` but not otherwise on
+`PATH`.
 
 ## Configuration
 
@@ -169,6 +189,8 @@ nft add rule inet filter input tcp dport 8765 drop
 | `docs/phase-0/`, `docs/phase-1/` | Frontloaded design artifacts (FRD, threat model, data contract, interface spec) |
 | `docs/superpowers/specs/` | Feature design specs |
 | `docs/superpowers/plans/` | Feature implementation plans |
+| `docs/deploy/` | Install guide, live-configuration reference, host migration runbooks |
+| `tools/cache_catcher/` | The NAS-side fanotify guard and keys_zone gauge — stdlib-only, deployed by file copy rather than image |
 | `migrations/` (legacy) | Schema migrations now live under `src/orchestrator/db/migrations/` and ship as Python package data |
 
 ## Documentation map
@@ -176,10 +198,15 @@ nft add rule inet filter input tcp dport 8765 drop
 | What you want | Where to look |
 |---|---|
 | What does this thing do, and why? | [`PRODUCT_MANIFESTO.md`](PRODUCT_MANIFESTO.md), [`PROJECT_BIBLE.md`](PROJECT_BIBLE.md) §1–§3 |
+| **How do I install or rebuild it?** | **[`docs/deploy/INSTALL.md`](docs/deploy/INSTALL.md)** |
+| What is the running system configured to do? | [`docs/deploy/live-configuration.md`](docs/deploy/live-configuration.md) |
+| Where does it run, and why two hosts? | [`PROJECT_BIBLE.md`](PROJECT_BIBLE.md) §3.5 |
 | What's been built so far? | [`FEATURES.md`](FEATURES.md), [`CHANGELOG.md`](CHANGELOG.md) |
 | Architecture decisions | [`docs/ADR documentation/`](docs/ADR%20documentation/) |
+| Monitoring and alerting | [`PROJECT_BIBLE.md`](PROJECT_BIBLE.md) §8.5–§8.7, [`tools/cache_catcher/README.md`](tools/cache_catcher/README.md) |
 | Security posture and threat model | `PROJECT_BIBLE.md` §3, `docs/phase-1/threat-model.md`, `docs/security-audits/` |
 | API surface (when shipped) | `docs/phase-1/interface-spec.md`, [`PROJECT_BIBLE.md`](PROJECT_BIBLE.md) §9 |
+| Current state for a fresh session | [`CLAUDE.md`](CLAUDE.md), [`docs/NEXT-SESSION.md`](docs/NEXT-SESSION.md) |
 | How to contribute / agent prompts | [`CLAUDE.md`](CLAUDE.md) |
 
 ## License
