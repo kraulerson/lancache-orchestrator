@@ -98,12 +98,25 @@ or 24 hours past the last commit touching this file.
   the #326/#330/#337 defect.
   First live run: `35.8M objects, 48% of ram ceiling 75.2M, trend unknown`,
   cross-checked against an independent hand count taken as root inside
-  `lancache-monolithic` (36.7M, agreeing within 2.5%). After **18 h 15 m**: 219
-  and 220 at **74 heartbeats each, 0 down**, exactly on the 15-minute cadence
-  with no drift or gaps. **Still not observed: the 24 h gauge cycle on a real
-  slot** — 218 has the one startup heartbeat, next due ~22:37 UTC daily. Verify
-  with `docker exec cache-catcher tail -3 /log/key_budget.csv` (expect a second
-  row after `1789771023`).
+  `lancache-monolithic` (36.7M, agreeing within 2.5%).
+  **Both schedules are now proven on real slots (2026-09-19 22:45 UTC).** The
+  24 h gauge fired unattended at `2026-09-19T22:37:18` — `35.7M objects, 48% of
+  ram ceiling 75.0M, trend unknown` — giving 218 its second heartbeat and
+  `/log/key_budget.csv` its second row. 219 and 220 stood at **97 heartbeats
+  each, 0 down**, on the 15-minute cadence. Cycle length measured 86,408 s
+  against a configured 86,400 s: the probe's own ~8 s sampling time, because the
+  loop is work-then-sleep rather than a fixed wall clock. Harmless at this
+  cadence and **not** a bug to chase.
+  **The negative-slope guard has now been exercised in production.** Day two
+  read *lower* than day one (35,782,656 → 35,670,016, −0.31%, well inside the
+  ±1 % sampling error, so noise and not eviction). Because the slope was
+  negative, `project_days_to()` returned `None` and the verdict said `trend
+  unknown` — rather than extrapolating a falling count into a reassuring
+  "never", which the spec calls the most dangerous output the function could
+  give. That path was previously covered only by a unit test.
+  **Still unproven: monitor 220 actually going DOWN.** No eviction or mode-000
+  alert has fired since the promotion, so the alarm path remains tests-only —
+  the same shape of gap #317 tracks for `record_job_outcome()`.
   **The zone is still provisioned beyond what the NAS has RAM to hold** —
   `10000m` needs ~10 GiB on a 15.4 GiB host carrying an 8 GiB agent limit, so the
   host OOMs before the index fills (**issue #346**, out of scope for the alarm
