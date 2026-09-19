@@ -16,6 +16,7 @@ import smtplib
 import ssl
 import struct
 import sys
+import threading
 import time
 from collections import deque
 from email.message import EmailMessage
@@ -24,6 +25,11 @@ from email.message import EmailMessage
 # stdlib-only module so the decision is testable off-box; this file cannot be
 # imported anywhere but the NAS container because of the libc load above.
 from delete_actor import ACTOR_ORCHESTRATOR, classify_actor, counts_toward_eviction
+
+# Kuma heartbeats and the keys_zone gauge. Flat imports because in the container
+# these all sit together in /log/; in the repo they are a package.
+import kuma
+from key_budget_probe import load_cfg, probe_loop
 
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
@@ -50,6 +56,25 @@ EVICT_THRESHOLD = 10
 PURGE_THRESHOLD = 10
 EVICT_WINDOW = 60
 COOLDOWN = 900  # 15 min per alert type
+
+# TWO Kuma monitors, never one. A single monitor carrying both signals cannot
+# distinguish "the guard is dead" from "the cache is being evicted" -- exactly
+# the defect #326, #330 and #337 all describe. KUMA_PUSH_CACHE_GUARD answers
+# only "is this process running"; KUMA_PUSH_CACHE_EVICTION answers only "is
+# cache loss happening now". Pushed from the same thread, never the same value,
+# so a liveness tick can never paint over a live eviction.
+LIVENESS_INTERVAL_SEC = 900
+
+# Kuma treats silence as DOWN, so the eviction monitor needs a heartbeat of its
+# own -- and therefore a latch, or the next heartbeat would flip it green while
+# the incident is still running. It clears an hour after the last alert.
+EVICT_LATCH_SEC = 3600
+
+# The alert kinds that mean real cache loss. "purge" is a commanded operator
+# action and stays an email NOTICE that changes no monitor state -- that was the
+# whole point of #337. "external" is the prefill-stall one-shot and is nothing
+# to do with the cache guard.
+EVICT_ALERT_KINDS = ("eviction", "mode000")
 
 # An nginx cache object under levels=2:2 is named by its full md5 (32 lowercase
 # hex chars). ONLY these count toward eviction. Anything else on the same
@@ -155,6 +180,8 @@ def alert(kind, subject, body):
     _last_sent[kind] = now
     log("ALERT %s: %s" % (kind, subject))
     send_email(subject, body)
+    if kind in EVICT_ALERT_KINDS:
+        kuma.push(load_cfg().get("KUMA_PUSH_CACHE_EVICTION"), "down", subject)
 
 
 def proc_info(pid):
@@ -318,6 +345,38 @@ def handle_attrib(pid, comm, exe, name, cmd, info_bytes):
         )
 
 
+def liveness_loop(cfg):
+    """Push both guard monitors on a wall clock, so that silence means dead.
+
+    Pushing on a clock rather than on event arrival is what makes "no heartbeat"
+    mean "the guard is dead" instead of "the LAN was quiet tonight".
+    """
+    while True:
+        kuma.push(
+            cfg.get("KUMA_PUSH_CACHE_GUARD"),
+            "up",
+            "guard alive; evict %d/%ds window, purges %d"
+            % (len(_evict_ts), EVICT_WINDOW, len(_purge_ts)),
+        )
+
+        last_alert = max(_last_sent.get(k, 0) for k in EVICT_ALERT_KINDS)
+        since = time.time() - last_alert
+        if last_alert and since < EVICT_LATCH_SEC:
+            kuma.push(
+                cfg.get("KUMA_PUSH_CACHE_EVICTION"),
+                "down",
+                "cache loss alerted %.0fs ago; latched for %ds" % (since, EVICT_LATCH_SEC),
+            )
+        else:
+            kuma.push(
+                cfg.get("KUMA_PUSH_CACHE_EVICTION"),
+                "up",
+                "no eviction or mode-000 alert in the last %ds" % EVICT_LATCH_SEC,
+            )
+
+        time.sleep(LIVENESS_INTERVAL_SEC)
+
+
 def main():
     fd = libc.fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME, O_RDONLY)
     if fd < 0:
@@ -331,6 +390,19 @@ def main():
         "FANOTIFY guard started (delete+attrib; evict>=%d/%ds; email cooldown %ds)"
         % (EVICT_THRESHOLD, EVICT_WINDOW, COOLDOWN)
     )
+
+    # Daemon threads: a dead thread takes its own monitor silent-and-red while
+    # the others stay green, so a partial failure stays visible.
+    cfg = load_cfg()
+    threading.Thread(target=liveness_loop, args=(cfg,), daemon=True).start()
+    # The guard's log(), not print: it flushes stdout so `docker logs` shows the
+    # line at once, and keeps the record in /log/deletions.log.
+    threading.Thread(target=probe_loop, args=(cfg, log), daemon=True).start()
+    log(
+        "MONITOR threads started (liveness %ds, key-budget %ss)"
+        % (LIVENESS_INTERVAL_SEC, cfg["PROBE_INTERVAL_SEC"])
+    )
+
     while True:
         buf = os.read(fd, 65536)
         off = 0

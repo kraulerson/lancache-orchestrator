@@ -19,6 +19,79 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — the cache index can now say it is filling up — 2026-09-18
+
+- **The keys_zone alarm.** The 2026-07-31 mass deletion was nginx's cache-manager
+  evicting live game data from a ~94%-full `keys_zone`. Nothing could see it
+  coming: `df` does not measure the cache index, nginx OSS publishes no gauge for
+  it (no `http_api_module`, `stub_status` omits cache zones), and the error log
+  logged **nothing at all** through the full nine days — nginx logs a forced
+  expire that fails, never the normal evict-to-fit path. The alarm therefore
+  derives the metric.
+- **`tools/cache_catcher/key_budget.py`** — pure stdlib decision logic: sample
+  leaf directories, scale the mean to all 65536, and compare against the nearest
+  real ceiling, `min(zone_keys, ram_keys)`, **named** in the message so an
+  operator learns which constraint is binding rather than only a colour. Trips
+  DOWN on crossing `FLOOR` (0.75) **or** on projecting under `HORIZON_DAYS` (90)
+  to it.
+- **`tools/cache_catcher/kuma.py`** — stdlib Uptime Kuma push that never raises.
+  Same semantics already settled in `clients/heartbeat.py` and
+  `run-steam-prefill.sh`: an unset URL is a deliberate disable and counts as
+  delivered; a 404 and a refused connection are both undelivered.
+- **`tools/cache_catcher/key_budget_probe.py`** — the I/O shell. Reads
+  `CACHE_INDEX_SIZE` and RSS from the running nginx via `/proc` rather than
+  hardcoding either, so resizing the zone cannot silently invalidate the alarm.
+- **Four degenerate cases are the substance of the feature,** each one a failure
+  this system has already had: an unreadable leaf is a read failure and never an
+  empty one; a sample that read nothing reports `unknown`, not zero; a flat or
+  **shrinking** trend projects nothing, because a falling object count means
+  eviction is already under way and extrapolating it answers a reassuring
+  "never"; and an unknown sample, ceiling or trend pushes DOWN rather than
+  staying silent. 41 tests.
+
+### Changed — the eviction tripwire can now prove it is alive — 2026-09-18
+
+- `fanotify_guard.py` alerted by **email only**, so a dead guard and a quiet
+  cache were indistinguishable — the fourth instance of the defect #326, #330 and
+  #337 each describe. It now pushes Uptime Kuma as well, from two daemon threads
+  that run beside the fanotify loop.
+- **Two monitors, not one.** `lancache:cache-guard` answers only *is this process
+  running*; `lancache:cache-eviction` answers only *is cache loss happening now*.
+  A single monitor carrying both signals could not tell them apart. Both are
+  pushed from one wall-clock thread and never with the same value, so a liveness
+  tick can never paint over a live eviction.
+- Because Kuma treats silence as DOWN, the eviction monitor needs its own
+  heartbeat and therefore a **latch**: it stays DOWN for an hour after the last
+  `eviction` or `mode000` alert instead of flipping green 15 minutes into an
+  incident still in progress.
+- A commanded `purge` still moves **no** monitor and stays an email NOTICE. That
+  was the entire point of #337 and is preserved deliberately.
+
+### Infrastructure — 2026-09-18
+
+- New Kuma push monitors `lancache:key-budget`, `lancache:cache-guard` and
+  `lancache:cache-eviction` in group **119**, each bound to notification **3
+  ("Telegram - Storage")**. Binding is not optional: monitors 176–182 spent
+  months turning red on a dashboard and telling nobody.
+- New uncommitted config file `/log/keybudget.env` on the NAS, holding the three
+  push URLs (credentials, mode `600`, root-owned) plus the tuning values. Every
+  key has a default in `key_budget_probe.DEFAULTS`, so a missing file is a
+  working configuration with all three monitors disabled.
+- The deploy is `docker cp` + `docker restart cache-catcher` and touches nothing
+  that serves traffic or runs jobs, so it does not need an inter-sweep gap.
+- `no-urllib-on-main-loop` is suppressed at line level in `kuma.py`. The rule
+  guards the orchestrator's asyncio loop (TM-015, ADR-0001); this module runs in
+  a container with no event loop and no `httpx` to install. Line-level so the
+  rule stays armed everywhere else.
+- **Related, deliberately out of scope:**
+  [#346](https://github.com/kraulerson/lancache-orchestrator/issues/346) —
+  `keys_zone=10000m` needs ~10 GiB of shared memory on a 15.4 GiB host that also
+  carries an 8 GiB agent limit, so the host OOMs before the index fills. It needs
+  a lancache restart, so the gauge measures its ceiling from live RAM instead of
+  trusting the configured number.
+- Design: `docs/superpowers/specs/2026-09-18-keys-zone-alarm-design.md`. Plan:
+  `docs/superpowers/plans/2026-09-18-keys-zone-alarm.md`.
+
 ### Fixed — the disk cron was installed broken and never ran — 2026-09-18
 
 - The first version of `/etc/cron.d/orch-disk-heartbeat` used a bare `%25` in the

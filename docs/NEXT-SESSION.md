@@ -1,95 +1,185 @@
 # Next session — handoff
 
-**Written:** 2026-09-18, end of the 2026-09-15 → 18 session.
-**Not** the Phase 4 `HANDOFF.md` artifact (that is a release deliverable). This is
-a working handoff: what is live, what is blocked, and what to pick up.
+**Written:** 2026-09-18, end of the keys_zone-alarm implementation session.
+**Replaces** the 2026-09-18 design-session handoff, which is consumed — its one
+instruction ("make the failing tests pass, then deploy") is done. That version
+survives at commit `c5046c5`.
+**Not** the Phase 4 `HANDOFF.md` artifact (that is a release deliverable).
 
 ---
 
-## Read this first — three things that will confuse you
+## Start here
 
-### 1. The feature gate is BLOCKED and that is correct
+The keys_zone alarm is **built, deployed and verified live**. There is no
+half-built feature to resume. Two things need attention:
 
+1. **Merge PR #349 first, then PR #347.** #349 bumps `anyio` 4.13.0 → 4.14.2 for
+   two newly-published CVEs pinned on `main` and unrelated to the alarm. Until it
+   lands, #347's Dependencies check stays red and branch protection blocks the
+   merge. Every other check on #347 passes.
+2. **Confirm the 24 h gauge fired on a real slot.** The 15-minute liveness tick
+   was verified firing on schedule — 22:52:02, exactly 900 s after startup — but
+   the daily gauge has run only once, at startup. A manual invocation proves
+   nothing about a schedule; the LXC disk monitor's `%` bug passed its manual
+   test and then never ran once.
+
+```sh
+ssh karl@192.168.1.30 'docker exec cache-catcher tail -3 /log/key_budget.csv'
+# expect a SECOND row roughly 24h after 1789771023
 ```
-scripts/test-gate.sh --check-batch
-[FAIL] Testing session required (2 features since last test, interval is 2)
+
+```sh
+ssh root@10.100.23.57 'python3 -c "
+import sqlite3
+c = sqlite3.connect(\"file:/opt/uptime-kuma/data/kuma.db?mode=ro\", uri=True)
+for r in c.execute(\"SELECT monitor_id,count(*) FROM heartbeat WHERE monitor_id IN (218,219,220) GROUP BY monitor_id\"):
+    print(r)"'
+# 218 should be >1 by then; 219 and 220 climb every 15 min
 ```
-
-Do **not** start a new feature until this clears. UAT session 16 ran but did not
-close: 9 of 9 scenarios executed, **7 pass, 1 partial, 1 FAIL**. The gate should
-stay shut until the failure's disposition is settled.
-
-### 2. `process-checklist.sh --status` will tell you "Session: 15, 9/9"
-
-That is wrong, and it is a branch artifact. **UAT 16's state and artifacts live on
-the unmerged branch `uat/session-16`** (8 commits ahead of main). Karl asked for
-that PR to be held until the session's work finished. It now has: three agent
-reports, the tester template, the results with all nine scenarios resolved, and
-the triage with his sign-off.
-
-**Decide early:** merge `uat/session-16`, or keep holding it. Leaving it unmerged
-means the checklist keeps lying about which session is current.
-
-### 3. Four "monitors" share one defect, and it is the theme of this project
-
-A monitor that observes an event correctly and **cannot convey what it means**:
-
-| issue | monitor | what it cannot distinguish |
-|---|---|---|
-| #326 | Kuma 180 sweep | "schedule running" vs "library covered" |
-| #330 | Kuma 181 Epic prefill | "nothing to do" vs "scheduler dead" |
-| #337 (fixed) | cache-catcher | commanded purge vs uncommanded eviction |
-| — | `fetch_manifests` | reports UP while 716 of 1191 apps failed |
-
-If you fix one, consider fixing them as a set. They are the same bug wearing
-different hats.
 
 ---
 
-## Live state, verified 2026-09-18
+## What was built
 
-| thing | state |
+Branch **`design/keys-zone-alarm`**, PR **#347**, 6 commits. Build Loop closed
+**6/6**; the feature gate is clear at 1 of 2 until the next UAT session.
+
+| file | role |
 |---|---|
-| Schema | migration **17** |
-| Sweep pass | **5**, started 2026-09-18 11:20:25 |
-| Sweeps since 09-16 | **10 succeeded, 0 failed** (baseline before #311: 15 of 16 FAILED) |
-| Cache truth | 1837 `up_to_date`, 1355 `not_downloaded`, 19 `failed`, 5 `unknown`, 1 `validation_failed` |
-| Breaker | quiet — 0 observed downward transitions in 24 h |
-| LXC disk | **44% used, 11 GB free** (was 94% / 1.3 GB) |
-| NAS `/volume1` | 53% of 55 TB, 26 TB free |
-| Agent | uid **0**, 256/256 buckets, healthy |
+| `tools/cache_catcher/kuma.py` | stdlib Kuma push, never raises |
+| `tools/cache_catcher/key_budget.py` | pure decision logic — sampling, capacities, projection, verdict |
+| `tools/cache_catcher/key_budget_probe.py` | I/O shell — dirs, `/proc`, CSV history, push |
+| `tools/cache_catcher/fanotify_guard.py` | two daemon threads beside the fanotify loop |
 
-Deployed and proven this session: #311 sweep pass marker, #313 breaker heartbeat,
-#332 purge count parsing, #333 breaker race, #337 cache-catcher actor, #339 purge
-reversibility, plus Kuma monitor **217** (LXC disk).
+Tests: **41** (9 + 32). Full suite **1985 passed, 3 deselected**. Phase 2.4
+audit: **0 findings** — `docs/security-audits/keys-zone-alarm-security-audit.md`.
+
+**Three Kuma monitors**, group 119, notification 3. DB backed up first to
+`kuma.db.bak-prekeybudget-20260918-163525`; the live guard to
+`/log/fanotify_guard.py.bak-prekeybudget-20260918-163652`.
+
+| id | monitor | answers | silence means |
+|---|---|---|---|
+| 218 | `lancache:key-budget` | is the index filling | the probe thread died |
+| 219 | `lancache:cache-guard` | is the guard process running | the guard died |
+| 220 | `lancache:cache-eviction` | is cache loss happening now | the guard died |
+
+**219 and 220 are two monitors because Karl changed the spec mid-execution.** As
+designed, `alert()` pushed DOWN and the liveness thread pushed UP to the *same*
+monitor on a 15-minute clock — so a real eviction would have turned it red and
+then green again within 15 minutes while still running. `cache-eviction` now
+latches DOWN for an hour after the last `eviction` or `mode000` alert. A
+commanded `purge` still moves no monitor (#337). The change is recorded as an
+amendment at the end of the design spec.
+
+**The plan's alert `kind` strings were wrong** — it guessed `("evict", "attrib")`
+where the call sites pass `"eviction"`, `"mode000"`, `"purge"`, `"external"`. Had
+the guess shipped, no alert would ever have reached Kuma and the whole tripwire
+promotion would have been silently inert. The plan's own instruction to verify
+them against the code is what caught it.
+
+## Live numbers, 2026-09-18 — re-verify before trusting
+
+```
+first run   KEY-BUDGET up: 35.8M objects, 48% of ram ceiling 75.2M, trend unknown
+hand count  90 leaves, 0 read failures, 50366 files -> 36.7M  (agrees within 2.5%)
+bytes/key   128.5 measured live  (design measured 146; re-measured every run)
+history     /log/key_budget.csv -> 1789771023,35782656,4598390784,128.50892857142858
+```
+
+`trend unknown` is correct and will stay so until the history file accumulates.
+**Do not quote a runway number as fact** — 30.7 M (Jul 31) → 34.4 M (Aug 12) →
+35.6 M (Sep 18), and the Aug→Sep delta is only ~3× the sampling error, so any
+runway figure sits inside the noise of its own measurement.
 
 ---
 
-## Priority 1 — the keys_zone alarm (no issue filed yet)
+## Five things that will waste your time if you do not know them
 
-**The only outstanding item with a data-loss incident behind it.**
+### 1. Count the cache as root INSIDE the container
 
-The 2026-07-31 mass deletion was nginx's cache-manager evicting because the
-in-memory key index filled — `CACHE_INDEX_SIZE=10000m`, entirely independent of
-disk space. `df` cannot see it. Karl's own memory records "key-budget alarm
-REQUIRED" as an open action from that incident, and it is still open.
+Some leaf dirs are `drwx------` (e.g. `/volume1/cache/cache/00`). Counting as
+`karl` from the NAS host gets EPERM, and **a denied read looks identical to an
+empty directory** — the first measurement during design came out **13× low** and
+looked internally plausible. Confirmed again this session: 0 read failures as
+root inside `lancache-monolithic`. `tests/tools/test_key_budget.py` encodes this.
+Do not weaken it.
 
-**Do not copy the LXC disk alarm for this.** `/volume1` is `CACHE_DISK_SIZE=54000g`
-on a 55 TB volume — it is *designed* to fill and evict by LRU, so a percentage
-alert fires during healthy operation. That is exactly the #326/#330 mistake.
+### 2. `stat` is ~180 files/sec on this NAS; `listdir` is instant
 
-Needs design: the metric is not in `df`. Likely sources are nginx's own stats or
-inference from cache-manager behaviour. **Brainstorm it properly** — this is
-architectural, not a cron one-liner.
+A 54 k-file size walk took over five minutes during design. The daily probe path
+uses `listdir` only. Mean object size is deliberately a separate, rarer
+measurement — now filed as **#348**.
 
-## Priority 2 — close out UAT 16
+### 3. The framework markers are single-use and consumed by each commit
 
-- Decide the disposition of **scenario 9's failure** (fixed as #339, but the
-  session never formally closed).
-- `remediation_complete` and `gate_passed` are the two remaining steps.
-- Then `scripts/test-gate.sh --reset-counter` unblocks feature work.
+`enforce-evaluate` blocks every commit. Recreate its marker as a **lone,
+unchained** command from the repo root, with a reason containing **no shell
+metacharacters** — a semicolon in the reason trips `config-guard`:
 
-## Priority 3 — the open issues (8)
+```sh
+bash .claude/framework/hooks/mark-evaluated.sh "reason here"
+```
+
+`enforce-superpowers` is single-use the same way, so the *next* source edit after
+a commit re-blocks until a Superpowers skill is invoked again. Related traps:
+`config-guard` blocks Bash **reads** of framework files (use the Read tool);
+`marker-guard` blocks any command naming a marker path; `enforce-evaluate` reads
+a bare `-n` anywhere in the command as `--no-verify`, **and it pattern-matches
+the word in prose too** — a heredoc that merely discusses committing is blocked,
+so write such files with the Write tool rather than a shell heredoc.
+
+`enforce-context7` flags **local sibling modules** as unresearched libraries when
+they are imported flat (`import kuma`), and its stdlib whitelist is missing
+`ctypes`, `smtplib` and `ssl`. The prescribed path clears it: call
+`resolve-library-id` for each name, confirm there is no match, proceed.
+
+### 4. Lint and SAST differ between local and CI — both bit this session
+
+- **`tools/` is excluded from CI ruff but NOT from the local pre-commit hook**,
+  which lints every staged `.py`. `UP031` rejects `%`-formatting, so new `tools/`
+  files use f-strings; only `fanotify_guard.py` is exempt in `pyproject.toml`.
+- **A bare `# nosemgrep: <id>` is ignored by CI's semgrep 1.36.0**, which matches
+  only the fully-qualified `semgrep.`-prefixed form. List both spellings,
+  comma-separated.
+- **The pre-commit hook runs semgrep without `--error`**, so findings print but
+  never block. A clean commit is not a clean scan. Run `semgrep scan --error`
+  explicitly, including `p/security-audit`, which the hook omits but CI runs.
+
+### 5. Run tests with the PATH prefix
+
+```sh
+PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest
+```
+
+Without it `tests/test_licenses.py` false-fails on a missing `pip-licenses`
+binary. Bare `python` is not on PATH. **The baseline is 1944**, not the 1867
+quoted in older docs.
+
+---
+
+## Standing operational rules
+
+The alarm's own deploy touched **only the `cache-catcher` container** — not
+lancache, not the agent, not the control plane — so it needed no inter-sweep gap.
+That was a design choice. For anything else:
+
+1. **Recreate containers only when no job is running or queued.** 12 of 15
+   historical sweep failures were recreate kills. Check `jobs WHERE state IN
+   ('running','queued')` is empty first.
+2. **Inter-sweep gaps are ~30 min.** Stage slow steps — build, `docker save |
+   docker load`, manifest sync — while the old container still serves.
+3. **After recreating the agent, verify uid 0 and 256/256 buckets.** uid 1000
+   sees 65 buckets and reports ~8 % cached on everything. Has happened twice.
+4. **Every `%` in a crontab line must be escaped `\%`.** An unescaped one
+   truncates the command silently — it installs cleanly and never runs.
+5. **Verify by waiting for a real scheduled run**, never a manual invocation.
+
+---
+
+## Still open, carried forward
+
+### Open issues (10)
 
 | # | sev | one-line |
 |---|---|---|
@@ -97,53 +187,75 @@ architectural, not a cron one-liner.
 | #315 | 3 | `VALIDATE_TIMEOUT_CEILING_SEC` is a bare constant while the rate it clamps is configurable |
 | #316 | 4 | 19 games stuck at `failed`; operator passed the display — needs a decision, not a fix |
 | #317 | 4 | `record_job_outcome()` still never fired in production; needs a deliberate UAT exercise |
-| #326 | 4 | sweep monitor sees liveness, not coverage — **now has a real threshold: a pass is ~16.4 h** |
+| #326 | 4 | sweep monitor sees liveness, not coverage — a real pass is ~16.4 h |
 | #330 | 3 | Epic prefill monitor DOWN because no job is ever enqueued |
 | #331 | 3 | operator purge queues for hours behind a sweep with no feedback |
 | #334 | 3 | `get_settings()` raising would downgrade a breaker trip to a per-game error (latent only) |
+| #346 | — | `keys_zone=10000m` exceeds host RAM; needs a lancache restart |
+| #348 | — | weekly mean-object-size measurement, deferred from the alarm |
 
-## Priority 4 — unexplained, unfiled
+**#346** still needs a decision on the real RAM budget, a corrected
+`CACHE_INDEX_SIZE`, and a `mem_limit` on `lancache-monolithic`. All three need a
+lancache restart, which is why they were kept out of the alarm. The alarm buys
+time for it; it does not fix it.
 
-**SteamPrefill silently skips three apps.** 34440 (Civ IV), 34470 (Civ IV
-Colonization), 317850 (COH2 Ardennes Assault) are all in
-`selectedAppsToPrefill.json`, none of their depots has ever been downloaded, and
-the cron log says only `Skipping app...` without naming them. Needs a verbose
-targeted run. Low value — three old, small games — but genuinely unexplained.
+### Not filed
 
-## Priority 5 — housekeeping
+- **SteamPrefill silently skips three apps** — 34440 (Civ IV), 34470 (Civ IV
+  Colonization), 317850 (COH2 Ardennes Assault). All in
+  `selectedAppsToPrefill.json`, none of their depots ever downloaded, cron log
+  says only `Skipping app...` without naming them. Low value, genuinely
+  unexplained.
 
-- `/volume2` on the NAS has no disk alarm (26% used, 337 GB free). 20-minute copy
-  of the LXC pattern; do it alongside the keys_zone work.
-- Semgrep 1.175.0 → 1.177.0, Snyk 1.1307.0 → 1.1307.2. Neither below minimum.
-- **Framework discovery review is 149 days overdue** (`init.sh --reconfigure`).
+### Housekeeping
+
+- `/volume2` on the NAS has no disk alarm (26 % used). A 20-minute copy of the
+  LXC disk pattern in `live-configuration.md` §1.3 — **mind the `%` escaping**.
+- Semgrep 1.175.0 → 1.177.0, Snyk 1.1307.0 → 1.1307.3. Neither below minimum.
+  **CI pins semgrep 1.36.0**, which is a separate and much older pin.
+- **Framework discovery review is 151 days overdue.** The banner says
+  `init.sh --reconfigure`; no `init.sh` exists at that implied path. The real one
+  is `~/.claude-dev-framework/scripts/init.sh`, and a decoy `init.sh` without
+  `--reconfigure` sits in the solo-orchestrator repo. **Verify before running.**
 - Six stale dependabot branches on origin; `docs/lancache-nas-migration` unmerged.
 
 ---
 
-## Operational rules learned the hard way — do not relearn these
+## The monitor defect, now two of four fixed
 
-1. **Recreate containers ONLY in the gap after a sweep ends.** 12 of 15 historical
-   sweep failures were recreate kills. Check
-   `jobs WHERE state IN ('running','queued')` is EMPTY first.
-2. **Gaps between sweeps are ~30 min**, because sweeps run to the 6 h cap. Stage
-   every slow step (build, `docker save | docker load`, manifest sync) while the
-   OLD container serves, so the risky step is a ~30-second recreate.
-3. **After recreating the agent, verify uid 0 and 256/256 buckets.** uid 1000 sees
-   65 buckets and reports ~8% cached on everything. Has happened twice.
-4. **Every `%` in a crontab line must be escaped `\%`.** An unescaped one truncates
-   the command silently — it installs cleanly and never runs.
-5. **Clean up after deploys.** DB backups are ~1.1 GB each. Three of them plus
-   stale images and build cache took the LXC to 94% full.
-6. **A manual test of a scheduled job proves nothing about the schedule.** Wait for
-   a real slot.
+A monitor that observes an event correctly and **cannot convey what it means**.
+This is the theme of the whole project.
+
+| issue | monitor | what it cannot distinguish |
+|---|---|---|
+| #326 | Kuma 180 sweep | "schedule running" vs "library covered" |
+| #330 | Kuma 181 Epic prefill | "nothing to do" vs "scheduler dead" |
+| #337 (fixed) | cache-catcher | commanded purge vs uncommanded eviction |
+| **(fixed)** | cache-catcher liveness | "cache healthy" vs "guard is dead" — now Kuma 219 vs 220 |
+
+#326 and #330 remain. If you pick one up, consider doing both: they are the same
+bug wearing different hats, and the fix shape is now established — ask what *two*
+facts a monitor could be conflating, and give each fact its own monitor.
+
+---
 
 ## A caution about this document's author
 
-Four conclusions I reported in this session dissolved on one further query:
-"42% of the library is deadlocked" (#329, closed invalid), "the partial badge is
-untested", a 15-game list that was mostly entries with no depots, and "add these
-three to the prefill list" when they were already on it. Each time the missing
-step was one more verification before reporting.
+Two conclusions dissolved on one further check during the **design** session, and
+both were caught only by looking again: a cache count that was **13× low**
+because permission-denied leaves were treated as empty, and a runway figure that
+was wrong arithmetic, quoted twice before the spec's self-review caught it.
 
-**Verify the numbers in this handoff before acting on them.** They were true on
-2026-09-18.
+This session's near-miss was different in kind: **local verification passing is
+not CI verification passing.** `ruff`, `pytest` and `semgrep` were all clean
+locally and CI still failed SAST — because the semgrep pinned in CI is far older
+than the local one and matches suppression comments differently. The lesson
+generalises: when a check runs in two places, confirm which version runs where
+before trusting either result.
+
+The numbers above were true on 2026-09-18. **Re-verify before acting on them** —
+the live systems are authoritative, this document is a snapshot.
+
+**Authoritative sources, in preference order:** the live systems · `FEATURES.md`
+· `CHANGELOG.md` · `PROJECT_BIBLE.md` · `.claude/phase-state.json` ·
+`APPROVAL_LOG.md` · this file.
