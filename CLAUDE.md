@@ -87,29 +87,34 @@ or 24 hours past the last commit touching this file.
   inter-sweep gaps are only ~30 min — stage slow deploy steps while the old
   container serves. `ORCH_SWEEP_BATCH_SIZE` stays at `2`; the NVMe bcache
   re-attach is the real throughput lever.
-- **The keys_zone alarm is BUILT, DEPLOYED and VERIFIED LIVE (2026-09-18).**
-  Build Loop `keys-zone-alarm` closed 6/6; **PR #347** open on branch
-  `design/keys-zone-alarm`. Three Kuma push monitors in group 119, all bound to
-  notification 3: **218 `lancache:key-budget`** (daily gauge), **219
-  `lancache:cache-guard`** (liveness only), **220 `lancache:cache-eviction`**
-  (cache loss only, latched DOWN 1 h after an alert). The guard/eviction split
-  was a mid-execution change to the approved spec — one monitor could not
-  distinguish "the guard is dead" from "the cache is being evicted", which would
-  have been a fourth instance of the #326/#330/#337 defect.
+- **The keys_zone alarm is MERGED, DEPLOYED and RUNNING (PR #347, merged
+  2026-09-19).** Build Loop `keys-zone-alarm` closed 6/6. Three Kuma push
+  monitors in group 119, all bound to notification 3: **218
+  `lancache:key-budget`** (daily gauge), **219 `lancache:cache-guard`**
+  (liveness only), **220 `lancache:cache-eviction`** (cache loss only, latched
+  DOWN 1 h after an alert). The guard/eviction split was a mid-execution change
+  to the approved spec — one monitor could not distinguish "the guard is dead"
+  from "the cache is being evicted", which would have been a fourth instance of
+  the #326/#330/#337 defect.
   First live run: `35.8M objects, 48% of ram ceiling 75.2M, trend unknown`,
   cross-checked against an independent hand count taken as root inside
-  `lancache-monolithic` (36.7M, agreeing within 2.5%). **Not yet observed: the
-  24 h gauge cycle on a real slot** — the 15-minute liveness tick was verified
-  firing on schedule, the daily one still needs tomorrow.
+  `lancache-monolithic` (36.7M, agreeing within 2.5%). After **18 h 15 m**: 219
+  and 220 at **74 heartbeats each, 0 down**, exactly on the 15-minute cadence
+  with no drift or gaps. **Still not observed: the 24 h gauge cycle on a real
+  slot** — 218 has the one startup heartbeat, next due ~22:37 UTC daily. Verify
+  with `docker exec cache-catcher tail -3 /log/key_budget.csv` (expect a second
+  row after `1789771023`).
   **The zone is still provisioned beyond what the NAS has RAM to hold** —
   `10000m` needs ~10 GiB on a 15.4 GiB host carrying an 8 GiB agent limit, so the
   host OOMs before the index fills (**issue #346**, out of scope for the alarm
   because it needs a lancache restart). The alarm therefore measures its ceiling
   from live RAM, not from the configured number; measured `bytes_per_key` came
   out **128.5** live rather than the 146 measured during design.
-- **PR #347 is blocked behind PR #349**, a separate chore bumping `anyio`
-  4.13.0 → 4.14.2 for two newly-published CVEs. The CVEs are pinned on `main` and
-  unrelated to the alarm. Merge #349 first, then #347 goes fully green.
+- **`anyio` is pinned at 4.14.2** (PR #349, merged 2026-09-19) for
+  GHSA-82r6-8w77-94w6 and GHSA-5p39-cfhj-2xmp. It is transitive, via `httpx`,
+  `starlette` and `uvicorn`, so it is fixed by recompiling rather than editing —
+  `pip-compile --upgrade-package anyio`, keeping `--allow-unsafe` on the dev file
+  or the recompile also drops the `pip` and `setuptools` pins.
 
 **Authoritative sources — prefer these over this summary, which is a snapshot:**
 `FEATURES.md` (what exists) · `CHANGELOG.md` (what changed) · `PROJECT_BIBLE.md`
