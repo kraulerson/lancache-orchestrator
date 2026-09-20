@@ -432,6 +432,18 @@ Uptime Kuma **v2.4.0**, systemd unit `uptime-kuma`, database
   notification binding at all** — they turned red on the dashboard and told
   nobody. If you add a monitor, binding it to a notification is not optional.
 
+  **Correction, verified live 2026-09-19: there are TWO groups, not one.**
+  Earlier wording here implied every monitor sits in group 119. It does not:
+
+  | group | name | monitors |
+  |---|---|---|
+  | **119** | `host: lancache-orchestrator (1105)` | 179, 180, 181, 182, 216, 218, 219, 220 |
+  | **120** | `host: DXP4800 (lancache NAS)` | 176, 177, 178 |
+
+  The split is by *which host pushes*, which is why the three SteamPrefill/GOG
+  cron monitors are separate — those crons run on the NAS, everything in 119 is
+  pushed by the LXC or by a container on it.
+
 - **`lancache:key-budget`** — push type, group **119**, notification **3**. Fed
   every 24 h by the `key_budget_probe` thread inside `cache-catcher`. DOWN means
   the cache index is over `FLOOR` (0.75 of the binding ceiling), or projected to

@@ -99,7 +99,7 @@ No break-even calculation, no per-user costs, no hosting ceiling at scale — th
 
 ## 3. Architecture Decision Record
 
-<!-- Last Updated: 2026-04-20 -->
+<!-- Last Updated: 2026-09-19 -->
 
 ### 3.1 Selected architecture — Option A (single-container monolith)
 
@@ -156,29 +156,48 @@ Pending / scheduled:
 
 Single container. Single process. Three work zones inside that process (above). No sidecars, no broker, no worker pool. No Celery/Redis. Container image target < 250 MB.
 
-### 3.5 Deployment topology
+### 3.5 Deployment topology — SUPERSEDED, rewritten 2026-09-19
 
-Docker Compose stack on DXP4800 alongside Lancache:
+> **The single-host design below was replaced by a two-host split** across PRs
+> #174–#199 (re-architecture ①–④). The Bible was not updated at the time; this
+> section described a system that no longer existed for roughly two months.
+> `docs/deploy/INSTALL.md` is the installable description, and
+> `docs/deploy/live-configuration.md` is the authoritative operator reference —
+> prefer both over this summary.
 
-```yaml
-services:
-  orchestrator:
-    image: ghcr.io/kraulerson/lancache-orchestrator:<semver>
-    restart: unless-stopped
-    ports: ["8765:8765"]
-    volumes:
-      - monolithic-cache:/data/cache:ro
-      - monolithic-logs:/data/logs:ro
-      - orchestrator-state:/var/lib/orchestrator
-    environment: [...]
-    depends_on: [lancache]
-    secrets: [orchestrator_token]
-    user: orchestrator      # non-root per Phase 2 Dockerfile
-    security_opt: [no-new-privileges:true]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-```
+**Current topology: control plane and data plane on separate hosts.**
+
+| plane | host | runs |
+|---|---|---|
+| control | Proxmox **LXC 1105** (`10.100.23.105`) | `orchestrator` — API, scheduler, jobs, SQLite |
+| data | **NAS** (`192.168.1.30`, UGREEN DXP4800) | `orchestrator-agent`, `lancache-monolithic`, `lancache-dns`, `cache-catcher` |
+| monitoring | **CT 1057** (`10.100.23.57:3001`) | Uptime Kuma — receives push heartbeats from both |
+
+**Why the split.** Byte-pulling, disk-stat and the prefill drivers must run
+*beside* the cache: the agent reads the lancache filesystem directly, and the NAS
+is 4-core and IO-bound. Keeping the API, scheduler and SQLite on the NAS made the
+control plane hostage to that IO contention. The control plane moved to an LXC;
+the data plane stayed on the NAS. The orchestrator reaches the agent over HTTP
+(`ORCH_AGENT_BASE_URL`), never the filesystem.
+
+**Consequences that bite in operations, all learned the hard way:**
+
+- **The agent must run as uid 0** (`--user 0:0`). Some cache directories are mode
+  `0700`; as uid 1000 the agent sees 65 of 256 buckets and reports ~8 % cached on
+  every game. Verify uid 0 and 256/256 buckets after every recreate.
+- **The agent is unreachable from its own host** by the published address; test
+  its DNS and reachability *from inside the agent container*, not from the NAS
+  shell.
+- **A container recreate reaps a running sweep.** 12 of 15 historical sweep
+  failures were recreate kills. Check `jobs WHERE state IN ('running','queued')`
+  is empty first, and stage slow steps while the old container still serves.
+- **`cache-catcher` is the exception:** it serves no traffic and runs no jobs, so
+  restarting it needs no window.
+
+Security posture for the control-plane container (non-root, `read_only`,
+`cap_drop: [ALL]`, `no-new-privileges`, `orchestrator_token` as a secret file)
+carries over from the original design and is unchanged. The agent is the
+deliberate exception on `user:`, for the reason above.
 
 ---
 
@@ -363,7 +382,7 @@ The orchestrator authenticates across two unrelated boundaries:
 
 ## 8. Observability & Logging Strategy
 
-<!-- Last Updated: 2026-04-20 -->
+<!-- Last Updated: 2026-09-19 -->
 
 ### 8.1 Structured logging
 
@@ -414,9 +433,39 @@ Retention is operator-controlled. The orchestrator takes no action on log files.
 
 Returns 503 if any boolean is false (JQ3).
 
-### 8.5 No external observability stack in MVP
+### 8.5 No external observability stack in MVP — amended 2026-09-19
 
 No Sentry, no Datadog, no Grafana, no Prometheus. Post-MVP Prometheus endpoint considered if homelab monitoring stack materializes.
+
+**Amendment: Uptime Kuma is now a dependency of the alerting path.** The original
+rule was written against *metrics* stacks and still holds for those — nothing
+scrapes, aggregates or dashboards this system. What changed is that several
+failures proved undetectable from inside the application, because the thing that
+failed was the thing that would have reported it:
+
+- the 2026-07-31 mass deletion ran for nine days with nothing logged at all;
+- a SteamPrefill outage ran 13 days green because the wrapper exited 0;
+- the cache-catcher tripwire could not prove it was alive, only that it had not
+  spoken.
+
+The answer in every case is a **push** monitor on Uptime Kuma (CT 1057,
+`10.100.23.57:3001`), because a push monitor treats **silence as DOWN**. That is
+the property the application cannot provide about itself. Each scheduled job and
+each watcher pushes on a wall clock; a dead process, a dead container or a dead
+host all surface as red.
+
+Two rules follow, both learned by breaking them:
+
+1. **Bind every monitor to a notification.** Monitors 176–182 spent months
+   turning red on a dashboard and telling nobody.
+2. **One monitor answers exactly one question.** A monitor carrying two signals
+   cannot say which one it means — the defect behind #326, #330 and #337. Where
+   two facts exist, create two monitors: `lancache:cache-guard` (is the watcher
+   alive) and `lancache:cache-eviction` (is cache loss happening) are deliberately
+   separate for this reason.
+
+See §8.7 for the current monitor inventory and `docs/deploy/live-configuration.md`
+§3 for the operator procedure.
 
 ### 8.6 Secret redaction rules (TM-012 enforcement)
 
@@ -426,6 +475,51 @@ No Sentry, no Datadog, no Grafana, no Prometheus. Post-MVP Prometheus endpoint c
 - Negative test per auth path: raise in the auth flow with the token in a local var; verify the ERROR log entry does NOT contain the token substring.
 
 ---
+
+### 8.7 The keys_zone alarm (2026-09-19)
+
+nginx OSS publishes **no** gauge for cache-index (`keys_zone`) occupancy: there is
+no `http_api_module`, `stub_status` omits cache zones, and the error log stays
+silent through the normal evict-to-fit path. `df` cannot see it either, because
+the index is shared memory, not disk. The 2026-07-31 incident was eviction from a
+~94 %-full index, invisible to every signal the system had.
+
+The metric is therefore **derived**, by two stdlib-only instruments running as
+daemon threads inside the existing `cache-catcher` container on the NAS:
+
+| instrument | module | what it answers |
+|---|---|---|
+| leading gauge | `tools/cache_catcher/key_budget.py` + `key_budget_probe.py` | how full is the index, and how fast is it filling |
+| lagging tripwire | `tools/cache_catcher/fanotify_guard.py` | is cache loss happening right now |
+
+The gauge samples leaf directories (`listdir` only — `stat` runs at ~180 files/sec
+on this NAS), scales the mean across all 65 536 leaves, and compares against the
+**nearest real ceiling**, `min(zone_keys, ram_keys)`, naming which one binds. It
+trips on a floor (0.75) **or** a projected horizon (90 days).
+
+Four decision rules are load-bearing, and each encodes a failure already suffered:
+
+- **An unreadable leaf is a read failure, never an empty one.** A denied read on
+  a mode-`0700` directory is indistinguishable from an empty directory; treating
+  them alike made the first design measurement come out **13× low**.
+- **A sample that read nothing reports `unknown`, not zero.**
+- **A flat or shrinking trend projects nothing.** A falling object count means
+  eviction is already under way; extrapolating it answers "never", the most
+  dangerous output the function could give. Exercised in production 2026-09-19.
+- **Unknown never reads as safe** — a failed sample or unreadable ceiling pushes
+  DOWN rather than staying silent.
+
+Decision logic lives in a pure module because `fanotify_guard.py` calls
+`ctypes.CDLL("libc.so.6")` at import and cannot be imported off the NAS — the same
+constraint that produced `delete_actor.py`. Everything that can be arithmetically
+wrong is therefore reachable by CI.
+
+**Known limitation:** the configured zone (`CACHE_INDEX_SIZE=10000m`, 9.77 GiB
+when full) exceeds what the host can supply alongside the agent's 8 GiB limit on
+15.40 GiB of RAM — a 2.44 GiB deficit. Tracked as **#346**, deferred 2026-09-19
+because the index sits at 48 % with flat-to-negative growth. The alarm measures
+its ceiling from **live RAM**, not the configured number, so it stays correct
+regardless.
 
 ## 9. Interface Specifications (CLI + REST + Status Page + Game_shelf contract)
 

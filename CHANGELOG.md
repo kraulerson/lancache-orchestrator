@@ -19,6 +19,43 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Documentation — the architecture doc described a system that no longer existed — 2026-09-19
+
+- **`PROJECT_BIBLE.md` §3.5 rewritten.** It still described the pre-re-architecture
+  single-container stack on the DXP4800 alongside lancache — the design replaced
+  by the two-host control/data-plane split across PRs #174–#199. The Bible was
+  not updated at the time, so for roughly two months the governing architecture
+  document described a deployment that did not exist. Now records the real
+  topology and the four operational consequences that bite: the agent must run
+  as uid 0, it is unreachable from its own host, a container recreate reaps a
+  running sweep, and `cache-catcher` is the exception that needs no window.
+- **`PROJECT_BIBLE.md` §8.5 amended and §8.7 added.** §8.5 said "no external
+  observability stack", which Uptime Kuma now contradicts. Amended rather than
+  deleted: the rule still holds for *metrics* stacks, and the reason it changed
+  is that several failures proved undetectable from inside the application,
+  because the thing that failed was the thing that would have reported it. §8.7
+  documents the keys_zone alarm and the four decision rules that carry it.
+- **`README.md` corrected.** It told every reader the service was "built and
+  tested but not yet packaged for production install" and that deployment was a
+  future phase. It has been live across two hosts since 2026-08. Replaced with
+  the truth, a pointer to the new install guide, and an accurate list of which
+  Phase 3/4 artifacts genuinely are still missing.
+- **`docs/deploy/INSTALL.md` added** — the first rebuild-from-scratch guide this
+  project has had. Reconstructed from live inspection of all three hosts, with
+  §10 listing the eight things it **cannot** tell you rather than guessing at
+  them. The most serious: `cache-catcher:latest` has no Dockerfile or build
+  script anywhere — it was produced by `docker commit` of a hand-modified
+  container, so it is irreproducible and must be treated as a backup artifact.
+- **`docs/deploy/live-configuration.md` corrected** — it implied all Kuma
+  monitors live in group 119. Verified live: monitors 176–178 are in group
+  **120** (`host: DXP4800`), split by which host pushes.
+- **Also recorded for the first time:** the NAS compose directory is at
+  `/volume2/@home/karl/lancache-host/`, not `/home/karl/...`; `docker-compose.yml`
+  exists **nowhere but that host** and is in no backup located; the four compose
+  volumes are `external: true` and must be created by hand before first `up`;
+  and there is a fifth cron job (GOG library backup, `0 4,16 * * *`) that no
+  prior document mentioned.
+
 ### Added — the cache index can now say it is filling up — 2026-09-18
 
 - **The keys_zone alarm.** The 2026-07-31 mass deletion was nginx's cache-manager
