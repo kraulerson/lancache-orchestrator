@@ -1799,3 +1799,71 @@ gitleaks clean.
     and key ceilings are only **1.4% apart** — any drift toward smaller
     Epic-style objects tips the binding constraint from healthy LRU into silent
     eviction.
+
+---
+
+## Feature 29: Retire the Unreachable 'failed' Status (#316, #317)
+
+**Phase Built:** 2 (Construction)
+**Status:** Complete — pending deploy and live verification (2026-09-21)
+
+**Summary:** 19 owned games were permanently stuck at `status='failed'`, a state
+no code can produce and no code can clear. Migration 0018 retires them to
+`'blocked'` — the honest terminal state, since they are already excluded from
+prefill — with a `commanded` audit row per change. The same Build Loop exercises
+`record_job_outcome()` in production for the first time since migration 0015
+deployed (#317), closing the coverage gap on half of that migration's design.
+
+**Key Interfaces:**
+  - `src/orchestrator/db/migrations/0018_retire_failed_status.sql`
+  - `measurement_transitions` rows with `downward=1, commanded=1`
+  - Live exercise: job 46651, prefill on game 15495 (CHUCHEL, Epic)
+
+**Locked decisions:**
+  - **`'blocked'`, not `'unknown'`.** `'unknown'` means "not established yet" — a
+    state the sweep exists to resolve, so it would imply pending work forever.
+    `'blocked'` means "we are not going to fetch this", which is what is actually
+    true, and makes the status match the prefill behaviour that already excludes
+    these rows.
+  - **The operator's instruction was conditional and was verified before acting.**
+    "Migrate them if they genuinely can't be downloaded" holds by two distinct
+    mechanisms: 15 Epic rows are refused by Epic's manifest API (HTTP 4xx — The
+    Sims 4, Battlefront II and Squadrons are EA App products; Super Meat Boy
+    Forever Mobile is a mobile SKU; Unreal Tournament is delisted), and 4 Steam
+    rows are absent from SteamPrefill's 1192-app selection so no manifest can
+    ever land for the validator to compare against.
+  - **`commanded = 1`, `downward = 1`.** 19 downward transitions in one instant
+    would sit at 76% of the breaker's default threshold of 25 — a maintenance
+    migration capable of halting cache-truth writes library-wide. The commanded
+    flag (#310/0016) excludes it; the direction is recorded honestly rather than
+    falsified to 0, because the audit log is what a future investigator reads.
+  - **Predicate is the status alone.** Not `status_measured_at IS NULL`, even
+    though all 19 live rows match that — filtering on a column these rows happen
+    to lack is the exact mistake 0015's repair made, which is why the defect
+    surfaced in UAT weeks later. Ownership is not filtered either.
+  - **`status_measured_at` stays NULL; `last_error` is preserved.** `'blocked'` is
+    a policy decision, not a cache observation. Epic's API refusing us is not an
+    observation of the cache, and conflating the two is what 0015 exists to end.
+
+**Test Coverage:** 8 tests in
+`tests/db/test_migration_0018_retire_failed_status.py`, weighted toward blast
+radius rather than the happy path: every other status is left alone, an
+already-blocked row gains no transition row, the migration is idempotent, rows
+that *were* measured are still migrated, and unowned rows are migrated too. Full
+suite **1993 passed, 3 deselected**. ruff / semgrep / gitleaks clean; the
+build-breaking writer guard still passes.
+
+**Related:** #316, #317. Security audit:
+`docs/security-audits/cache-truth-terminal-states-security-audit.md`.
+
+**Known Limitations:**
+  - **Not yet deployed.** The migration needs a container recreate, which reaps a
+    running sweep — 12 of 15 historical sweep failures were recreate kills — so
+    it is held for an inter-sweep gap.
+  - **#317's result is not yet observed.** Job 46651 is queued behind sweep 46650
+    and executes when the worker frees. Until then, `record_job_outcome()`
+    remains verified by unit tests only, and `last_job_outcome` is NULL on all
+    3222 rows.
+  - No down-migration (out of scope for MVP per ADR-0008). Recovery is a single
+    `UPDATE` driven by the `measurement_transitions` rows this migration writes,
+    which record the prior value for every affected row.

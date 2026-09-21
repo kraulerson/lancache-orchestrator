@@ -19,6 +19,41 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Data Model — migration 0018 retires a status no code can produce or clear — 2026-09-21
+
+- **19 owned games carried `status='failed'` permanently (#316).** No module
+  writes `'failed'` any more — `grep` finds it only in comments — and 0015's
+  repair predicate required a `last_validated_at` these rows do not have, so it
+  passed them by. They *are* re-attempted daily, but every attempt errors, which
+  correctly takes the attempt-only path and writes no cache truth. The label
+  therefore survived forever. UAT 15 judged the display acceptable, which is why
+  it sat open; acceptable-to-look-at is not the same as true.
+- **Migrated to `'blocked'`, not `'unknown'`.** Both are legal in the 0001 CHECK
+  constraint. `'unknown'` means "not established yet" — a state the sweep exists
+  to resolve, which would imply pending work forever. `'blocked'` means "we are
+  not going to fetch this", which is the operational truth: these rows are
+  already excluded from prefill, so the status finally matches the behaviour.
+- **The operator's instruction was conditional** — migrate only if they genuinely
+  cannot be downloaded — so it was verified live first. It holds by two different
+  mechanisms: 15 Epic rows are refused by Epic's own manifest API (HTTP 4xx, and
+  the titles explain it — EA App products, a mobile SKU, a delisted game), and 4
+  Steam rows are absent from SteamPrefill's 1192-app selection so no manifest can
+  ever land, three of those four being tools rather than games.
+- **`commanded = 1` on every audit row.** 19 downward transitions arriving in one
+  instant would otherwise sit in the circuit breaker's rolling window at 76% of
+  its default threshold of 25 — a maintenance migration able to halt cache-truth
+  writes library-wide. That is precisely what #310/0016 added the flag for.
+  `downward` is recorded honestly as 1; the commanded flag, not a falsified
+  direction, is what excludes it.
+- **Not predicated on `status_measured_at`,** even though all 19 rows have it
+  NULL. Filtering on a column these rows happen to lack is the exact mistake
+  0015's repair made. Ownership is likewise not filtered — a row skipped for
+  being unowned would become a fresh instance of this bug when library_sync
+  re-owned it. `status_measured_at` stays NULL and `last_error` is preserved:
+  `'blocked'` is a policy decision, not a cache observation.
+- 8 tests. Full suite **1993 passed, 3 deselected**.
+
+
 ### Documentation — the architecture doc described a system that no longer existed — 2026-09-19
 
 - **`PROJECT_BIBLE.md` §3.5 rewritten.** It still described the pre-re-architecture
