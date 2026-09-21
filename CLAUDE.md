@@ -34,7 +34,10 @@ or 24 hours past the last commit touching this file.
   `docs/superpowers/`.
 - **Not yet released:** all 134 `CHANGELOG.md` entries sit under `[Unreleased]`;
   no version has been tagged.
-- **Tests:** 1867 passing (3 deselected). Run them as
+- **Tests:** 1993 passing (3 deselected), verified by the UAT-17 automated-suite
+  agent 2026-09-21. The long-stale 1867 figure here caused that agent to compute
+  a wrong delta before it was corrected — quoting a number nobody re-derives is
+  how it spreads. Run them as
   `PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest` — the PATH prefix is
   required, or `tests/test_licenses.py` false-fails on a missing `pip-licenses`
   binary that is installed in `.venv/bin` but not otherwise on PATH. Bare `python`
@@ -114,9 +117,17 @@ or 24 hours past the last commit touching this file.
   unknown` — rather than extrapolating a falling count into a reassuring
   "never", which the spec calls the most dangerous output the function could
   give. That path was previously covered only by a unit test.
-  **Still unproven: monitor 220 actually going DOWN.** No eviction or mode-000
-  alert has fired since the promotion, so the alarm path remains tests-only —
-  the same shape of gap #317 tracks for `record_job_outcome()`.
+  **Monitor 220's DOWN path is now proven too (2026-09-19 23:07).** Exercised
+  deliberately: 12 files named `deadbeef0000000000000000000000NN` created and
+  `rm`-ed inside `/volume1/keyszone-alarm-test` as root **inside the container**
+  (`karl` cannot write `/volume1`). A scratch directory outside the cache tree
+  works because fanotify uses `FAN_MARK_FILESYSTEM` and `handle_delete()` filters
+  only on the filename regex, with no path filter. Result: actor `other` →
+  counts toward eviction → `ALERT eviction: cache eviction detected (10
+  deletes/60s) by other`; monitor 220 went `status=0` then latched
+  `cache loss alerted 6s ago; latched for 3600s`; deletes 11 and 12 were
+  cooldown-suppressed. **218 and 219 stayed green throughout**, which is the
+  direct proof the two-monitor split was right.
   **The zone is still provisioned beyond what the NAS has RAM to hold** —
   `10000m` needs ~10 GiB on a 15.4 GiB host carrying an 8 GiB agent limit, so the
   host OOMs before the index fills (**issue #346**, out of scope for the alarm
