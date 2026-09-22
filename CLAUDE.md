@@ -34,10 +34,11 @@ or 24 hours past the last commit touching this file.
   `docs/superpowers/`.
 - **Not yet released:** all 134 `CHANGELOG.md` entries sit under `[Unreleased]`;
   no version has been tagged.
-- **Tests:** 1993 passing (3 deselected), verified by the UAT-17 automated-suite
-  agent 2026-09-21. The long-stale 1867 figure here caused that agent to compute
-  a wrong delta before it was corrected — quoting a number nobody re-derives is
-  how it spreads. Run them as
+- **Tests:** 2014 passing (3 deselected) as of 2026-09-22, after the #355 fix.
+  The long-stale 1867 figure here caused the UAT-17 automated-suite agent to
+  compute a wrong delta before it was corrected — quoting a number nobody
+  re-derives is how it spreads. Re-derive it rather than trusting this line.
+  Run them as
   `PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest` — the PATH prefix is
   required, or `tests/test_licenses.py` false-fails on a missing `pip-licenses`
   binary that is installed in `.venv/bin` but not otherwise on PATH. Bare `python`
