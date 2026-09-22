@@ -240,3 +240,46 @@ def test_the_message_carries_the_live_numbers():
     v = verdict(_sample(35_600_000), effective_capacity(ZONE_KEYS, RAM_KEYS), [])
     assert "35.6M" in v.msg
     assert "54%" in v.msg
+
+
+# --- #355: a corrupted history must never read as healthy -------------------
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "inf", "-inf"],
+)
+def test_a_non_finite_history_point_projects_unknown_rather_than_nonsense(bad):
+    """SEV-1 #355. NaN is a fourth case that must never read as reassurance.
+
+    `float("nan")` succeeds, so a corrupted row reaches this function as real
+    data. NaN then propagates: every IEEE 754 comparison against it is False, so
+    the guards below (`per_day <= 0`, `n1 >= target`) all fall through and the
+    function returns `nan` instead of None — the one value its docstring promises
+    never to return for an unusable history.
+    """
+    assert project_days_to([(0.0, bad), (86400.0, 35_700_000.0)], 49_500_000.0) is None
+    assert project_days_to([(0.0, 35_700_000.0), (86400.0, bad)], 49_500_000.0) is None
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")], ids=["nan", "inf"])
+def test_a_non_finite_timestamp_projects_unknown(bad):
+    """The timestamp is read from the same corrupted row as the count, so it can
+    carry the same poison. `elapsed <= 0` is False for NaN, so the existing guard
+    does not catch it."""
+    assert project_days_to([(bad, 35_000_000.0), (86400.0, 35_700_000.0)], 49_500_000.0) is None
+
+
+def test_a_poisoned_history_never_yields_an_up_verdict():
+    """The whole point of #355, asserted end to end.
+
+    The alarm exists because the 2026-07-31 mass deletion ran nine days on an
+    absent signal being read as a quiet one. A verdict of "up" derived from
+    corrupted input is that same failure wearing a new hat, and it is worse than
+    no alarm because it is trusted.
+    """
+    poisoned = [(0.0, float("nan")), (86400.0, 35_700_000.0)]
+    v = verdict(_sample(35_700_000), effective_capacity(ZONE_KEYS, RAM_KEYS), poisoned)
+    assert "nan" not in v.msg.lower(), "a NaN must never reach the operator-visible message"
+    assert "trend unknown" in v.msg, "an unusable history must say so in words"

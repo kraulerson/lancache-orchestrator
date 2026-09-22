@@ -105,26 +105,46 @@ def effective_capacity(zone_keys, ram_keys):
 def project_days_to(history, target):
     """Days until `target` objects at the observed rate, or None if unknowable.
 
-    None covers three cases that must never be reported as reassurance: too few
-    points to fit a line, a flat trend, and a SHRINKING one. A falling object
-    count means eviction is already under way; extrapolating it yields a negative
-    slope and an answer of 'never', which is the most dangerous possible output.
+    None covers FOUR cases that must never be reported as reassurance: too few
+    points to fit a line, a flat trend, a SHRINKING one, and a non-finite value.
+    A falling object count means eviction is already under way; extrapolating it
+    yields a negative slope and an answer of 'never', which is the most dangerous
+    possible output.
+
+    The non-finite case is #355, and it was a real false-healthy bug rather than
+    a hypothetical: `float("nan")` SUCCEEDS, so a corrupted history row arrived
+    here as data. Every IEEE 754 comparison against NaN is False, so `elapsed <=
+    0`, `per_day <= 0` and `n1 >= target` all fell through and this function
+    returned `nan` -- the one thing its contract promises it never returns for an
+    unusable history. `verdict()` then fell through both of ITS alarm branches
+    for the same reason and reported "up".
+
+    Guarded here AND in read_history(). Either alone leaves a gap: upstream-only
+    leaves any other caller exposed, downstream-only leaves the poison in the
+    history file where it still skews the object count and percentage used.
     """
     if len(history) < 2:
         return None
 
     (t0, n0), (t1, n1) = history[0], history[-1]
+    if not all(math.isfinite(v) for v in (t0, n0, t1, n1, target)):
+        return None
+
     elapsed = t1 - t0
     if elapsed <= 0:
         return None
 
     per_day = (n1 - n0) / (elapsed / 86400.0)
-    if per_day <= 0:
+    if not math.isfinite(per_day) or per_day <= 0:
         return None
 
     if n1 >= target:
         return 0.0
-    return (target - n1) / per_day
+
+    days = (target - n1) / per_day
+    # Belt and braces: finite inputs and a finite positive slope should make this
+    # finite, but the alarm's whole job is to not be quietly wrong.
+    return days if math.isfinite(days) else None
 
 
 def verdict(sample, ceiling, history, floor=0.75, horizon_days=90.0):
