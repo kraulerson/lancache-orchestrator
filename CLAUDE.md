@@ -32,9 +32,9 @@ or 24 hours past the last commit touching this file.
   drivers) on the NAS beside lancache itself. See
   `docs/deploy/lxc-cutover-runbook.md` and the migration runbooks under
   `docs/superpowers/`.
-- **Not yet released:** all 134 `CHANGELOG.md` entries sit under `[Unreleased]`;
+- **Not yet released:** all 164 `CHANGELOG.md` entries sit under `[Unreleased]`;
   no version has been tagged.
-- **Tests:** 2014 passing (3 deselected) as of 2026-09-22, after the #355 fix.
+- **Tests:** 2027 passing (3 deselected) as of 2026-10-06, after the #362/#363 fixes.
   The long-stale 1867 figure here caused the UAT-17 automated-suite agent to
   compute a wrong delta before it was corrected — quoting a number nobody
   re-derives is how it spreads. Re-derive it rather than trusting this line.
