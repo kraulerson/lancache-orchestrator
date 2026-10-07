@@ -46,6 +46,26 @@ for handoff clarity. Categories are ordered by impact severity.
 - Found by the UAT 17 exploratory agent, never filed, and surfaced at
   consolidation.
 
+### Fixed — a corrupted history can no longer make the cache-index alarm read healthy (#355) — 2026-09-22
+
+- **SEV-1.** `float("nan")` succeeds, so `read_history()`, which caught only
+  `ValueError`, admitted a corrupted row of `/log/key_budget.csv` as a
+  measurement. Every IEEE 754 comparison against NaN is False, so it fell past
+  every guard in `project_days_to()` and `verdict()` and the alarm reported
+  **up**. The only outward sign was the garbled message `nand to floor`. A false
+  all-clear in the alarm built because the 2026-07-31 mass deletion was an
+  absent signal read as a quiet one.
+- Guarded in both places, because either alone leaves a gap.
+  `read_history()` now skips non-finite fields as it already skipped malformed
+  ones. `project_days_to()` returns `None` for any non-finite input or result,
+  making NaN the fourth "unknowable" case beside too few points, flat and
+  shrinking.
+- Added `tests/tools/test_key_budget_probe.py`, the probe's first tests. The plan
+  had argued it needed none because its decisions lived in `key_budget.py`.
+  But input validation is a decision, and it lived in the untested file.
+- Found by the UAT 17 exploratory agent. Merged in PR #356; deployed to the NAS
+  2026-09-23. This entry was missed at the time and added 2026-10-06.
+
 ### Data Model — migration 0018 retires a status no code can produce or clear — 2026-09-21
 
 - **19 owned games carried `status='failed'` permanently (#316).** No module
