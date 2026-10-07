@@ -39,7 +39,7 @@ public sealed class SteamKitGateway : ISteamGateway
         cdn = new Client(client);
         callbacks.Subscribe<SteamClient.ConnectedCallback>(_ => connected.TrySetResult());
         callbacks.Subscribe<SteamClient.DisconnectedCallback>(OnDisconnected);
-        callbacks.Subscribe<SteamUser.LoggedOnCallback>(cb => loggedOn.TrySetResult(cb.Result));
+        callbacks.Subscribe<SteamUser.LoggedOnCallback>(OnLoggedOn);
         callbacks.Subscribe<SteamUser.LoggedOffCallback>(OnLoggedOff);
         pump = Task.Run(() =>
         {
@@ -51,6 +51,14 @@ public sealed class SteamKitGateway : ISteamGateway
     }
 
     private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>`online` is set here, on the pump thread, so a disconnect or log-off the
+    /// pump processes afterwards cannot be overwritten by the awaiting caller.</summary>
+    private void OnLoggedOn(SteamUser.LoggedOnCallback cb)
+    {
+        online = cb.Result == EResult.OK;
+        loggedOn.TrySetResult(cb.Result);
+    }
 
     private void OnDisconnected(SteamClient.DisconnectedCallback cb)
     {
@@ -90,7 +98,6 @@ public sealed class SteamKitGateway : ISteamGateway
             var result = await loggedOn.Task.WaitAsync(StepTimeout, ct);
             if (result == EResult.OK)
             {
-                online = true;
                 log.WriteLine($"logged on as {session.Username}");
                 return new LogOnResult(LogOnOutcome.Ok, "OK");
             }
@@ -109,7 +116,11 @@ public sealed class SteamKitGateway : ISteamGateway
 
     private void EnsureOnline()
     {
-        if (!online)
+        // `online` is only flipped when the pump runs OnDisconnected/OnLoggedOff, which can
+        // lag the drop. SteamKit2's CMClient clears IsConnected before it posts the
+        // DisconnectedCallback and before it cancels pending jobs, so checking it too
+        // closes the window in which a cancelled job looks like a per-request failure.
+        if (!online || !client.IsConnected)
         {
             throw new SessionLostException("not connected to Steam");
         }
@@ -133,8 +144,16 @@ public sealed class SteamKitGateway : ISteamGateway
         _ => null,
     };
 
+    /// <summary>A timeout or an HTTP 5xx: the host is unwell, not the request.</summary>
+    private static bool IsSlowFailure(Exception e) =>
+        e is TaskCanceledException or TimeoutException
+        || e.InnerException is TimeoutException
+        || (int?)StatusOf(e) >= 500;
+
     /// <summary>A failure while still online is one bad request; a failure after the
-    /// connection dropped is a lost session.</summary>
+    /// connection dropped is a lost session. The re-check in the catch uses
+    /// client.IsConnected as well as `online`, because the pump may not have processed
+    /// the disconnect yet when SteamKit2 cancels the pending job.</summary>
     private async Task<T> Call<T>(Func<Task<T>> call, string what, CancellationToken ct)
     {
         EnsureOnline();
@@ -192,10 +211,19 @@ public sealed class SteamKitGateway : ISteamGateway
 
     public async Task SaveManifestAsync(uint depotId, uint containingAppId, ulong manifestId, byte[] depotKey, string path, CancellationToken ct)
     {
-        servers ??= (await Call(() => content.GetServersForSteamPipe(), "CDN server list", ct))
-            .Where(s => s.Type is "SteamCache" or "CDN")
-            .OrderBy(s => s.WeightedLoad)
-            .ToList();
+        if (servers is null)
+        {
+            var fetched = (await Call(() => content.GetServersForSteamPipe(), "CDN server list", ct))
+                .Where(s => s.Type is "SteamCache" or "CDN")
+                .OrderBy(s => s.WeightedLoad)
+                .ToList();
+            if (fetched.Count == 0)
+            {
+                // Not cached: one empty answer must not fail every later manifest in the run.
+                throw new SteamRequestException("Steam returned no CDN servers");
+            }
+            servers = fetched;
+        }
         var code = await Call(() => content.GetManifestRequestCode(depotId, containingAppId, manifestId, "public"),
             $"request code for depot {depotId}", ct);
         if (code == 0)
@@ -204,7 +232,12 @@ public sealed class SteamKitGateway : ISteamGateway
         }
 
         Exception? last = null;
-        foreach (var server in servers.Where(s => s.AllowedAppIds.Length == 0 || s.AllowedAppIds.Contains(containingAppId)).Take(MaxServersPerManifest))
+        // Materialized: the loop below reorders `servers`, which must not be the collection being enumerated.
+        var candidates = servers
+            .Where(s => s.AllowedAppIds.Length == 0 || s.AllowedAppIds.Contains(containingAppId))
+            .Take(MaxServersPerManifest)
+            .ToList();
+        foreach (var server in candidates)
         {
             var host = server.Host!;
             cdnTokens.TryGetValue((depotId, host), out var known);
@@ -235,6 +268,13 @@ public sealed class SteamKitGateway : ISteamGateway
                 if (StatusOf(e) is HttpStatusCode.Unauthorized or HttpStatusCode.NotFound or HttpStatusCode.Forbidden)
                 {
                     break;
+                }
+                // A hung or failing host would otherwise cost its timeout on every manifest
+                // of the run, because the list is ordered once. Send it to the back.
+                if (IsSlowFailure(e))
+                {
+                    servers.Remove(server);
+                    servers.Add(server);
                 }
             }
         }

@@ -24,7 +24,9 @@ public static class Cli
                 ? await FetchAsync(options, stdout, stderr, gatewayFactory, ct)
                 : await LoginCommand.RunAsync(options["--username"], options["--session-dir"], stderr, ct);
         }
-        catch (Exception e) when (e is not OperationCanceledException)
+        // Only the caller's own cancellation propagates; SteamKit2's job timeouts and
+        // disconnect cancellations are also OperationCanceledException and must exit 1.
+        catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             stderr.WriteLine($"unexpected: {e.GetType().Name}: {e.Message}");
             return ExitCodes.Unexpected;

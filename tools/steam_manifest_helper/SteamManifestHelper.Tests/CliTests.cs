@@ -57,6 +57,23 @@ public sealed class CliTests : IDisposable
     }
 
     [Fact]
+    public async Task An_internal_cancellation_is_exit_1_not_a_crash()
+    {
+        var sessionDir = Path.Combine(root, "s");
+        SessionStore.Save(sessionDir, new SteamSession("kraulerson", "eyJ-test"));
+        var apps = Path.Combine(root, "apps.txt");
+        File.WriteAllText(apps, "10\n");
+        var gateway = new FakeSteamGateway();
+        gateway.LogOnThrows.Enqueue(new TaskCanceledException("steam job timed out"));
+        var stderr = new StringWriter();
+        var code = await Cli.RunAsync(
+            ["fetch", "--apps", apps, "--out", Path.Combine(root, "out"), "--session-dir", sessionDir, "--username", "kraulerson"],
+            new StringWriter(), stderr, () => gateway, CancellationToken.None);
+        Assert.Equal(ExitCodes.Unexpected, code);
+        Assert.Contains("unexpected", stderr.ToString());
+    }
+
+    [Fact]
     public void App_ids_are_read_once_each_and_blank_lines_are_skipped()
     {
         var apps = Path.Combine(root, "apps.txt");
