@@ -307,3 +307,24 @@ def test_a_non_positive_ceiling_reads_over_floor_and_names_the_setting(ram_keys)
     assert v.status == "down"
     assert v.msg.startswith("OVER FLOOR")
     assert "RAM_BUDGET_BYTES" in v.msg
+
+
+@pytest.mark.parametrize(
+    "budget,per_key",
+    [(0, 128.5), (-1, 128.5), (-9 * 1024**3, 128.5), (0, None)],
+    ids=["zero", "minus-one", "minus-9GiB", "zero-with-cost-unreadable"],
+)
+def test_a_budget_of_zero_or_less_is_no_room_not_unknown(budget, per_key):
+    """Review of #363: the fix kept a ceiling of 0, but ram_capacity_keys turned
+    a budget of 0 -- the likeliest typo -- into None first, so the alarm still
+    fell back to the zone and read healthy. A budget of zero or less is no room
+    at all, whether or not the per-key cost could be measured."""
+    assert ram_capacity_keys(budget, per_key) == 0
+
+
+def test_a_zone_ceiling_of_zero_names_cache_index_size():
+    """The other arm of the no-room message: it must name the setting that
+    actually produced the ceiling, not always RAM_BUDGET_BYTES."""
+    v = verdict(_sample(35_600_000), effective_capacity(0, RAM_KEYS), [])
+    assert v.status == "down"
+    assert "CACHE_INDEX_SIZE" in v.msg

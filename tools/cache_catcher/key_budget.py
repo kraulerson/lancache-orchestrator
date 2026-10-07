@@ -83,7 +83,14 @@ def ram_capacity_keys(ram_budget_bytes, bytes_per_key):
     configured zone size is unreachable: 10000m needs ~10 GiB on a 15.4 GiB host
     that also carries an 8 GiB agent limit. See issue #346.
     """
-    if not ram_budget_bytes or not bytes_per_key or bytes_per_key <= 0:
+    if ram_budget_bytes is None:
+        return None
+    if ram_budget_bytes <= 0:
+        # Zero or less is no room at all, whatever a key costs. Testing it by
+        # truthiness turned the likeliest typo, 0, into "unknown", which fell
+        # back to the zone and read healthy (#363 review).
+        return 0
+    if not bytes_per_key or bytes_per_key <= 0:
         return None
     return int(ram_budget_bytes / bytes_per_key)
 

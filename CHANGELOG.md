@@ -28,10 +28,16 @@ for handoff clarity. Categories are ordered by impact severity.
   the alarm was built to rule out.
 - A non-positive ceiling now reads `OVER FLOOR ... so no room; check
   RAM_BUDGET_BYTES` instead of dividing by it. It is only reachable through a
-  `RAM_BUDGET_BYTES` below one key's size, an operator typo, so no live reading
-  was ever affected.
-- Found by the UAT 17 exploratory agent, never filed, and surfaced at
-  consolidation.
+  `RAM_BUDGET_BYTES` of zero, a negative number, or less than one key's size:
+  an operator typo, so no live reading was ever affected.
+- **A budget of 0 is now "no room" too.** The first version of this fix kept a
+  ceiling of 0, but `ram_capacity_keys()` still turned a budget of 0, the
+  likeliest typo, into "unknown" before that code ever saw it, so it still read
+  healthy. The pre-merge adversarial review caught it. A new end-to-end test
+  follows `RAM_BUDGET_BYTES=0` from the env file to a DOWN push, because the
+  unit tests had skipped the step where the bug lived.
+- Found by the UAT 17 exploratory agent on 2026-09-21, and filed at UAT 17
+  consolidation on 2026-10-06.
 
 ### Fixed — the cache-index alarm can no longer crash on a bad message (#362) — 2026-10-06
 
@@ -43,8 +49,8 @@ for handoff clarity. Categories are ordered by impact severity.
   odd message is still a heartbeat. A message that cannot be rendered at all
   reports undelivered. A mutation test confirms that test fails if rendering
   moves back outside the `try`.
-- Found by the UAT 17 exploratory agent, never filed, and surfaced at
-  consolidation.
+- Found by the UAT 17 exploratory agent on 2026-09-21, and filed at UAT 17
+  consolidation on 2026-10-06.
 
 ### Fixed — a corrupted history can no longer make the cache-index alarm read healthy (#355) — 2026-09-22
 
