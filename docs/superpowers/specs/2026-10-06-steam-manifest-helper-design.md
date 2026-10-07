@@ -1,7 +1,7 @@
 # Steam Manifest Helper — Design
 
 **Date:** 2026-10-06
-**Status:** Draft — awaiting Orchestrator review
+**Status:** Approved (Orchestrator: Karl Raulerson, 2026-10-07). Built as the next feature, re-triaged out of UAT 17
 **Issue:** #361 (UAT 17 triage: Fix Now)
 **Supersedes:** the one-DepotDownloader-process-per-app fetch from #213, and the
 #228 retry/back-off that was meant to make it safe
