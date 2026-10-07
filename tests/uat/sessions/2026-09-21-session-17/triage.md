@@ -1,8 +1,12 @@
 # UAT Session 17 — triage
 
-**Status: TRIAGED by Karl, 2026-10-06.** Every finding from the three agents,
-Karl's results, and one issue carried in from outside the session is below. Karl
-accepted every recommendation as written, and confirmed #330 stays SEV-3.
+**Status: CLOSED 2026-10-07.** Every finding from the three agents, Karl's
+results, and one issue carried in from outside the session is below. Karl
+accepted every recommendation as written on 2026-10-06, and confirmed #330 stays
+SEV-3. On 2026-10-07 he re-triaged #361 from Fix Now to the next feature: its
+fix grew from a code change into a new component, so it gets the full build loop
+and its own test session. That left #362 and #363 as the only Fix Now items,
+both shipped, so the session closes.
 
 ## Karl's results: 10 of 10 PASS
 
@@ -33,9 +37,9 @@ Two notes on the submission itself:
 | Issue | Sev | Source | Title | Karl's decision |
 |---|---|---|---|---|
 | #355 | SEV-1 | exploratory E1 | NaN-poisoned history reads as healthy | **Done**: fixed, deployed 2026-09-23, closed |
-| #361 | SEV-3 | carried in (homelab, 2026-10-06) | Weekly `fetch_manifests` logon storm rate-limits the Steam account | **Fix Now** |
-| #362 | SEV-3 | exploratory E2 | `kuma.push` raises on a non-string msg (latent) | **Fix Now** |
-| #363 | SEV-3 | exploratory E3 | Alarm drops a ceiling of 0, reports healthy | **Fix Now** |
+| #361 | SEV-3 | carried in (homelab, 2026-10-06) | Weekly `fetch_manifests` logon storm rate-limits the Steam account | **Next feature** (re-triaged 2026-10-07; design approved) |
+| #362 | SEV-3 | exploratory E2 | `kuma.push` raises on a non-string msg (latent) | **Fix Now**: fixed, PR #366, deployed 2026-10-07 |
+| #363 | SEV-3 | exploratory E3 | Alarm drops a ceiling of 0, reports healthy | **Fix Now**: fixed, PR #366, deployed 2026-10-07 |
 | #364 | SEV-4 | exploratory E5-E7 | Double-`?` URL, hidden sampling error, negative RAM budget | **Defer**, after checking item 1 (see below) |
 | #312 | SEV-3 | exploratory E4 | Writer-guard evasions | **Defer**: three new forms added to the existing issue |
 | #330 | SEV-3 | live-systems L1 | Epic prefill monitor 181 DOWN, no job enqueued | **Stays SEV-3**, queued (see below) |
@@ -80,3 +84,19 @@ to download; the monitor cannot tell idle from dead.
 
 **No unresolved SEV-1.** Per CLAUDE.md, SEV-1 cannot be deferred. The only one,
 #355, is fixed and deployed.
+
+## Remediation (2026-10-07)
+
+- **#362 and #363** merged in PR #366 (`c0ef65b`). All 8 CI checks passed.
+  Deployed to the NAS `cache-catcher` container at 03:18 UTC, after backing up
+  the live files (`/log/kuma.py.bak-pre362`, `/log/key_budget.py.bak-pre363`).
+  Kuma's own database recorded monitors 218, 219 and 220 UP from the restarted
+  guard. The pre-merge adversarial review found that `RAM_BUDGET_BYTES=0` still
+  read healthy; that was fixed before merge (`c84271a`).
+- **New from that review:** #365 (a mistyped `FLOOR` reads healthy at 123%
+  full; a non-UTF-8 env byte can kill the guard), and two edge cases recorded on
+  #364. Both are untriaged for a later session.
+- **#361:** root cause verified, and design approved by Karl on 2026-10-07:
+  `docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`. It is the
+  next feature.
+
