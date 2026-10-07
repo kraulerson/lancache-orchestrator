@@ -219,3 +219,34 @@ in a gap between sweeps.
   failure that names the `login` command, never as a silent success.
 - **Image size** may not fit under 250 MB. Measured in the spike; Karl decides if
   it does not.
+
+## Refinements made while planning (2026-10-07)
+
+Refinements 1-3 were made while planning; 4 and 5 at the Task 1 gate.
+
+1. `fetch` also takes `--username`, because the session and the import are keyed by account.
+2. After a reconnect, the app interrupted by the drop is **retried**, not skipped. The drop was not that app's fault.
+3. A CDN 403 fetches a CDN auth token and retries once (DepotDownloader's policy).
+4. CI's image limit is 275 MiB, not 250 (Karl, 2026-10-07). The helper is published self-contained and untrimmed, as designed, at 86.4 MiB, which puts the image at about 254 MiB.
+5. Parity is judged on chunk-SHA content (Karl, 2026-10-07). 242 archive files written in bulk on 2026-06-26 lack a trailing newline; the reader (`parse_shas`, `splitlines()`) ignores it, and the helper matches today's `_write_shas` byte for byte.
+
+### Rulings made during construction (2026-10-07)
+
+The code follows these, not the plan's verbatim code.
+
+1. Session file is 0600 from creation: a unique temp file opened with `UnixCreateMode` 0600 in a 0700 directory, fsynced, then renamed over `session.json` (previously a 0644 temp file was chmod-ed afterwards).
+2. The helper logs on with a fixed `LoginID` of 0x534D48 ("SMH"), as DepotDownloader 3.4.0 uses its own fixed ID.
+3. A Steam log-off (`LoggedOffCallback`) counts as a lost session, like a dropped connection: one reconnect, then exit 4; the handler also disconnects the client.
+4. Session loss is detected from both the helper's own flag (set on the callback thread) and `SteamClient.IsConnected`, so a drop mid-request is retried rather than filed as one app's error.
+5. A Steam connect failure on the first logon ends the run with `login_refused`, exit 2 ("could not reach Steam: ...", no login-command advice); a failure during the reconnect ends with `not_attempted` for the rest and exit 4.
+6. A depot whose owner app returns no info makes its app `error` with a reason, never `no_depots`.
+7. Any failed depot makes its whole app `error`; Python archives `.shas` only for `ok` apps, so a partly fetched app is retried the next week.
+8. App info is not cached when Steam returns nothing, and an empty CDN server list is not cached either.
+9. A depot key is "not owned" only on `AccessDenied`; any other refusal is an error for that app.
+10. Each manifest is tried on up to 6 CDN servers (was 3): a 401, a 404, or a 403 that survives the one CDN-token retry stops the attempt; a timeout or 5xx moves to the next server and sends the failing one to the back.
+11. Error texts carry exception types and HTTP status codes only, never a raw library message, so no token or URL query string can reach a log.
+12. `login` exits 1 on Steam's own internal cancellations instead of crashing with exit 134.
+13. Python counts every requested app: lines are keyed by app id (last wins), lines for unrequested apps are ignored, on exit 0 a requested app with no line counts as failed (a summary-only run fails the job), and every skipped manifest name is logged.
+14. Python logs the helper's stderr tail and summary on every failure (`manifest_fetch.helper_failed`, `manifest_fetch.helper_timed_out`) and on `manifest_fetch.done`; the exit-2 label reads "login failed".
+15. The image build fails loudly on an unsupported `TARGETARCH` and on a `dotnet test` run that finds zero tests (`TreatNoTestsAsError`); the helper restore stays in locked mode for both RIDs.
+16. The protobuf-net licence file ships the full Apache-2.0 text.

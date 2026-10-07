@@ -1867,3 +1867,76 @@ build-breaking writer guard still passes.
   - No down-migration (out of scope for MVP per ADR-0008). Recovery is a single
     `UPDATE` driven by the `measurement_transitions` rows this migration writes,
     which record the prior value for every affected row.
+
+---
+
+## Feature 30: One-Login Steam Manifest Helper (#361)
+
+**Phase Built:** 2 (Construction)
+**Status:** Complete — pending deploy and live verification (2026-10-07)
+
+**Summary:** The weekly `fetch_manifests` job ran one DepotDownloader process per
+app, so 1,211 Steam logins a run held the account in a rate limit for hours and
+refused the SteamPrefill run that shares it. A new C# helper on SteamKit2 logs in
+once, fetches every app's manifests in that session, and reports one JSON line per
+app. Python calls it once, keeps choosing games and writing `.shas`, and now fails
+the job when a requested app comes back with no result. DepotDownloader is removed
+from the image.
+
+**Key Interfaces:**
+  - `tools/steam_manifest_helper/SteamManifestHelper/` (`fetch` and `login`
+    subcommands; exit codes 0, 1, 2, 3, 4, 64)
+  - `src/orchestrator/platform/steam/manifest_fetcher.py`: `fetch_all()` and
+    `FetchResult(fetched, skipped, failed, apps)` unchanged
+  - Setting `steam_manifest_helper_binary` (replaces `depotdownloader_binary`);
+    `ORCH_STEAM_USERNAME` names the account
+  - Session file `/depotdownloader-config/steam-manifest-helper/session.json`
+    (0600, in a 0700 directory)
+  - `Dockerfile` stage `helper`; CI image limit 275 MiB
+
+**Locked decisions:**
+  - **Fresh code on SteamKit2, not DepotDownloader's code.** DepotDownloader is
+    GPL-2.0; the helper stays MIT and ships SteamKit2 (LGPL-2.1) as a separate,
+    replaceable assembly (self-contained, not single-file, not trimmed).
+  - **One logon per run, never a loop.** A dropped connection or Steam log-off
+    waits 60 s and reconnects once, retrying the interrupted app; a second loss
+    marks the rest `not_attempted` and exits 4.
+  - **Thin helper.** Python keeps enumeration, manifest parsing and `.shas`
+    writing, so the agent API is unchanged. `.shas` are archived only for `ok`
+    apps; a failed depot makes the whole app `error` so it is retried next week.
+  - **Replace, do not switch.** Both tools cannot fit CI's image limit, so
+    rollback is by the `dpa-pre-361` image tag. Karl raised the limit from 250 to
+    275 MiB (2026-10-07); the image is about 254 MiB.
+  - **Token import, then `login` to renew.** The helper imports the token
+    DepotDownloader saved; `login` (TTY, password, Steam app approval) is the only
+    renewal path afterwards.
+  - **The token is never printed, logged, put on argv or passed to Python**;
+    error texts carry exception types and HTTP status codes only.
+  - **Python counts every requested app.** A requested app with no result line is
+    a failure, so a run that skips apps fails instead of reporting green.
+  - Construction rulings (session file 0600 from creation, 6 CDN servers per
+    manifest, `AccessDenied` alone means "not owned", and others) are listed in
+    the spec.
+
+**Test Coverage:** 46 xUnit tests for the helper (session store, depot selection,
+CDN auth, CLI, fetch runner against a fake gateway), run during the image build,
+which fails on a failing or empty run. Python: the fetcher tests drive a scripted
+stand-in helper (one call per run, exit 2/3/4, timeout kill, hostile manifest
+names, unrequested and missing app lines). Full suite **2043 passed, 3
+deselected**. semgrep and gitleaks clean.
+
+**Related:** #361, #213, #228. ADR 0019. Spec
+`docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`; plan
+`docs/superpowers/plans/2026-10-07-steam-manifest-helper.md`; security audit
+`docs/security-audits/steam-manifest-helper-security-audit.md`.
+
+**Known Limitations:**
+  - **Not yet deployed.** Closure needs the Monday run after deploy:
+    `fetch_manifests.done` with `failed` near 0, one Steam login in the helper
+    log, the 06:00 MDT SteamPrefill run ending `END steam prefill ok`, and Kuma 176
+    UP. The token import is unproven against the live volume until then.
+  - The token sits in plain JSON on the persistent mount, as DepotDownloader's
+    did; `login` needs a TTY.
+  - `THIRD_PARTY_NOTICES.md` does not reach the image (`.dockerignore` drops root
+    `*.md`) and gives no SteamKit2 source location; two licence texts were fetched
+    from main or master. To be resolved before the first release tag.

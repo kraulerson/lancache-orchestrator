@@ -19,6 +19,39 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Changed — the weekly Steam manifest fetch logs in once, not 1,211 times (#361) — 2026-10-07
+
+- **Root cause: one Steam login per game, and a back-off that never ran.**
+  `fetch_manifests` started a DepotDownloader process per app (1,211 logins in a
+  run), holding the Steam account in a rate limit for hours and refusing the
+  06:00 MDT SteamPrefill run on three Mondays. The #228 back-off read `stderr`
+  while DepotDownloader writes to `stdout`: **0** `transient_retry` events across
+  729 failures on 2026-10-06.
+- **A new helper logs in once** (`tools/steam_manifest_helper/`, C#, SteamKit2
+  3.4.0, MIT). It imports the token DepotDownloader already saved, fetches every
+  app's manifests in that one session, waits 60 s and reconnects at most once on
+  a drop, and reports one JSON line per app.
+- **Python calls the helper once per run** and keeps choosing games, parsing
+  manifests and writing `.shas`. `fetch_all()` and `FetchResult` are unchanged.
+- **A run that silently skips apps now fails instead of reporting green.** Python
+  counts every requested app; one with no result line is a failure. The helper's
+  stderr tail and summary are logged on every failure.
+- **DepotDownloader is removed** from the image, along with the
+  `manifest_fetch_delay_sec`, `manifest_fetch_max_retries` and
+  `manifest_fetch_retry_backoff_sec` settings. `depotdownloader_binary` becomes
+  `steam_manifest_helper_binary`.
+- **A new `login` command renews the session** (`SteamManifestHelper login
+  --username <name> --session-dir <dir>`, needs a TTY and approval in the Steam
+  app). It is the only way to renew once DepotDownloader is gone; a rejected token
+  fails the run loudly and names it. See `docs/deploy/INSTALL.md`.
+- **CI's amd64 image limit is now 275 MiB** (was 250): the image is about
+  254 MiB with the 86 MiB self-contained helper in place of the 75 MiB
+  DepotDownloader. The image build runs the helper's tests and fails on none.
+- **Rollback is by image tag, not a switch:** `docker tag orchestrator:dpa-pre-361
+  orchestrator:dpa`, then recreate the agent in an inter-sweep gap.
+- Not deployed yet. Security audit:
+  `docs/security-audits/steam-manifest-helper-security-audit.md`. ADR 0019.
+
 ### Fixed — the cache-index alarm can no longer read healthy with no room (#363) — 2026-10-06
 
 - **A ceiling of zero is now an answer, not an unknown.** `effective_capacity()`

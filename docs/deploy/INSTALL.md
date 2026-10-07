@@ -101,6 +101,18 @@ docker volume create orchestrator-db
 docker volume create cache-catcher-log
 ```
 
+**Steam login for manifest fetching (one time).** The weekly manifest fetch logs
+in through `SteamManifestHelper` with a saved Steam session. An install that
+already has a DepotDownloader login in this volume needs nothing: the helper
+imports it on its first run. On a fresh install, or when a run fails with
+"Steam rejected the saved login", log in once. You'll type the password, then
+approve the login in the Steam app:
+
+    docker exec -it -u 0 orchestrator-agent /steam-manifest-helper/SteamManifestHelper \
+        login --username <steam-user> --session-dir /depotdownloader-config/steam-manifest-helper
+
+Set `ORCH_STEAM_USERNAME=<steam-user>` in the agent's env file as well.
+
 ### 4.3 `lancache-monolithic`
 
 Image is pinned **by digest**, not tag:
