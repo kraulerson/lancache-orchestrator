@@ -19,6 +19,59 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — the cache-index alarm can no longer read healthy with no room (#363) — 2026-10-06
+
+- **A ceiling of zero is now an answer, not an unknown.** `effective_capacity()`
+  filtered ceilings by truthiness, so a RAM ceiling of exactly 0 was dropped and
+  the alarm measured against the 80M zone instead: roughly 44% used, **up**,
+  when the host could hold no keys at all. That is the false-healthy direction
+  the alarm was built to rule out.
+- A non-positive ceiling now reads `OVER FLOOR ... so no room; check
+  RAM_BUDGET_BYTES` instead of dividing by it. It is only reachable through a
+  `RAM_BUDGET_BYTES` of zero, a negative number, or less than one key's size:
+  an operator typo, so no live reading was ever affected.
+- **A budget of 0 is now "no room" too.** The first version of this fix kept a
+  ceiling of 0, but `ram_capacity_keys()` still turned a budget of 0, the
+  likeliest typo, into "unknown" before that code ever saw it, so it still read
+  healthy. The pre-merge adversarial review caught it. A new end-to-end test
+  follows `RAM_BUDGET_BYTES=0` from the env file to a DOWN push, because the
+  unit tests had skipped the step where the bug lived.
+- Found by the UAT 17 exploratory agent on 2026-09-21, and filed at UAT 17
+  consolidation on 2026-10-06.
+
+### Fixed — the cache-index alarm can no longer crash on a bad message (#362) — 2026-10-06
+
+- **`kuma.push()` now keeps its "Never raises" promise for every input.**
+  `len(msg)` and `url.strip()` both ran outside the `try`, so a `None` message or
+  a non-string URL raised. No caller passes either today. But inside `alert()`
+  the exception would reach the fanotify loop and kill the guard.
+- A `None` or non-string message now sends as text, because a heartbeat with an
+  odd message is still a heartbeat. A message that cannot be rendered at all
+  reports undelivered. A mutation test confirms that test fails if rendering
+  moves back outside the `try`.
+- Found by the UAT 17 exploratory agent on 2026-09-21, and filed at UAT 17
+  consolidation on 2026-10-06.
+
+### Fixed — a corrupted history can no longer make the cache-index alarm read healthy (#355) — 2026-09-22
+
+- **SEV-1.** `float("nan")` succeeds, so `read_history()`, which caught only
+  `ValueError`, admitted a corrupted row of `/log/key_budget.csv` as a
+  measurement. Every IEEE 754 comparison against NaN is False, so it fell past
+  every guard in `project_days_to()` and `verdict()` and the alarm reported
+  **up**. The only outward sign was the garbled message `nand to floor`. A false
+  all-clear in the alarm built because the 2026-07-31 mass deletion was an
+  absent signal read as a quiet one.
+- Guarded in both places, because either alone leaves a gap.
+  `read_history()` now skips non-finite fields as it already skipped malformed
+  ones. `project_days_to()` returns `None` for any non-finite input or result,
+  making NaN the fourth "unknowable" case beside too few points, flat and
+  shrinking.
+- Added `tests/tools/test_key_budget_probe.py`, the probe's first tests. The plan
+  had argued it needed none because its decisions lived in `key_budget.py`.
+  But input validation is a decision, and it lived in the untested file.
+- Found by the UAT 17 exploratory agent. Merged in PR #356; deployed to the NAS
+  2026-09-23. This entry was missed at the time and added 2026-10-06.
+
 ### Data Model — migration 0018 retires a status no code can produce or clear — 2026-09-21
 
 - **19 owned games carried `status='failed'` permanently (#316).** No module

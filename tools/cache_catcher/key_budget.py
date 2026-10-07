@@ -83,7 +83,14 @@ def ram_capacity_keys(ram_budget_bytes, bytes_per_key):
     configured zone size is unreachable: 10000m needs ~10 GiB on a 15.4 GiB host
     that also carries an 8 GiB agent limit. See issue #346.
     """
-    if not ram_budget_bytes or not bytes_per_key or bytes_per_key <= 0:
+    if ram_budget_bytes is None:
+        return None
+    if ram_budget_bytes <= 0:
+        # Zero or less is no room at all, whatever a key costs. Testing it by
+        # truthiness turned the likeliest typo, 0, into "unknown", which fell
+        # back to the zone and read healthy (#363 review).
+        return 0
+    if not bytes_per_key or bytes_per_key <= 0:
         return None
     return int(ram_budget_bytes / bytes_per_key)
 
@@ -95,7 +102,9 @@ def effective_capacity(zone_keys, ram_keys):
     the number is bounded by cannot tell the operator what to do about it, which
     is the defect #326 and #330 both describe.
     """
-    known = [(k, name) for k, name in ((zone_keys, "zone"), (ram_keys, "ram")) if k]
+    # `is not None`, not truthiness: a ceiling of 0 is an answer -- no room at
+    # all -- and dropping it fell back to the zone and read healthy (#363).
+    known = [(k, name) for k, name in ((zone_keys, "zone"), (ram_keys, "ram")) if k is not None]
     if not known:
         return Ceiling(None, "unknown")
     keys, name = min(known)
@@ -158,6 +167,17 @@ def verdict(sample, ceiling, history, floor=0.75, horizon_days=90.0):
         return Verdict(
             "down",
             f"ceiling unknown (CACHE_INDEX_SIZE and RAM both unreadable); {objects_m:.1f}M objects",
+        )
+
+    if ceiling.keys <= 0:
+        # In practice only a RAM_BUDGET_BYTES below one key's size gets here
+        # (#363); the probe passes zone_capacity_keys a whole number of MB. Say
+        # which setting to fix, rather than dividing by it.
+        setting = "RAM_BUDGET_BYTES" if ceiling.name == "ram" else "CACHE_INDEX_SIZE"
+        return Verdict(
+            "down",
+            f"OVER FLOOR: {objects_m:.1f}M objects, {ceiling.name} ceiling is "
+            f"{ceiling.keys} keys, so no room; check {setting}",
         )
 
     used = sample.objects / ceiling.keys

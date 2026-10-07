@@ -153,3 +153,33 @@ def test_comments_and_blank_lines_are_ignored(tmp_path):
     p = tmp_path / "k.env"
     p.write_text("# a comment\n\nFLOOR=0.9\n   \n#FLOOR=0.1\n")
     assert key_budget_probe.load_cfg(p)["FLOOR"] == "0.9"
+
+
+# --- the config-to-verdict path: #363's review ------------------------------
+
+
+def test_a_ram_budget_of_zero_in_the_env_file_alarms_end_to_end(tmp_path, monkeypatch):
+    """#355's lesson applied to #363: follow the setting from the file to the
+    verdict. The unit tests passed a ceiling of 0 straight into
+    effective_capacity and never went through ram_capacity_keys, which is where
+    a budget of 0 was still being turned into "unknown" and read as healthy."""
+    env = tmp_path / "keybudget.env"
+    env.write_text("RAM_BUDGET_BYTES=0\n")
+    cfg = key_budget_probe.load_cfg(env)
+
+    per_leaf = int(35_600_000 / key_budget.TOTAL_LEAVES)
+    monkeypatch.setattr(
+        key_budget_probe, "sample_cache", lambda *a: key_budget.summarise_sample([per_leaf] * 256)
+    )
+    monkeypatch.setattr(key_budget_probe, "nginx_rss_bytes", lambda: 4_600_000_000)
+    monkeypatch.setattr(key_budget_probe, "nginx_index_size_mb", lambda: 10_000)
+    monkeypatch.setattr(key_budget_probe, "read_history", lambda *a: [])
+    monkeypatch.setattr(key_budget_probe, "append_history", lambda *a, **k: None)
+    pushed = []
+    monkeypatch.setattr(key_budget_probe.kuma, "push", lambda *a: pushed.append(a))
+
+    result = key_budget_probe.run_once(cfg)
+
+    assert result.status == "down"
+    assert "RAM_BUDGET_BYTES" in result.msg
+    assert pushed and pushed[0][1] == "down", "the down verdict must reach Kuma"
