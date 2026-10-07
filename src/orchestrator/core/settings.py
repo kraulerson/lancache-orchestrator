@@ -131,28 +131,23 @@ class Settings(BaseSettings):
     # Agent sync cadence (seconds) for copying live manifests into the archive.
     # 0 disables the periodic sync.
     manifest_archive_sync_interval_sec: int = Field(default=1800, ge=0)
-    # --- DepotDownloader manifest-only fetcher (validation-coverage gap) -----
+    # --- Steam manifest-only fetcher (validation-coverage gap) ---------------
     # Fetches manifests (NO chunks) for the cached library so validate covers
     # apps SteamPrefill skipped (already-up-to-date apps never (re)write a .bin).
-    # Self-contained .NET 8 binary; writes .shas sidecars into the archive.
-    depotdownloader_binary: Path = Path("/depotdownloader/DepotDownloader")
+    # #361: the one-login Steam manifest helper (C#, SteamKit2 3.4.0), replacing
+    # the per-app DepotDownloader invocation that logged in 1,211 times a run.
+    # Self-contained .NET 10 build; writes manifests the fetcher turns into .shas.
+    steam_manifest_helper_binary: Path = Path("/steam-manifest-helper/SteamManifestHelper")
+    # Persistent mount holding the Steam session. The helper keeps its own
+    # session.json under <dir>/steam-manifest-helper/, imported once from the
+    # DepotDownloader login already saved here.
     depotdownloader_config_dir: Path = Path("/depotdownloader-config")
-    # Steam account username for DepotDownloader's remembered-session path.
-    # A username is NOT a secret — it is passed on the argv as -username <user>
-    # so DepotDownloader can match the stored login key. Empty = no -username arg
-    # (single-account deploys where DD infers the account automatically).
+    # Steam account username. Not a secret: the helper takes it as --username to
+    # pick the right saved login. Required for manifest fetching.
     steam_username: str = ""
-    # Inter-request delay (seconds) between per-app DepotDownloader invocations.
-    # DepotDownloader is a per-app process (each run is its own Steam logon), so
-    # the run is throttled to stay under Steam's logon rate limit. Raised 3→8s
-    # (#228): back-to-back logons at 3s still tripped Steam rate limiting.
-    # 0 disables the delay.
-    manifest_fetch_delay_sec: float = Field(default=8.0, ge=0.0)
-    # #228: retry transient DepotDownloader failures (Steam rate-limit / lost CM
-    # connection / logon timeout) with exponential backoff so a rate-limited app
-    # recovers instead of being lost. Permanent failures are NOT retried.
-    manifest_fetch_max_retries: int = Field(default=3, ge=0)
-    manifest_fetch_retry_backoff_sec: float = Field(default=15.0, ge=0.0)
+    # Whole-run ceiling for the helper (#361). A hung helper is killed and the job
+    # fails. A setting, not a constant, so it is not another #315.
+    manifest_fetch_timeout_sec: float = Field(default=7200.0, gt=0.0)
     # How many UNCACHED apps library_sync looks up from the Steam store per run
     # (the store API is rate-limited ~200/5min; the rest fill on later syncs).
     steam_store_fetch_budget: int = Field(default=150, ge=0)

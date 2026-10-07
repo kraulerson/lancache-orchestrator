@@ -1,19 +1,16 @@
-"""DepotDownloaderManifestFetcher — fetch Steam manifests ONLY (no chunks) via
-the DepotDownloader binary, writing {app}_{app}_{depot}_{gid}.shas sidecars into
-the durable manifest archive so the F7 validator covers apps SteamPrefill skips
-(already-up-to-date apps never (re)write a manifest). STDLIB + subprocess only;
-MUST NOT import orchestrator.api.* / orchestrator.db.* (agent import-isolation,
-tests/agent/test_import_isolation.py). NEVER logs/writes the Steam password,
-2FA, or any token — only manifest .shas files."""
+"""SteamManifestFetcher: fetch Steam manifests ONLY (no chunks) through the
+one-login SteamManifestHelper (#361), writing {app}_{app}_{depot}_{gid}.shas
+sidecars into the durable manifest archive so the F7 validator covers apps
+SteamPrefill skips. STDLIB + subprocess only; MUST NOT import orchestrator.api.* /
+orchestrator.db.* (agent import-isolation, tests/agent/test_import_isolation.py).
+NEVER sees, logs or writes the Steam token. Only the helper reads it."""
 
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,34 +22,27 @@ _log = structlog.get_logger(__name__)
 
 _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")  # COR-2: drop non-canonical chunk ids
 
-# #228: DepotDownloader stderr signatures that mean "Steam rate-limited / dropped
-# the CM connection" — retryable. Back-to-back logons trip Steam rate limiting; a
-# spaced-out retry succeeds. Kept narrow so a PERMANENT failure (app not owned, no
-# build) is never mistaken for transient and retried pointlessly.
-_TRANSIENT_RE = re.compile(
-    r"lost connection to steam"
-    r"|a task was cancell?ed"
-    r"|failed to connect to steam"
-    r"|connection reset"
-    r"|timed out|timeout"
-    r"|rate.?limit|too many requests"
-    r"|try ?another ?cm"
-    r"|service ?temporarily ?unavailable",
-    re.IGNORECASE,
-)
-
-# Cap exponential backoff so a long sweep can't wedge on one app for many minutes.
-_MAX_BACKOFF_SEC = 120.0
-
 
 class SteamAuthError(Exception):
     """No usable DepotDownloader/SteamPrefill session — operator must log in once."""
 
 
-class TransientFetchError(RuntimeError):
-    """DepotDownloader failed in a way a spaced-out retry can heal (Steam
-    rate-limit, lost CM connection, or logon timeout). Distinct from a plain
-    RuntimeError, which signals a PERMANENT failure that must not be retried."""
+class HelperSessionError(RuntimeError):
+    """The helper's Steam session stopped early: login refused (exit 2), session
+    import failed (exit 3), or the connection dropped twice (exit 4). Raised AFTER
+    the manifests it did fetch are archived, so partial progress is kept."""
+
+
+_HELPER_STOPS = {2: "login refused", 3: "session import failed", 4: "connection lost"}
+_MANIFEST_NAME_RE = re.compile(r"(?P<depot>\d+)_(?P<gid>\d+)\.manifest")
+
+
+@dataclass(frozen=True)
+class _HelperRun:
+    returncode: int
+    apps: list[dict[str, object]]
+    summary: dict[str, object] | None
+    stderr_tail: str
 
 
 @dataclass(frozen=True)
@@ -71,7 +61,7 @@ class FetchResult:
 _SESSION_GLOB = ".local/share/IsolatedStorage/**/account.config"
 
 
-class DepotDownloaderManifestFetcher:
+class SteamManifestFetcher:
     def __init__(
         self,
         *,
@@ -79,31 +69,34 @@ class DepotDownloaderManifestFetcher:
         config_dir: Path,
         steam_config_dir: Path,
         archive_dir: Path,
-        delay_sec: float = 0.0,
         username: str = "",
-        max_retries: int = 3,
-        retry_backoff_sec: float = 15.0,
+        timeout_sec: float = 7200.0,
         manifest_cache_dir: Path | None = None,
     ) -> None:
         self._binary = Path(binary)
         self._config_dir = Path(config_dir)
         self._steam_config_dir = Path(steam_config_dir)
         self._archive_dir = Path(archive_dir)
-        self._delay_sec = delay_sec
         self._username = username
-        self._max_retries = max_retries
-        self._retry_backoff_sec = retry_backoff_sec
+        self._timeout_sec = timeout_sec
         # Live SteamPrefill .bin manifest cache (e.g. /steamprefill-cache). When
         # set, enumeration also covers apps prefilled outside the selection.
         self._manifest_cache_dir = Path(manifest_cache_dir) if manifest_cache_dir else None
+        # The helper keeps its own session here, imported once from DepotDownloader's.
+        self._session_dir = self._config_dir / "steam-manifest-helper"
 
     def login_from_session(self) -> None:
-        """Verify a usable persisted DepotDownloader session exists (no password,
-        no 2FA) — the .NET IsolatedStorage account.config under config_dir (see
-        _SESSION_GLOB). Raises SteamAuthError when absent so the caller surfaces
-        're-auth needed' instead of prompting in an unattended run."""
-        if not any(self._config_dir.glob(_SESSION_GLOB)):
-            raise SteamAuthError("no DepotDownloader session — run the one-time login")
+        """A run can proceed if the helper already holds a session, or if
+        DepotDownloader left one it can import. Neither: SteamAuthError, so the
+        caller surfaces 're-auth needed' instead of prompting in an unattended run."""
+        if (self._session_dir / "session.json").exists():
+            return
+        if any(self._config_dir.glob(_SESSION_GLOB)):
+            return
+        raise SteamAuthError(
+            "no Steam session: run SteamManifestHelper login --username <user> "
+            f"--session-dir {self._session_dir}"
+        )
 
     def _enumerate_app_ids(self) -> list[int]:
         """Store app_ids to fetch, read LIVE from SteamPrefill's SELECTION each run
@@ -175,122 +168,114 @@ class DepotDownloaderManifestFetcher:
         out.write_text("\n".join(clean) + "\n")
         return True
 
-    def _run_manifest_only(self, app_id: int) -> list[tuple[int, str, set[str]]]:
-        """Shell out to DepotDownloader with -manifest-only for one app.
-        Returns [(depot_id, gid, chunk_shas)] for every depot manifest written.
-        DD reads its remembered login key from the .NET IsolatedStorage under
-        HOME, so the subprocess HOME is pinned to config_dir (the persistent
-        mount) — the password is NEVER on argv and never persisted by us."""
-        results: list[tuple[int, str, set[str]]] = []
-        env = {**os.environ, "HOME": str(self._config_dir)}
-        with tempfile.TemporaryDirectory() as scratch:
-            scratch_path = Path(scratch)
-            argv = [
-                str(self._binary),
-                "-app",
-                str(app_id),
-                "-manifest-only",
-                "-os",
-                "windows",
-                "-osarch",
-                "64",
-                "-remember-password",
-                "-dir",
-                scratch,
-            ]
-            if self._username:
-                argv.extend(["-username", self._username])
+    def _run_helper(self, app_ids: list[int], scratch: Path) -> _HelperRun:
+        apps_file = scratch / "apps.txt"
+        apps_file.write_text("".join(f"{a}\n" for a in app_ids))
+        argv = [
+            str(self._binary),
+            "fetch",
+            "--apps",
+            str(apps_file),
+            "--out",
+            str(scratch / "manifests"),
+            "--session-dir",
+            str(self._session_dir),
+            "--username",
+            self._username,
+            "--import-from",
+            str(self._config_dir),
+        ]
+        try:
+            proc = subprocess.run(  # noqa: S603  argv list, no shell
+                argv, capture_output=True, text=True, timeout=self._timeout_sec
+            )
+        except subprocess.TimeoutExpired as e:
+            # TimeoutExpired carries bytes even with text=True.
+            err = (
+                e.stderr.decode("utf-8", "replace")
+                if isinstance(e.stderr, bytes)
+                else (e.stderr or "")
+            )
+            raise RuntimeError(
+                f"steam manifest helper timed out after {self._timeout_sec:.0f}s;"
+                f" stderr tail: {err[-300:]}"
+            ) from e
+        apps: list[dict[str, object]] = []
+        summary: dict[str, object] | None = None
+        for line in proc.stdout.splitlines():
             try:
-                proc = subprocess.run(  # noqa: S603
-                    argv,
-                    cwd=str(self._config_dir),
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                )
-            except subprocess.TimeoutExpired as e:
-                # A hung logon is the classic rate-limit symptom — retry can heal it.
-                raise TransientFetchError(f"DepotDownloader timed out for app {app_id}") from e
-            manifest_paths = list(scratch_path.rglob("*.manifest"))
-            if proc.returncode != 0 or not manifest_paths:
-                _log.warning(
-                    "manifest_fetch.dd_nonzero",
-                    app_id=app_id,
-                    returncode=proc.returncode,
-                    stderr=proc.stderr[:500],
-                )
-                msg = (
-                    f"DepotDownloader produced no manifest for app {app_id} (rc={proc.returncode})"
-                )
-                if _TRANSIENT_RE.search(proc.stderr or ""):
-                    raise TransientFetchError(msg)
-                raise RuntimeError(msg)
-            # Discover all .manifest files written by DD under scratch/depots/
-            for manifest_path in manifest_paths:
-                stem = manifest_path.stem  # e.g. "441_777"
-                parts = stem.split("_", 1)
-                if len(parts) != 2:
-                    continue
-                try:
-                    depot_id = int(parts[0])
-                except ValueError:
-                    continue
-                gid = parts[1]
-                shas = parse_steamkit_manifest(manifest_path.read_bytes())
-                results.append((depot_id, gid, shas))
-        return results
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # a stray non-JSON line is not data
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("summary") is True:
+                summary = obj
+            elif "app" in obj and "status" in obj:
+                apps.append(obj)
+        return _HelperRun(proc.returncode, apps, summary, (proc.stderr or "")[-500:])
 
-    def _run_with_retry(self, app_id: int) -> list[tuple[int, str, set[str]]]:
-        """Run _run_manifest_only, retrying TRANSIENT DepotDownloader failures
-        (Steam rate-limit / lost CM connection / logon timeout) with exponential
-        backoff. Permanent failures (app not owned, no build) raise immediately —
-        a retry can't fix them. Bounded by max_retries so one persistently
-        rate-limited app can never stall the whole sweep (#228)."""
-        attempt = 0
-        while True:
-            try:
-                return self._run_manifest_only(app_id)
-            except TransientFetchError:
-                if attempt >= self._max_retries:
-                    raise
-                backoff = min(self._retry_backoff_sec * (2**attempt), _MAX_BACKOFF_SEC)
-                _log.warning(
-                    "manifest_fetch.transient_retry",
-                    app_id=app_id,
-                    attempt=attempt + 1,
-                    max_retries=self._max_retries,
-                    backoff_sec=backoff,
-                )
-                time.sleep(backoff)
-                attempt += 1
+    def _archive_app(self, app_id: int, app_dir: Path, names: object) -> tuple[int, int] | None:
+        """Archive one ok app's manifests. Returns (fetched, skipped), or None when
+        the helper listed no readable manifest for it. Names must match
+        <depot>_<gid>.manifest exactly, so a listed name can never escape app_dir."""
+        if not isinstance(names, list):
+            return None
+        fetched = skipped = 0
+        seen = False
+        for name in names:
+            if not isinstance(name, str):
+                continue
+            match = _MANIFEST_NAME_RE.fullmatch(name)
+            if match is None:
+                continue
+            path = app_dir / name
+            if not path.is_file():
+                continue
+            seen = True
+            shas = parse_steamkit_manifest(path.read_bytes())
+            if self._write_shas(app_id, int(match["depot"]), match["gid"], shas):
+                fetched += 1
+            else:
+                skipped += 1
+        return (fetched, skipped) if seen else None
 
     def fetch_all(self) -> FetchResult:
-        """One run: verify session, enumerate the cached app set, fetch each app's
-        manifests (no chunks) and archive .shas sidecars. Per-app failures are
-        isolated and counted; a hard BaseException boundary guarantees a
-        timeout-style escape can never kill the agent (the ③ lesson)."""
+        """One run: verify a session exists, enumerate the cached app set, run the
+        helper ONCE for all of it, and archive .shas sidecars. Per-app failures are
+        counted; a session that stopped early raises AFTER archiving what it got."""
         self.login_from_session()
         app_ids = self._enumerate_app_ids()
-        fetched = skipped = failed = 0
+        fetched = skipped = failed = not_attempted = 0
         try:
-            for i, app_id in enumerate(app_ids):
-                try:
-                    for depot_id, gid, shas in self._run_with_retry(app_id):
-                        if self._write_shas(app_id, depot_id, gid, shas):
-                            fetched += 1
-                        else:
-                            skipped += 1
-                except Exception as e:  # isolate one bad app, keep going
-                    failed += 1
-                    _log.warning(
-                        "manifest_fetch.app_failed",
-                        app_id=app_id,
-                        reason=f"{type(e).__name__}: {e}"[:200],
+            with tempfile.TemporaryDirectory() as tmp:
+                scratch = Path(tmp)
+                run = self._run_helper(app_ids, scratch)
+                for line in run.apps:
+                    app_id, status = line.get("app"), line.get("status")
+                    if status == "not_attempted":
+                        not_attempted += 1
+                        continue
+                    written = (
+                        self._archive_app(
+                            app_id, scratch / "manifests" / str(app_id), line.get("manifests")
+                        )
+                        if status == "ok" and isinstance(app_id, int)
+                        else None
                     )
-                if self._delay_sec and i + 1 < len(app_ids):
-                    time.sleep(self._delay_sec)  # throttle Steam logons (S1)
-        except BaseException as e:  # ③: gevent.Timeout-style escape must not kill the agent
+                    if written is None:
+                        failed += 1
+                        reason = line.get("reason") or "helper reported ok but produced no manifest"
+                        _log.warning(
+                            "manifest_fetch.app_failed",
+                            app_id=app_id,
+                            status=status,
+                            reason=str(reason)[:200],
+                        )
+                        continue
+                    fetched += written[0]
+                    skipped += written[1]
+        except BaseException as e:  # ③: a timeout-style escape must not kill the agent silently
             _log.error("manifest_fetch.run_aborted", reason=f"{type(e).__name__}: {e}"[:200])
             raise
         _log.info(
@@ -299,10 +284,21 @@ class DepotDownloaderManifestFetcher:
             fetched=fetched,
             skipped=skipped,
             failed=failed,
+            not_attempted=not_attempted,
+            helper_exit=run.returncode,
         )
-        if fetched == 0 and skipped == 0 and failed > 0:
-            raise RuntimeError(
-                f"manifest fetch failed for all {failed} apps"
-                " — DepotDownloader session likely expired"
+        if run.returncode in _HELPER_STOPS:
+            reason = str((run.summary or {}).get("reason") or _HELPER_STOPS[run.returncode])
+            raise HelperSessionError(
+                f"steam manifest helper stopped ({_HELPER_STOPS[run.returncode]}): {reason}"
+                f" | fetched={fetched} skipped={skipped} failed={failed}"
+                f" not_attempted={not_attempted}"
             )
+        if run.returncode != 0 or run.summary is None:
+            raise RuntimeError(
+                f"steam manifest helper failed (exit {run.returncode});"
+                f" stderr tail: {run.stderr_tail[-300:]}"
+            )
+        if fetched == 0 and skipped == 0 and failed > 0:
+            raise RuntimeError(f"manifest fetch failed for all {failed} apps")
         return FetchResult(fetched=fetched, skipped=skipped, failed=failed, apps=len(app_ids))
