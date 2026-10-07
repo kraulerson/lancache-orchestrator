@@ -43,11 +43,13 @@
 - **Session file:** `<depotdownloader_config_dir>/steam-manifest-helper/session.json`, mode 0600.
 - **Python interfaces:** `fetch_all()` keeps its signature, and `FetchResult(fetched, skipped, failed, apps)` stays unchanged, so the agent API does not change.
 - **Agent import isolation:** `manifest_fetcher.py` stays stdlib + structlog, and must never import `orchestrator.api` or `orchestrator.db`.
-- **Image size:** CI fails any amd64 image over **250 MiB**. If the image would exceed it, stop and report to Karl.
-- **Refinements to spec §1-§2, made while planning (Task 9 records them in the spec):**
+- **Image size:** CI fails any amd64 image over **275 MiB** (raised from 250 by Karl, 2026-10-07, after the spike: 243.2 − 75.3 DepotDownloader + 86.4 helper = 254.3 MiB). Task 6 makes the change in `ci.yml`. If the image would exceed 275, stop and report to Karl.
+- **Refinements to the spec, made while planning (1-3) and at the Task 1 gate (4-5). Task 9 records them in the spec:**
   1. `fetch` also takes `--username`, because the session and the import are keyed by account.
   2. After a reconnect, the app interrupted by the drop is **retried**, not skipped. The drop was not that app's fault.
   3. A CDN 403 fetches a CDN auth token and retries once (DepotDownloader's policy).
+  4. CI's image limit is 275 MiB, not 250 (Karl, 2026-10-07). The helper is published self-contained and untrimmed, as designed, at 86.4 MiB, which puts the image at about 254 MiB.
+  5. Parity is judged on chunk-SHA content (Karl, 2026-10-07). 242 archive files written in bulk on 2026-06-26 lack a trailing newline; the reader (`parse_shas`, `splitlines()`) ignores it, and the helper matches today's `_write_shas` byte for byte.
 - **Hooks in this repo:**
   - Before each commit, run `bash .claude/framework/hooks/mark-evaluated.sh "reason"` as a lone command, from the repo root. The reason must contain no `;`, `&`, `|`, `>`, `<` or `$(`.
   - Stage files by name only.
@@ -66,6 +68,18 @@
 ### Task 1: Spike — prove the approach before building it (THROWAWAY, with a STOP gate)
 
 Nothing from this task is committed. Scratch only.
+
+> **Result (run 2026-10-07 16:51-16:57 UTC; Karl's go given the same day).** All four questions were answered:
+> 1. **Login:** `LOGON OK (logons so far: 1)`, using the imported token. No compile fixes were needed.
+> 2. **Throttling:** none. `DONE apps=100 ok=100 failed=0 manifests=313 logons=1 disconnects=0`; 0 RateLimit; median ms 3101 (first 25 apps) → 2550 (last 25).
+>    - 54 depot keys were `AccessDenied`. DepotDownloader never archived any of them, so they are not a regression.
+>    - Two depots that were already archived were missed: one got 503 from all 3 CDN servers tried, the other had no manifest request code.
+> 3. **Parity:** `identical=70 different=242`.
+>    - All 242 differences are a missing trailing newline in archive files bulk-written on 2026-06-26. Their SHA sets are identical.
+>    - Karl accepted this; see refinement 5.
+> 4. **Size:** 86.4 MiB, which puts the image at about 254.3 MiB. Karl raised CI's limit to 275 MiB; see refinement 4.
+>
+> The Step 4 snippet needs a dot-file filter: `/manifest-archive/v1` holds 3,518 macOS `._*` files. Task 10 Step 5 reuses that snippet with the filter.
 
 **Questions it must answer:**
 1. Does the token imported from DepotDownloader's store log in?
@@ -349,7 +363,7 @@ ssh karl@192.168.1.30 'docker exec -i orchestrator-agent python -' <<'PY' > "$SC
 import json
 from pathlib import Path
 sel = json.loads(Path("/SteamPrefill/Config/selectedAppsToPrefill.json").read_text())
-have = {int(p.name.split("_", 1)[0]) for p in Path("/manifest-archive/v1").glob("*.shas")}
+have = {int(p.name.split("_", 1)[0]) for p in Path("/manifest-archive/v1").glob("*.shas") if not p.name.startswith(".")}
 for app in [a for a in sel if int(a) in have][:100]:
     print(app)
 PY
@@ -1617,7 +1631,21 @@ git commit -m "feat(steam): helper fetch runner, one login per run, one reconnec
     - `SteamManifestHelper fetch --apps <file> --out <dir> --session-dir <dir> --username <name> [--import-from <dir>]`
     - `SteamManifestHelper login --username <name> --session-dir <dir>`
 
-Before writing `SteamKitGateway.cs`, apply every compile fix recorded in Task 1's `REPORT.txt`. The gateway below mirrors the spike's calls.
+Before writing `SteamKitGateway.cs`, apply every compile fix recorded in Task 1's `REPORT.txt`. The spike needed none. The gateway below mirrors the spike's calls.
+
+**Rulings from the Task 1 gate (2026-10-07). Apply these to the gateway code below:**
+1. **Fixed login ID.**
+   - What: set `LoginID = 0x534D48, // "SMH"` in the `LogOnDetails`.
+   - Why: DepotDownloader 3.4.0 sets its own fixed ID (`LoginID = Config.LoginID ?? 0x534B32`, `ContentDownloader.cs:315`). A fixed ID of the helper's own keeps it from colliding with another SteamKit client that derives its ID from the same host.
+2. **A Steam log-off counts as a lost session.**
+   - What: subscribe to `SteamUser.LoggedOffCallback`. Handle it like `OnDisconnected`: set `online = false` and fail the pending signals with `SessionLostException($"Steam logged the session off: {cb.Result}")`.
+   - Why: without it, a log-off such as `LoggedInElsewhere` leaves `online` true. Every later request then times out after 60 s as a per-app error, until Python's 2 h kill throws away the whole run. DepotDownloader 3.4.0 has no such handler; this is the spec's session-loss row.
+3. **Try up to 6 CDN servers, not 3.**
+   - What: in `SaveManifestAsync`, change `.Take(3)` to `.Take(6)`.
+     - A `401`, a `404`, or a `403` that survives `CdnAuth`'s one token retry stops the server loop at once. These mirror DepotDownloader's "Aborting" cases (`ContentDownloader.cs:825-835`).
+     - Any other failure (503, timeout) moves on to the next server.
+   - Why: in the spike, depot 17343 failed with 503 from all 3 servers it tried. DepotDownloader rotates servers until one works, with no cap. 6 keeps the loop bounded.
+   - Test: none new. `SteamKitGateway` is not unit-tested by design; it is proven live in Task 10. The task reviewer checks the stop rule by reading the code.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2208,6 +2236,7 @@ git commit -m "feat(steam): helper Steam gateway, CDN auth retry, login command,
 
 **Files:**
 - Modify: `Dockerfile`: remove the DepotDownloader `ARG`/`RUN` block (lines 23-35 of the builder stage), add a `helper` stage, and swap the runtime `COPY`.
+- Modify: `.github/workflows/ci.yml`, the "Verify image size (amd64)" step (~lines 207-213). Change the limit from `250` to `275` in both the comparison and the error message, and nowhere else. Karl's ruling, 2026-10-07 (Global Constraints, refinement 4).
 - Create: `tools/steam_manifest_helper/licenses/SteamKit2-LGPL-2.1.txt`
 - Create: `tools/steam_manifest_helper/licenses/protobuf-net-Apache-2.0.txt`
 - Create: `tools/steam_manifest_helper/licenses/ZstdSharp.Port-MIT.txt`
@@ -2312,12 +2341,12 @@ ssh root@10.100.23.105 "cd /root/lancache-orchestrator && git worktree remove --
 
 Expected:
 - the build reports the helper tests `Passed!` and finishes;
-- the size is **at most 250 MiB**;
+- the size is **at most 275 MiB** (expect about 254);
 - `SteamKit2.dll` and `licenses` are present;
 - the usage text and `exit=64`;
 - `No such file or directory` for `/depotdownloader`.
 
-**Over 250 MiB: STOP and report to Karl.** Do not trim.
+**Over 275 MiB: STOP and report to Karl.** Do not trim.
 
 - [ ] **Step 5: Commit**
 
@@ -2326,7 +2355,7 @@ bash .claude/framework/hooks/mark-evaluated.sh "Task 6 of the approved 361 plan:
 ```
 
 ```bash
-git add Dockerfile THIRD_PARTY_NOTICES.md tools/steam_manifest_helper/licenses/SteamKit2-LGPL-2.1.txt tools/steam_manifest_helper/licenses/protobuf-net-Apache-2.0.txt tools/steam_manifest_helper/licenses/ZstdSharp.Port-MIT.txt tools/steam_manifest_helper/licenses/System.IO.Hashing-MIT.txt
+git add Dockerfile .github/workflows/ci.yml THIRD_PARTY_NOTICES.md tools/steam_manifest_helper/licenses/SteamKit2-LGPL-2.1.txt tools/steam_manifest_helper/licenses/protobuf-net-Apache-2.0.txt tools/steam_manifest_helper/licenses/ZstdSharp.Port-MIT.txt tools/steam_manifest_helper/licenses/System.IO.Hashing-MIT.txt
 git status --short
 git commit -m "build(docker): ship the Steam manifest helper, drop DepotDownloader (#361)"
 ```
@@ -2862,17 +2891,9 @@ PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest tests/platform/steam/test
 
 Expected: all pass; ruff and mypy clean. `tests/agent/test_steam.py` and `app.py` still reference the old class: Task 8 fixes them, so run only these two files now.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: No commit here. Go straight on to Task 8**
 
-```bash
-bash .claude/framework/hooks/mark-evaluated.sh "Task 7 of the approved 361 plan: the Python fetcher calls the helper once, test-first"
-```
-
-```bash
-git add src/orchestrator/platform/steam/manifest_fetcher.py tests/platform/steam/test_manifest_fetcher.py
-git status --short
-git commit -m "feat(steam): fetch manifests through the one-login helper (#361)"
-```
+`.git/hooks/pre-commit` runs `mypy --strict src/` over the whole tree whenever a `.py` file is staged. Until Task 8 rewires it, `app.py` still imports the removed `DepotDownloaderManifestFetcher`, so a commit made here would be blocked. Tasks 7 and 8 are therefore one unit with one commit, made at Task 8 Step 6.
 
 ---
 
@@ -2987,13 +3008,13 @@ scripts/process-checklist.sh --complete-step build_loop:implemented
 - [ ] **Step 6: Commit**
 
 ```bash
-bash .claude/framework/hooks/mark-evaluated.sh "Task 8 of the approved 361 plan: settings and agent wiring for the helper"
+bash .claude/framework/hooks/mark-evaluated.sh "Tasks 7 and 8 of the approved 361 plan: the fetcher calls the helper once, plus settings and agent wiring"
 ```
 
 ```bash
-git add src/orchestrator/core/settings.py src/orchestrator/agent/app.py tests/core/test_settings.py
+git add src/orchestrator/platform/steam/manifest_fetcher.py tests/platform/steam/test_manifest_fetcher.py src/orchestrator/core/settings.py src/orchestrator/agent/app.py tests/core/test_settings.py
 git status --short
-git commit -m "feat(agent): wire the manifest helper, retire DepotDownloader settings (#361)"
+git commit -m "feat(steam): fetch manifests through the one-login helper and retire DepotDownloader settings (#361)"
 ```
 
 ---
