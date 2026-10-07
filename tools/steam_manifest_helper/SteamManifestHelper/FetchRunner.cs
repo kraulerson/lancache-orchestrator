@@ -8,7 +8,19 @@ public sealed class FetchRunner(ISteamGateway gateway, TextWriter results, TextW
 
     public async Task<int> RunAsync(SteamSession session, IReadOnlyList<uint> appIds, string outDir, CancellationToken ct)
     {
-        var logon = await gateway.ConnectAndLogOnAsync(session, ct);
+        LogOnResult logon;
+        try
+        {
+            logon = await gateway.ConnectAndLogOnAsync(session, ct);
+        }
+        catch (Exception e) when (e is SessionLostException or SteamRequestException)
+        {
+            // The token was never judged, so no "run login" advice here.
+            var unreachable = $"could not reach Steam: {e.Message}";
+            log.WriteLine(unreachable);
+            ResultWriter.Write(results, new RunSummary(SessionStatus.LoginRefused, unreachable));
+            return ExitCodes.LoginRefused;
+        }
         if (logon.Outcome != LogOnOutcome.Ok)
         {
             var reason = logon.Outcome == LogOnOutcome.TokenRejected
@@ -38,7 +50,15 @@ public sealed class FetchRunner(ISteamGateway gateway, TextWriter results, TextW
                 }
                 reconnected = true;
                 await delay(ReconnectWait, ct);
-                var again = await gateway.ConnectAndLogOnAsync(session, ct);
+                LogOnResult again;
+                try
+                {
+                    again = await gateway.ConnectAndLogOnAsync(session, ct);
+                }
+                catch (Exception e) when (e is SessionLostException or SteamRequestException)
+                {
+                    return StopEarly(appIds, index, $"reconnect failed: {e.Message}");
+                }
                 if (again.Outcome != LogOnOutcome.Ok)
                 {
                     return StopEarly(appIds, index, $"reconnect refused: {again.Detail}");
@@ -85,7 +105,11 @@ public sealed class FetchRunner(ISteamGateway gateway, TextWriter results, TextW
                 if (lookup.RedirectAppId != 0)
                 {
                     var owner = await gateway.GetAppInfoAsync(lookup.RedirectAppId, ct);
-                    lookup = owner is null ? default : DepotSelector.ResolveManifest(owner["depots"], depotId, lookup.RedirectAppId);
+                    if (owner is null)
+                    {
+                        throw new SteamRequestException($"Steam returned no app info for app {lookup.RedirectAppId}, owner of depot {depotId}");
+                    }
+                    lookup = DepotSelector.ResolveManifest(owner["depots"], depotId, lookup.RedirectAppId);
                 }
                 if (lookup.ManifestId == 0)
                 {

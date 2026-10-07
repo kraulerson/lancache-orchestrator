@@ -5,6 +5,8 @@ namespace SteamManifestHelper.Tests;
 
 internal sealed class FakeSteamGateway : ISteamGateway
 {
+    /// <summary>Consulted before LogOnResults, one entry per logon call: an exception is thrown, null falls through.</summary>
+    public readonly Queue<Exception?> LogOnThrows = new();
     public readonly Queue<LogOnResult> LogOnResults = new();
     public readonly Dictionary<uint, KeyValue?> Apps = new();
     public readonly HashSet<uint> DepotsWithoutAccess = new();
@@ -17,6 +19,10 @@ internal sealed class FakeSteamGateway : ISteamGateway
     public Task<LogOnResult> ConnectAndLogOnAsync(SteamSession session, CancellationToken ct)
     {
         LogOnCalls++;
+        if (LogOnThrows.Count > 0 && LogOnThrows.Dequeue() is { } toThrow)
+        {
+            throw toThrow;
+        }
         return Task.FromResult(LogOnResults.Count > 0 ? LogOnResults.Dequeue() : new LogOnResult(LogOnOutcome.Ok, "OK"));
     }
 

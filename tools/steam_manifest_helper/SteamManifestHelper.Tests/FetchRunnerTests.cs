@@ -170,6 +170,60 @@ public sealed class FetchRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_drop_during_the_reconnect_stops_as_disconnected()
+    {
+        var gateway = ThreeGoodApps();
+        gateway.DropsOnApp[20] = 1;
+        gateway.LogOnThrows.Enqueue(null);
+        gateway.LogOnThrows.Enqueue(new SessionLostException("NoConnection"));
+        var code = await Runner(gateway).RunAsync(Session, [10, 20, 30], outDir, CancellationToken.None);
+        Assert.Equal(ExitCodes.Disconnected, code);
+        Assert.Equal(2, gateway.LogOnCalls);
+        var lines = Lines();
+        Assert.Equal(new[] { "ok", "not_attempted", "not_attempted" }, lines.Take(3).Select(l => l.GetProperty("status").GetString()));
+        Assert.Equal("disconnected", lines[^1].GetProperty("session").GetString());
+    }
+
+    [Fact]
+    public async Task An_unreachable_steam_on_the_first_logon_is_login_refused_without_login_advice()
+    {
+        var gateway = ThreeGoodApps();
+        gateway.LogOnThrows.Enqueue(new SessionLostException("Steam closed the connection"));
+        var code = await Runner(gateway).RunAsync(Session, [10, 20, 30], outDir, CancellationToken.None);
+        Assert.Equal(ExitCodes.LoginRefused, code);
+        Assert.Equal(1, gateway.LogOnCalls);
+        var only = Assert.Single(Lines());
+        Assert.Equal("login_refused", only.GetProperty("session").GetString());
+        var reason = only.GetProperty("reason").GetString();
+        Assert.Contains("could not reach Steam", reason);
+        Assert.DoesNotContain("login --username", reason);
+    }
+
+    [Fact]
+    public async Task A_borrowed_depot_whose_owner_has_no_info_is_an_error_not_no_depots()
+    {
+        var gateway = new FakeSteamGateway();
+        gateway.Apps[10] = App("\"228988\" { \"depotfromapp\" \"228980\" }");
+        var code = await Runner(gateway).RunAsync(Session, [10], outDir, CancellationToken.None);
+        Assert.Equal(ExitCodes.Completed, code);
+        var line = Lines()[0];
+        Assert.Equal("error", line.GetProperty("status").GetString());
+        Assert.Contains("228980", line.GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task Only_one_reconnect_is_allowed_per_run_not_per_app()
+    {
+        var gateway = ThreeGoodApps();
+        gateway.DropsOnApp[20] = 1;
+        gateway.DropsOnApp[30] = 1;
+        var code = await Runner(gateway).RunAsync(Session, [10, 20, 30], outDir, CancellationToken.None);
+        Assert.Equal(ExitCodes.Disconnected, code);
+        Assert.Equal(2, gateway.LogOnCalls);
+        Assert.Equal(new[] { "ok", "ok", "not_attempted" }, Lines().Take(3).Select(l => l.GetProperty("status").GetString()));
+    }
+
+    [Fact]
     public async Task The_token_appears_in_no_output()
     {
         var gateway = ThreeGoodApps();
