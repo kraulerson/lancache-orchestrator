@@ -1879,9 +1879,11 @@ build-breaking writer guard still passes.
 app, so 1,211 Steam logins a run held the account in a rate limit for hours and
 refused the SteamPrefill run that shares it. A new C# helper on SteamKit2 logs in
 once, fetches every app's manifests in that session, and reports one JSON line per
-app. Python calls it once, keeps choosing games and writing `.shas`, and now fails
-the job when a requested app comes back with no result. DepotDownloader is removed
-from the image.
+app. Python calls it once, keeps choosing games and writing `.shas`, and now
+counts apps the helper never reports as failed (`manifest_fetch.app_unreported`).
+A run that reports none fails the job; partial skips turn it red past
+`fetch_manifests_max_failure_ratio` (0.75). DepotDownloader is removed from the
+image.
 
 **Key Interfaces:**
   - `tools/steam_manifest_helper/SteamManifestHelper/` (`fetch` and `login`
@@ -1889,7 +1891,8 @@ from the image.
   - `src/orchestrator/platform/steam/manifest_fetcher.py`: `fetch_all()` and
     `FetchResult(fetched, skipped, failed, apps)` unchanged
   - Setting `steam_manifest_helper_binary` (replaces `depotdownloader_binary`);
-    `ORCH_STEAM_USERNAME` names the account
+    `ORCH_STEAM_USERNAME` names the account; new `manifest_fetch_timeout_sec`
+    (`ORCH_MANIFEST_FETCH_TIMEOUT_SEC`, default 7200 s) bounds one helper run
   - Session file `/depotdownloader-config/steam-manifest-helper/session.json`
     (0600, in a 0700 directory)
   - `Dockerfile` stage `helper`; CI image limit 275 MiB
@@ -1913,7 +1916,9 @@ from the image.
   - **The token is never printed, logged, put on argv or passed to Python**;
     error texts carry exception types and HTTP status codes only.
   - **Python counts every requested app.** A requested app with no result line is
-    a failure, so a run that skips apps fails instead of reporting green.
+    counted as failed (`manifest_fetch.app_unreported`). A run that reports none
+    fails the job; partial skips turn it red past
+    `fetch_manifests_max_failure_ratio` (0.75).
   - Construction rulings (session file 0600 from creation, 6 CDN servers per
     manifest, `AccessDenied` alone means "not owned", and others) are listed in
     the spec.
@@ -1923,7 +1928,10 @@ CDN auth, CLI, fetch runner against a fake gateway), run during the image build,
 which fails on a failing or empty run. Python: the fetcher tests drive a scripted
 stand-in helper (one call per run, exit 2/3/4, timeout kill, hostile manifest
 names, unrequested and missing app lines). Full suite **2043 passed, 3
-deselected**. semgrep and gitleaks clean.
+deselected**. gitleaks clean. semgrep: the repo's `.semgrep/` rules are Python
+only (0 findings over 118 `.py` files); the C# helper was scanned separately with
+`p/csharp`, 1 finding (`unsafe-path-combine` on the operator-supplied
+`--session-dir`), adjudicated a false positive in the security audit.
 
 **Related:** #361, #213, #228. ADR 0019. Spec
 `docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`; plan
@@ -1934,7 +1942,8 @@ deselected**. semgrep and gitleaks clean.
   - **Not yet deployed.** Closure needs the Monday run after deploy:
     `fetch_manifests.done` with `failed` near 0, one Steam login in the helper
     log, the 06:00 MDT SteamPrefill run ending `END steam prefill ok`, and Kuma 176
-    UP. The token import is unproven against the live volume until then.
+    UP. The Task 1 spike imported the live token and logged on; what is still
+    unproven is the production `SessionStore` import against the live volume.
   - The token sits in plain JSON on the persistent mount, as DepotDownloader's
     did; `login` needs a TTY.
   - `THIRD_PARTY_NOTICES.md` does not reach the image (`.dockerignore` drops root

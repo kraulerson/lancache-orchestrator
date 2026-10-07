@@ -145,7 +145,7 @@ or 24 hours past the last commit touching this file.
 - **#361 (one-login Steam manifest helper) is BUILT but NOT deployed** (branch
   `design/361-steam-manifest-helper`, 2026-10-07). A C# SteamKit2 helper logs in
   once per weekly `fetch_manifests` run instead of 1,211 times (DepotDownloader is
-  removed from the image); first deploy needs the Monday run as evidence. Spec:
+  removed from the image); closes on the first Monday run after deploy. Spec:
   `docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`; plan:
   `docs/superpowers/plans/2026-10-07-steam-manifest-helper.md`; ADR 0019; Feature
   30. Rollback is by the `dpa-pre-361` image tag.

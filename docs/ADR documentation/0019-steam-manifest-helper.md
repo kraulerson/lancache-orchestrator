@@ -6,8 +6,9 @@
 Design: `docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`.
 Plan: `docs/superpowers/plans/2026-10-07-steam-manifest-helper.md`.
 Supersedes the one-DepotDownloader-process-per-app fetch from #213, and the #228
-retry/back-off that was meant to make it safe. Builds on the subprocess isolation
-in [ADR-0013] (the Steam tool stays out of the API process).
+retry/back-off that was meant to make it safe. Like [ADR-0013] (itself
+superseded), it keeps Steam code in a separate child process, not in the API
+process.
 
 ---
 
@@ -107,21 +108,30 @@ Shape of the result:
   until Steam rejects it; then the run fails loudly with exit 2 or 3, naming the
   `login` command, and the operator runs it once with a TTY and approves on the
   Steam app. A rejected token is never silent.
-- **Failures are no longer silent.** A run that skips apps without reporting them
-  now fails the job instead of reporting green; the helper's stderr tail and
-  summary are logged on every failure.
+- **Failures are no longer silent.** Apps the helper never reports are now
+  counted as failed (`manifest_fetch.app_unreported`). A run that reports none
+  fails the job; partial skips turn it red past
+  `fetch_manifests_max_failure_ratio` (0.75). The helper's stderr tail and summary
+  are logged on every failure.
 - **Rollback is by image tag**, not a switch: `docker tag
   orchestrator:dpa-pre-361 orchestrator:dpa`, then recreate the agent in an
-  inter-sweep gap. No rebuild. Rolling back also restores DepotDownloader's
-  1,211-login behaviour, so it is a fallback, not a steady state.
-- **Closure evidence** is the Monday run after deploy: `fetch_manifests.done`
-  with `failed` near 0, one Steam login in the helper's log, the 06:00 MDT
-  SteamPrefill run ending `END steam prefill ok`, and Kuma 176 staying UP.
+  inter-sweep gap, after syncing `orchestrator-manifests` as
+  `docs/deploy/INSTALL.md` §6 requires. No rebuild. Rolling back also restores
+  DepotDownloader's 1,211-login behaviour, so it is a fallback, not a steady
+  state.
+- **Closure evidence** is expected to be the Monday run after deploy:
+  `fetch_manifests.done` with `failed` near 0, one Steam login in the helper's
+  log, the 06:00 MDT SteamPrefill run ending `END steam prefill ok`, and Kuma 176
+  staying UP. #361 closes only on that evidence.
 
 ## References
 
 - `docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`
 - `docs/superpowers/plans/2026-10-07-steam-manifest-helper.md`
 - `docs/security-audits/steam-manifest-helper-security-audit.md`
-- [ADR-0013] — Steam subprocess isolation
+- [ADR-0013] — Steam subprocess isolation (superseded; historical context for
+  running Steam code in a child process)
 - [ADR-0014] — Epic pure-Python manifest (the other manifest source)
+
+[ADR-0013]: 0013-steam-subprocess-isolation.md
+[ADR-0014]: 0014-epic-pure-python-manifest.md

@@ -46,9 +46,9 @@ listening socket.
    joined onto a path. A compromised or buggy helper (or a hostile name from
    Steam reaching a filename) must not make Python read or write outside the
    scratch directory, or crash on a stray line.
-3. **The new NuGet supply chain.** A .NET SDK image and four runtime packages
-   (SteamKit2, protobuf-net, plus their transitive ZstdSharp.Port and
-   System.IO.Hashing) now enter the image. A silently floated version or a
+3. **The new NuGet supply chain.** A .NET SDK image and five runtime packages
+   (SteamKit2 and protobuf-net, plus their transitive protobuf-net.Core 3.2.56,
+   ZstdSharp.Port and System.IO.Hashing) now enter the image. A silently floated version or a
    re-tagged SDK image would change what ships.
 4. **LGPL compliance.** SteamKit2 is LGPL-2.1-only. The helper is MIT. The
    library must stay a separate, replaceable assembly, with its licence text
@@ -56,8 +56,14 @@ listening socket.
 
 ## Automated
 
-- **semgrep** with `.semgrep/` custom rules over `src` and `tools`: **0 findings**
-  (7 rules, 118 files). Output under check 5.
+- **semgrep, Python only.** The `.semgrep/` custom rules are all
+  `languages: [python]`, so the 118 files scanned are the `.py` files under `src`
+  and `tools`: **0 findings**. They never looked at the C# helper. Output under
+  check 5.
+- **semgrep, C#.** The helper's 16 C# files (the helper and its tests), which
+  handle the refresh token, were scanned separately with the registry ruleset
+  `p/csharp` (27 rules): **1 finding**, adjudicated as a false positive under
+  check 6. Nothing else in this audit is automated SAST for C#.
 - **gitleaks** over `origin/main..HEAD`: **no leaks found**. Output under check 5.
 - The helper's 46 xUnit tests run inside the image build; a failing test, or a
   test run that finds zero tests, fails the build.
@@ -74,9 +80,11 @@ $ grep -n "RefreshToken" src/orchestrator -r
 No write call in the helper names a token, and the string `RefreshToken` does not
 occur anywhere in the Python source, so Python never handles the token. The grep
 only catches a direct call, so the behaviour is also pinned by tests:
-`SessionStoreTests` asserts the token is absent from every exception message and
-from `SteamSession.ToString()`, and `FetchRunnerTests` asserts it is absent from
-both the JSON results and the human log. Error texts carry exception types and
+`SessionStoreTests` asserts the token is absent from one exception message
+(`SessionStoreTests.cs:70`) and from `SteamSession.ToString()` (`:160`); the other
+`SessionImportException` texts are safe by construction (they interpolate a path,
+a username or a fixed phrase, never the token), not by test. `FetchRunnerTests`
+asserts the token is absent from both the JSON results and the human log. Error texts carry exception types and
 HTTP status codes only, never a raw library message, so no token and no URL query
 string can reach a log. The `--username` flag on argv is an account name, not a
 credential. **Verdict: pass.**
@@ -138,14 +146,16 @@ version, not a floor. Both projects commit a `packages.lock.json`, and the image
 build restores in locked mode for both runtime identifiers, so a changed or
 unlisted package fails the build rather than floating. The SDK image is pinned by
 digest, as the Python base image is. The test-only packages never reach the
-published output. **Verdict: pass.** Note that NuGet lock files record content
-hashes, not signatures; a compromised nuget.org package with a matching version
-would only be caught when the lock file is regenerated and reviewed.
+published output. **Verdict: pass.** The lock file's `contentHash` entries do
+catch a same-version content swap at restore (NU1403). What they do not catch is
+a package that was already bad when the lock file was written: there is no
+signature-verification policy, so the first lock is only as trustworthy as the
+review of it.
 
-## Check 5 — semgrep and gitleaks over the branch
+## Check 5 — semgrep (Python) and gitleaks over the branch
 
 ```
-$ semgrep --config .semgrep src tools 2>&1 | tail -3
+$ semgrep --config .semgrep src tools 2>&1 | grep -E "Findings|Rules run|Targets scanned|^Ran"
  • Findings: 0 (0 blocking)
  • Rules run: 7
  • Targets scanned: 118
@@ -155,8 +165,44 @@ $ gitleaks detect --no-banner --log-opts="origin/main..HEAD" 2>&1 | tail -2
 2:53PM INF no leaks found
 ```
 
-(The raw `tail -3` of semgrep prints only its upgrade banner; the summary above is
-the same run's findings block.) **Verdict: pass.**
+(The brief's `semgrep ... | tail -3` prints only semgrep's upgrade banner, so the
+findings block was extracted with `grep` instead.) All 7 `.semgrep/` rules are
+`languages: [python]`, so this scan covers the 118 Python files only, not the C#
+helper; see check 6. gitleaks scans every file in the branch's commits, C#
+included. **Verdict: pass for Python and secrets.**
+
+## Check 6 — semgrep over the C# helper
+
+```
+$ semgrep --config p/csharp tools/steam_manifest_helper 2>&1 | tail -15
+┌────────────────┐
+│ 1 Code Finding │
+└────────────────┘
+
+    tools/steam_manifest_helper/SteamManifestHelper/SessionStore.cs
+    ❯❱ csharp.lang.security.filesystem.unsafe-path-combine.unsafe-path-combine
+          ❰❰ Blocking ❱❱
+          String argument sessionDir is used to read or write data from a file via Path.Combine without direct
+          sanitization via Path.GetFileName. If the path is user-supplied data this can lead to path
+          traversal.
+          Details: https://sg.run/1RvG
+
+           45┆ saved = JsonSerializer.Deserialize<SteamSession>(File.ReadAllText(path));
+$ semgrep --config p/csharp tools/steam_manifest_helper 2>&1 | grep -E "Findings|^Ran|Scanning 16"
+  Scanning 16 files with 27 csharp rules.
+ • Findings: 1 (1 blocking)
+Ran 27 rules on 16 files: 1 finding.
+```
+
+**Finding: `unsafe-path-combine`, `SessionStore.cs:39-45` (`Path.Combine(sessionDir,
+FileName)`). Verdict: false positive, accepted and not suppressed.** The rule
+exists for a path taken from an untrusted client. Here `sessionDir` is the
+`--session-dir` argument, supplied on the helper's command line by the agent's
+Python process (from its own settings) or by the operator running `login`. Both
+are already root in the container, so no privilege boundary is crossed, and no
+network input reaches this path. The second operand, `FileName`, is a constant
+(`session.json`), not caller data. Nothing is read or written outside the
+operator-chosen directory by any attacker-reachable route. No code change.
 
 ## Manual review — candidates raised and why each was discarded or recorded
 

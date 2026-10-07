@@ -33,22 +33,26 @@ for handoff clarity. Categories are ordered by impact severity.
   a drop, and reports one JSON line per app.
 - **Python calls the helper once per run** and keeps choosing games, parsing
   manifests and writing `.shas`. `fetch_all()` and `FetchResult` are unchanged.
-- **A run that silently skips apps now fails instead of reporting green.** Python
-  counts every requested app; one with no result line is a failure. The helper's
-  stderr tail and summary are logged on every failure.
+- **Apps the helper never reports are now counted as failed**
+  (`manifest_fetch.app_unreported`). A run that reports none fails the job;
+  partial skips turn it red past `fetch_manifests_max_failure_ratio` (0.75). The
+  helper's stderr tail and summary are logged on every failure.
 - **DepotDownloader is removed** from the image, along with the
   `manifest_fetch_delay_sec`, `manifest_fetch_max_retries` and
   `manifest_fetch_retry_backoff_sec` settings. `depotdownloader_binary` becomes
-  `steam_manifest_helper_binary`.
+  `steam_manifest_helper_binary`, and a new `manifest_fetch_timeout_sec`
+  (`ORCH_MANIFEST_FETCH_TIMEOUT_SEC`, default 7200 s) bounds one helper run.
 - **A new `login` command renews the session** (`SteamManifestHelper login
   --username <name> --session-dir <dir>`, needs a TTY and approval in the Steam
   app). It is the only way to renew once DepotDownloader is gone; a rejected token
   fails the run loudly and names it. See `docs/deploy/INSTALL.md`.
 - **CI's amd64 image limit is now 275 MiB** (was 250): the image is about
   254 MiB with the 86 MiB self-contained helper in place of the 75 MiB
-  DepotDownloader. The image build runs the helper's tests and fails on none.
+  DepotDownloader. The image build runs the helper's tests and fails if it finds
+  no tests.
 - **Rollback is by image tag, not a switch:** `docker tag orchestrator:dpa-pre-361
-  orchestrator:dpa`, then recreate the agent in an inter-sweep gap.
+  orchestrator:dpa`, then recreate the agent in an inter-sweep gap, syncing
+  `orchestrator-manifests` first as `docs/deploy/INSTALL.md` §6 requires.
 - Not deployed yet. Security audit:
   `docs/security-audits/steam-manifest-helper-security-audit.md`. ADR 0019.
 

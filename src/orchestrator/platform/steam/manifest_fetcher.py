@@ -122,8 +122,10 @@ class SteamManifestFetcher:
                 continue
         # Durability (#213 follow-up): also cover apps prefilled OUTSIDE the
         # selection — a `.bin` with no `.shas` yet (e.g. a `--recently-purchased`
-        # game). Bounded to that delta so the first run never triggers a
-        # full-library logon burst (#228; one helper login per run since #361).
+        # game). Bounded to that delta so the first run stays small: it asks the
+        # helper for the new apps only, not the whole library (#228). Since #361
+        # the run is one Steam login whatever its size, so this bounds run size,
+        # not logins.
         #
         # Look for the `.bin` in BOTH roots. It was previously read only from the
         # manifest cache dir, but the agent's archive-sync loop writes
