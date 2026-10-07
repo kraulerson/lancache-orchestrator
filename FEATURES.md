@@ -1924,9 +1924,12 @@ DepotDownloader is removed from the image.
   - **Python counts every requested app.** A requested app with no result line is
     counted as failed (`manifest_fetch.app_unreported`), and so are an app id
     that does not fit a uint32 (dropped before the helper sees it,
-    `manifest_fetch.app_id_out_of_range`), a `not_attempted` line after a clean
-    exit, and an `ok` app with a manifest that parses to no SHA
-    (`manifest_fetch.empty_manifest`; its other manifests are still archived). A
+    `manifest_fetch.app_id_out_of_range`) and a `not_attempted` line after a
+    clean exit. A manifest that parses to no SHA is a zero-chunk depot (49 such
+    `.shas` exist on the live archive): it counts as skipped, with a
+    `manifest_fetch.empty_manifest` warning, and the app's other manifests are
+    still archived. If every manifest in a run parses empty, the run logs
+    `manifest_fetch.all_manifests_empty` and raises, as parser or format drift. A
     run that reports none fails the job; partial failures turn the Kuma heartbeat
     red past `fetch_manifests_max_failure_ratio`, **10%** since 2026-10-07 (Karl;
     it was 0.75, tuned to DepotDownloader's rate-limited ~0.59 steady state, and
@@ -1960,7 +1963,7 @@ run, exit 2/3/4, timeout kill with partial results kept, hostile manifest names,
 unrequested and missing app lines, empty selection, empty manifests, out-of-range
 ids, `helper_outcome` through the live logging chain). Static guards:
 `tests/test_steam_helper_source_guards.py` (session file 0600 from creation) and
-`tests/test_dockerfile.py` (every `dotnet restore` locked). Full suite **2058
+`tests/test_dockerfile.py` (every `dotnet restore` locked). Full suite **2059
 passed, 3 deselected** after the final-review fix wave. gitleaks clean. semgrep:
 the repo's `.semgrep/` rules are Python only (0 findings over 118 `.py` files); the C# helper was scanned separately with
 `p/csharp`, 1 finding (`unsafe-path-combine` on the operator-supplied

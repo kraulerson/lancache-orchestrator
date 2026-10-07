@@ -726,9 +726,10 @@ def test_no_apps_never_launches_the_helper(tmp_path):
     assert [e["log_level"] for e in no_apps] == ["warning"]
 
 
-def test_a_manifest_with_no_valid_sha_fails_its_app_but_keeps_the_others(tmp_path):
-    """M5(b): an ok app whose manifest parses to zero SHAs is a failure, not a skip.
-    Its other, good manifest is still archived."""
+def test_a_manifest_with_no_valid_sha_is_skipped_with_a_warning(tmp_path):
+    """M5(b), amended: zero-chunk depots are real (49 empty .shas on the live
+    archive), so an empty manifest is skipped, not failed, but always warned about.
+    The app's other, good manifest is still archived."""
     _setup(tmp_path, [10])
     _fake_helper(
         tmp_path,
@@ -737,10 +738,30 @@ def test_a_manifest_with_no_valid_sha_fails_its_app_but_keeps_the_others(tmp_pat
     )
     with capture_logs() as logs:
         result = _fetcher(tmp_path).fetch_all()
-    assert result == FetchResult(fetched=1, skipped=0, failed=1, apps=1)
+    assert result == FetchResult(fetched=1, skipped=1, failed=0, apps=1)
     assert [p.name for p in (tmp_path / "archive" / "v1").glob("*.shas")] == ["10_10_11_1.shas"]
     empty = [e for e in logs if e["event"] == "manifest_fetch.empty_manifest"]
-    assert [(e["app_id"], e["name"]) for e in empty] == [(10, "12_2.manifest")]
+    assert [(e["app_id"], e["name"], e["log_level"]) for e in empty] == [
+        (10, "12_2.manifest", "warning")
+    ]
+
+
+def test_a_run_whose_every_manifest_parses_empty_raises_as_drift(tmp_path):
+    """M5(b) drift guard: if every ok manifest parsed to no SHA, the parser or the
+    manifest format has drifted. That must not read green."""
+    _setup(tmp_path, [10, 20])
+    _fake_helper(
+        tmp_path,
+        lines=[
+            {"app": 10, "status": "ok", "manifests": ["11_1.manifest"]},
+            {"app": 20, "status": "ok", "manifests": ["21_2.manifest"]},
+            _DONE,
+        ],
+        manifests={10: {"11_1.manifest": []}, 20: {"21_2.manifest": []}},
+    )
+    with capture_logs() as logs, pytest.raises(RuntimeError, match=r"parsed empty \(2 manifests\)"):
+        _fetcher(tmp_path).fetch_all()
+    assert [e for e in logs if e["event"] == "manifest_fetch.all_manifests_empty"]
 
 
 def test_not_attempted_after_a_clean_exit_counts_as_failed(tmp_path):

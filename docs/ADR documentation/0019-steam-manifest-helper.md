@@ -117,8 +117,10 @@ Shape of the result:
   Steam app. A rejected token is never silent.
 - **Failures are no longer silent.** Apps the helper never reports are now
   counted as failed (`manifest_fetch.app_unreported`), as are out-of-range app
-  ids, `not_attempted` after a clean exit, and manifests that parse to no SHA. A
-  run that reports none fails the job; partial failures turn the heartbeat red
+  ids and `not_attempted` after a clean exit. A manifest that parses to no SHA
+  is a zero-chunk depot (49 such `.shas` exist live): it is skipped with a
+  warning, but a run in which every manifest parses empty raises as parser or
+  format drift. A run that reports none fails the job; partial failures turn the heartbeat red
   past `fetch_manifests_max_failure_ratio`, 10% since 2026-10-07 (Karl; it was
   0.75, tuned to DepotDownloader's rate-limited ~0.59 steady state).
   What is logged on a failure depends on how the helper ended. A non-zero exit

@@ -255,9 +255,10 @@ class SteamManifestFetcher:
     ) -> tuple[int, int, int] | None:
         """Archive one ok app's manifests. Returns (fetched, skipped, empty), or None
         when the helper listed no readable manifest for it. `empty` counts manifests
-        that parsed to no valid SHA: nothing is written for them, and the caller
-        fails the app. Names must match <depot>_<gid>.manifest exactly, so a listed
-        name can never escape app_dir."""
+        that parsed to no valid SHA; they are also counted in `skipped`, since
+        zero-chunk depots are real, and the caller uses `empty` for its drift
+        guard. Names must match <depot>_<gid>.manifest exactly, so a listed name
+        can never escape app_dir."""
         if not isinstance(names, list):
             return None
         fetched = skipped = empty = 0
@@ -277,9 +278,10 @@ class SteamManifestFetcher:
             seen = True
             shas = parse_steamkit_manifest(path.read_bytes())
             if not any(_SHA1_RE.match(s) for s in shas):
-                # A listed manifest with no chunk SHA archives nothing: a failure,
-                # never a quiet "skipped" (M5b).
+                # Zero-chunk depots exist (49 empty .shas on the live archive), so
+                # this is a skip, but never a quiet one (M5b, amended).
                 empty += 1
+                skipped += 1
                 _log.warning("manifest_fetch.empty_manifest", app_id=app_id, name=name)
                 continue
             if self._write_shas(app_id, int(match["depot"]), match["gid"], shas):
@@ -311,7 +313,7 @@ class SteamManifestFetcher:
             # Nothing to fetch: do not log on to Steam for it (M5a).
             _log.warning("manifest_fetch.no_apps")
             return FetchResult(fetched=0, skipped=0, failed=0, apps=0)
-        fetched = skipped = failed = not_attempted = 0
+        fetched = skipped = failed = not_attempted = empty = 0
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 scratch = Path(tmp)
@@ -341,8 +343,7 @@ class SteamManifestFetcher:
                         continue
                     fetched += written[0]
                     skipped += written[1]
-                    if written[2]:
-                        failed += 1  # M5b: a manifest that archived nothing fails its app
+                    empty += written[2]
                 if run.timed_out:
                     _log.error(
                         "manifest_fetch.helper_timed_out",
@@ -387,6 +388,15 @@ class SteamManifestFetcher:
             reason=summary_reason,
             stderr_tail=run.stderr_tail,
         )
+        read = fetched + skipped  # every listed ok manifest that was parsed
+        if read > 0 and empty == read:
+            # One empty manifest is a zero-chunk depot; ALL of them empty is the parser
+            # or SteamKit2's format drifting, and must never read green (M5b guard).
+            _log.error("manifest_fetch.all_manifests_empty", manifests=read)
+            raise RuntimeError(
+                f"every manifest the helper returned parsed empty ({read} manifests)"
+                " — parser or format drift?"
+            )
         if run.returncode in _HELPER_STOPS:
             reason = summary_reason or _HELPER_STOPS[run.returncode]
             self._log_helper_failed(run, outcome, summary_reason, logons)

@@ -59,9 +59,11 @@ for handoff clarity. Categories are ordered by impact severity.
   - The summary's session status is logged as `helper_outcome`: the live logger
     redacted any key containing "session", so it always read `<redacted>`.
   - No longer green with nothing archived: an empty selection never starts the
-    helper (`manifest_fetch.no_apps`); a manifest that parses to no SHA fails its
-    app (`manifest_fetch.empty_manifest`); a `not_attempted` line after a clean
-    exit counts as failed.
+    helper (`manifest_fetch.no_apps`); a `not_attempted` line after a clean exit
+    counts as failed; a manifest that parses to no SHA is still skipped (zero-chunk
+    depots are real: 49 empty `.shas` live) but now warns
+    (`manifest_fetch.empty_manifest`), and a run in which every manifest parses
+    empty raises as parser or format drift (`manifest_fetch.all_manifests_empty`).
   - An app id that does not fit a uint32 is dropped and counted as failed
     (`manifest_fetch.app_id_out_of_range`) instead of failing the whole run.
   - The helper's catch-all prints the exception type and a fixed text, never the
