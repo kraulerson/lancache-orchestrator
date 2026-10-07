@@ -121,13 +121,13 @@ stderr tail and the archived counts, and raises. **Verdict: pass.**
 ```
 $ grep -n "_MANIFEST_NAME_RE" src/orchestrator/platform/steam/manifest_fetcher.py
 38:_MANIFEST_NAME_RE = re.compile(r"(?P<depot>\d+)_(?P<gid>\d+)\.manifest")
-266:            match = _MANIFEST_NAME_RE.fullmatch(name) if isinstance(name, str) else None
+267:            match = _MANIFEST_NAME_RE.fullmatch(name) if isinstance(name, str) else None
 ```
 
 (Re-run on the final-review fix-wave tree.) `fullmatch` against
 `\d+_\d+\.manifest` admits only digits, one underscore and a fixed suffix: no
 `/`, no `..`, no NUL, no leading `-`. The name is joined onto the app directory
-only after the match (`manifest_fetcher.py:268`); a non-string or a
+only after the match (`manifest_fetcher.py:269`); a non-string or a
 non-matching name is skipped and logged as `manifest_fetch.manifest_name_skipped`.
 Test `test_a_manifest_name_outside_the_pattern_is_never_read` lists
 `../../../1_2.manifest` (which a `.search` pattern would accept), plants a valid
@@ -234,8 +234,9 @@ connection or a Steam log-off it waits 60 s and reconnects once, then exits 4,
 so a run makes at most 2 logons. Before each logon the CM connection itself is
 tried up to 3 times (5 s, then 15 s apart; `ConnectRetryTests`), which adds no
 logons. A connect that never succeeds, or a logon Steam never answers, is
-reported as "could not reach Steam" (`login_refused`, exit 2, on the first
-logon; exit 4 on the reconnect), and the logon is never retried. Every summary
+reported as "could not reach Steam: ..." (`login_refused`, exit 2, on the first
+logon) or, on the reconnect, as "reconnect failed: could not connect to Steam: ..."
+(exit 4), and the logon is never retried. Every summary
 reports the count as `logons`. Tested against a fake gateway; the gateway's
 network half is unproven live until Task 10. **Not exploitable.**
 

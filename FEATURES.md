@@ -1418,7 +1418,7 @@ failure-ratio threshold **without** changing `jobs.state` (#294).
 pure function, including every kind × every manual source; wiring for up, down-with-error,
 silence on a manual trigger, and a push that raises leaving the job succeeded), 8 in
 `tests/clients/test_heartbeat.py` (driven through `httpx.MockTransport`, asserting the
-real outgoing request), 12 in `tests/jobs/test_fetch_manifests_summary.py`.
+real outgoing request), 15 in `tests/jobs/test_fetch_manifests_summary.py`.
 
 **Known Limitations:**
   - Monitoring is fire-and-forget: a push rejected by Kuma (e.g. a paused monitor,
@@ -1932,14 +1932,15 @@ DepotDownloader is removed from the image.
     `manifest_fetch.all_manifests_empty` and raises, as parser or format drift. A
     run that reports none fails the job; partial failures turn the Kuma heartbeat
     red past `fetch_manifests_max_failure_ratio`, **10%** since 2026-10-07 (Karl;
-    it was 0.75, tuned to DepotDownloader's rate-limited ~0.59 steady state, and
-    the Task 1 spike saw 0 failures in 100 apps). Karl re-checks it against the
-    first live run.
+    it was 0.75, tuned to DepotDownloader's rate-limited ~0.59 steady state; the
+    Task 1 spike's 100-app sample would score about 1-2% under production rules,
+    on a sample biased toward clean apps). Karl set 10% on 2026-10-07 and
+    re-checks it against the first live run.
   - **The connect is retried, the logon never is.** The gateway tries the CM
     connection up to 3 times (5 s, then 15 s apart) before its single `LogOn`. A
     connect that never succeeds, or a logon Steam never answers, is reported as
-    "could not reach Steam" (exit 2, or exit 4 on the reconnect), not as a login
-    refusal.
+    "could not reach Steam: ..." (exit 2), or on the reconnect as "reconnect
+    failed: could not connect to Steam: ..." (exit 4), not as a login refusal.
   - **Every summary carries `logons`**, the number of connect-and-logon calls (1,
     or 2 after the reconnect; 0 when the session import failed). Python logs it in
     `manifest_fetch.done` and `manifest_fetch.helper_failed`, beside

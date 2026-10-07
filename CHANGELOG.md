@@ -38,9 +38,10 @@ for handoff clarity. Categories are ordered by impact severity.
   partial failures turn the heartbeat red past `fetch_manifests_max_failure_ratio`.
 - **`fetch_manifests_max_failure_ratio` drops from 0.75 to 0.10** (Karl,
   2026-10-07). 0.75 sat above DepotDownloader's ~0.59 steady state, which was the
-  rate limit #361 removes; the one-login spike saw 0 failures in 100 apps, so
-  0.75 would have read UP at 74% failed. To be re-checked against the first live
-  run.
+  rate limit #361 removes, so 0.75 would have read UP at 74% failed. The Task 1
+  spike's 100-app sample would score about 1-2% under production rules, on a
+  sample biased toward clean apps; Karl set 10% on 2026-10-07 and re-checks it
+  against the first live run.
 - **What is logged on a failure depends on how the helper ended.** A non-zero
   exit or a missing summary logs `manifest_fetch.helper_failed` (exit code,
   `helper_outcome`, `logons`, the summary's reason when there is one, and the
@@ -58,8 +59,10 @@ for handoff clarity. Categories are ordered by impact severity.
     the live one-login check reads `"logons": 1` there.
   - The summary's session status is logged as `helper_outcome`: the live logger
     redacted any key containing "session", so it always read `<redacted>`.
-  - No longer green with nothing archived: an empty selection never starts the
-    helper (`manifest_fetch.no_apps`); a `not_attempted` line after a clean exit
+  - No longer green with nothing archived: an empty selection skips the helper,
+    logs a `manifest_fetch.no_apps` warning and returns `FetchResult(0, 0, 0, 0)`,
+    which still reports UP because `summarise_tally` treats apps=0 as ok; a
+    `not_attempted` line after a clean exit
     counts as failed; a manifest that parses to no SHA is still skipped (zero-chunk
     depots are real: 49 empty `.shas` live) but now warns
     (`manifest_fetch.empty_manifest`), and a run in which every manifest parses

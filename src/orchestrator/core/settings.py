@@ -282,9 +282,10 @@ class Settings(BaseSettings):
     # 0.10 since #361 (Karl, 2026-10-07). The earlier 0.75 was tuned to sit above
     # the DepotDownloader-era steady state (698/1174 ≈ 0.59 on 2026-08-25), whose
     # failures were the rate limits of 1,211 logins per run — the cause #361
-    # removes. The one-login helper's Task 1 spike saw 0 failures in 100 apps, so
-    # 0.75 would have read UP at 74% failed. Karl re-checks 0.10 against the first
-    # live run.
+    # removes, so 0.75 would have read UP at 74% failed. The Task 1 spike's 100-app
+    # sample would score about 1-2% under production rules, on a sample biased
+    # toward clean apps; Karl set 10% on 2026-10-07 and re-checks it against the
+    # first live run.
     fetch_manifests_max_failure_ratio: float = Field(default=0.10, ge=0.0, le=1.0)
     # #225: after a game is prefilled, auto-exclude classifier-flagged non-games
     # (soundtracks/tools/servers/demos) from FUTURE prefill. Runs on the same
