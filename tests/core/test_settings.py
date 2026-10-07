@@ -768,6 +768,14 @@ def test_manifest_fetcher_settings_defaults():
     assert not hasattr(s, "manifest_fetch_delay_sec")
 
 
+def test_fetch_manifests_failure_ratio_defaults_to_ten_percent():
+    """#361 I2 (Karl, 2026-10-07): 0.75 was tuned to DepotDownloader's rate-limited
+    ~0.59 steady state. With one login per run the spike saw 0 failures in 100 apps,
+    so the alarm now fires above 10%."""
+    s = Settings(orchestrator_token="a" * 32)
+    assert s.fetch_manifests_max_failure_ratio == 0.10
+
+
 def test_manifest_fetcher_settings_env_override(monkeypatch):
     monkeypatch.setenv("ORCH_MANIFEST_FETCH_TIMEOUT_SEC", "60")
     monkeypatch.setenv("ORCH_DEPOTDOWNLOADER_CONFIG_DIR", "/custom/dd")

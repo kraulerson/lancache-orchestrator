@@ -15,7 +15,9 @@ public sealed class SteamRequestException(string message) : Exception(message);
 
 public interface ISteamGateway : IAsyncDisposable
 {
-    /// <summary>Connect, and log on ONCE with the session's token. Never retries.</summary>
+    /// <summary>Connect (the connect alone may be retried, before any logon), then log on
+    /// ONCE with the session's token. The logon is never retried. Throws
+    /// SessionLostException when Steam cannot be reached or never answers the logon.</summary>
     Task<LogOnResult> ConnectAndLogOnAsync(SteamSession session, CancellationToken ct);
 
     /// <summary>The app's PICS key/values, or null when Steam returns none.</summary>

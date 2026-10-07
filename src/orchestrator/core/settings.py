@@ -279,11 +279,13 @@ class Settings(BaseSettings):
     # (#294). It does NOT fail the job: a partially-failing run is still a run that
     # happened, and conflating the two makes 'failed' useless as a signal.
     #
-    # 0.75 is a starting point chosen to sit above the current steady state
-    # (698/1174 ≈ 0.59 on 2026-08-25) so the monitor is not born red, while still
-    # catching a genuine collapse. Tune it once the numbers have been visible for a
-    # while — that is the whole point of putting them on the monitor.
-    fetch_manifests_max_failure_ratio: float = Field(default=0.75, ge=0.0, le=1.0)
+    # 0.10 since #361 (Karl, 2026-10-07). The earlier 0.75 was tuned to sit above
+    # the DepotDownloader-era steady state (698/1174 ≈ 0.59 on 2026-08-25), whose
+    # failures were the rate limits of 1,211 logins per run — the cause #361
+    # removes. The one-login helper's Task 1 spike saw 0 failures in 100 apps, so
+    # 0.75 would have read UP at 74% failed. Karl re-checks 0.10 against the first
+    # live run.
+    fetch_manifests_max_failure_ratio: float = Field(default=0.10, ge=0.0, le=1.0)
     # #225: after a game is prefilled, auto-exclude classifier-flagged non-games
     # (soundtracks/tools/servers/demos) from FUTURE prefill. Runs on the same
     # interval as the scheduled prefill; download-once-then-block.
@@ -303,7 +305,7 @@ class Settings(BaseSettings):
     # it is a property of the hardware, and the 2026-09-01 incident was a
     # storage change silently invalidating a number nobody could see.
     validate_assumed_chunks_per_sec: float = Field(default=40.0, gt=0)
-    # Manifest-only fetcher (DepotDownloader) weekly cron — Monday 05:00 UTC,
+    # Manifest-only fetcher (SteamManifestHelper, #361) weekly cron — Monday 05:00 UTC,
     # offset from the sweep (03/09/15/21) and host prefill crons. 5-field, UTC.
     fetch_manifests_enabled: bool = True
     fetch_manifests_cron: str = "0 5 * * 1"

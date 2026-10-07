@@ -83,8 +83,9 @@ def _run_blocks() -> list[str]:
 
 
 def _helper_commands(verb: str, target: str) -> list[str]:
-    """Every `dotnet <verb> ... <target>` command across the RUN blocks."""
-    cmds = [c.strip() for block in _run_blocks() for c in block.split("&&")]
+    """Every `dotnet <verb> ... <target>` command across the RUN blocks. `RUN ` is
+    stripped first, or a command that opens its block is never matched."""
+    cmds = [c.strip() for block in _run_blocks() for c in block.removeprefix("RUN ").split("&&")]
     return [c for c in cmds if c.startswith(f"dotnet {verb} ") and target in c]
 
 
@@ -99,6 +100,17 @@ def test_helper_restore_is_locked_and_keeps_both_rids():
         assert "--locked-mode" in cmd, cmd
         assert " -r " not in f" {cmd} ", cmd
         assert "--runtime" not in cmd, cmd
+
+
+def test_every_dotnet_restore_is_locked():
+    """#361 review dm2: the test project's restore opens a RUN block, so before
+    `RUN ` was stripped it was never checked. Both restores (the test project's
+    and the helper's) must be locked, or a tampered or drifted package restores
+    silently."""
+    restores = _helper_commands("restore", ".csproj")
+    assert len(restores) == 2, restores
+    for cmd in restores:
+        assert "--locked-mode" in cmd, cmd
 
 
 def test_helper_publish_keeps_steamkit2_replaceable():

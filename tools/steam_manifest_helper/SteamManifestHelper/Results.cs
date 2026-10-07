@@ -32,7 +32,7 @@ public static class SessionStatus
 
 public sealed record AppResult(uint App, string Status, IReadOnlyList<string>? Manifests = null, string? Reason = null);
 
-public sealed record RunSummary(string Session, string Reason)
+public sealed record RunSummary(string Session, string Reason, int Logons)
 {
     public bool Summary => true;
 }

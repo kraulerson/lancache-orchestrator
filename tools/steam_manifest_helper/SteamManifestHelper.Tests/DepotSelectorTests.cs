@@ -69,6 +69,15 @@ public sealed class DepotSelectorTests
     }
 
     [Fact]
+    public void A_depot_with_its_own_manifests_and_a_depotfromapp_resolves_to_its_own_gid()
+    {
+        var depots = Depots("""
+            "228988" { "depotfromapp" "228980" "manifests" { "public" { "gid" "42" } } }
+            """);
+        Assert.Equal(new ManifestLookup(42, 0), DepotSelector.ResolveManifest(depots, 228988, 730));
+    }
+
+    [Fact]
     public void A_depot_borrowing_from_itself_resolves_to_nothing()
     {
         var depots = Depots("""

@@ -26,9 +26,11 @@ public static class Cli
         }
         // Only the caller's own cancellation propagates; SteamKit2's job timeouts and
         // disconnect cancellations are also OperationCanceledException and must exit 1.
+        // The type name only, never e.Message: a library's message can carry a request
+        // URL, and a CDN URL can carry an auth token in its query string.
         catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            stderr.WriteLine($"unexpected: {e.GetType().Name}: {e.Message}");
+            stderr.WriteLine($"unexpected: {e.GetType().Name}: the helper stopped on an error it does not handle (message withheld)");
             return ExitCodes.Unexpected;
         }
     }
@@ -46,7 +48,7 @@ public static class Cli
         {
             var reason = $"{e.Message}. Run: SteamManifestHelper login --username {username} --session-dir {sessionDir}";
             stderr.WriteLine(reason);
-            ResultWriter.Write(stdout, new RunSummary(SessionStatus.ImportFailed, reason));
+            ResultWriter.Write(stdout, new RunSummary(SessionStatus.ImportFailed, reason, 0));
             return ExitCodes.ImportFailed;
         }
         var appIds = ReadAppIds(options["--apps"]);

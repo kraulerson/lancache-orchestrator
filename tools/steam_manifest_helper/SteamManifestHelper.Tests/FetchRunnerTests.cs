@@ -51,6 +51,7 @@ public sealed class FetchRunnerTests : IDisposable
         Assert.True(File.Exists(Path.Combine(outDir, "10", "11_111.manifest")));
         Assert.True(lines[^1].GetProperty("summary").GetBoolean());
         Assert.Equal("completed", lines[^1].GetProperty("session").GetString());
+        Assert.Equal(1, lines[^1].GetProperty("logons").GetInt32());
     }
 
     [Fact]
@@ -64,6 +65,7 @@ public sealed class FetchRunnerTests : IDisposable
         var only = Assert.Single(Lines());
         Assert.Equal("login_refused", only.GetProperty("session").GetString());
         Assert.Contains("RateLimitExceeded", only.GetProperty("reason").GetString());
+        Assert.Equal(1, only.GetProperty("logons").GetInt32());
     }
 
     [Fact]
@@ -85,7 +87,9 @@ public sealed class FetchRunnerTests : IDisposable
         Assert.Equal(ExitCodes.Completed, code);
         Assert.Equal(2, gateway.LogOnCalls);
         Assert.Equal(new[] { FetchRunner.ReconnectWait }, delays);
-        Assert.Equal(new[] { "ok", "ok", "ok" }, Lines().Take(3).Select(l => l.GetProperty("status").GetString()));
+        var lines = Lines();
+        Assert.Equal(new[] { "ok", "ok", "ok" }, lines.Take(3).Select(l => l.GetProperty("status").GetString()));
+        Assert.Equal(2, lines[^1].GetProperty("logons").GetInt32());
     }
 
     [Fact]
@@ -99,6 +103,7 @@ public sealed class FetchRunnerTests : IDisposable
         var lines = Lines();
         Assert.Equal(new[] { "ok", "not_attempted", "not_attempted" }, lines.Take(3).Select(l => l.GetProperty("status").GetString()));
         Assert.Equal("disconnected", lines[^1].GetProperty("session").GetString());
+        Assert.Equal(2, lines[^1].GetProperty("logons").GetInt32());
     }
 
     [Fact]
@@ -197,6 +202,7 @@ public sealed class FetchRunnerTests : IDisposable
         var reason = only.GetProperty("reason").GetString();
         Assert.Contains("could not reach Steam", reason);
         Assert.DoesNotContain("login --username", reason);
+        Assert.Equal(1, only.GetProperty("logons").GetInt32());
     }
 
     [Fact]

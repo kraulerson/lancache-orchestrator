@@ -24,7 +24,8 @@ _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")  # COR-2: drop non-canonical chunk ids
 
 
 class SteamAuthError(Exception):
-    """No usable DepotDownloader/SteamPrefill session — operator must log in once."""
+    """No Steam session: neither the helper's own nor a DepotDownloader login to
+    import from — the operator must run SteamManifestHelper login once."""
 
 
 class HelperSessionError(RuntimeError):
@@ -37,12 +38,26 @@ _HELPER_STOPS = {2: "login failed", 3: "session import failed", 4: "connection l
 _MANIFEST_NAME_RE = re.compile(r"(?P<depot>\d+)_(?P<gid>\d+)\.manifest")
 
 
+_MAX_APP_ID = 2**32  # the helper parses app ids as uint32 (Cli.ReadAppIds)
+
+
+def _text(output: str | bytes | None) -> str:
+    """TimeoutExpired carries bytes even with text=True."""
+    if isinstance(output, bytes):
+        return output.decode("utf-8", "replace")
+    return output or ""
+
+
 @dataclass(frozen=True)
 class _HelperRun:
     returncode: int
     apps: dict[int, dict[str, object]]
     summary: dict[str, object] | None
     stderr_tail: str
+    # Ids never sent to the helper because they do not fit a uint32 (#361 M10).
+    out_of_range: frozenset[int] = frozenset()
+    # The helper was killed at the timeout; `apps` holds what it reported before.
+    timed_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,8 +186,14 @@ class SteamManifestFetcher:
         return True
 
     def _run_helper(self, app_ids: list[int], scratch: Path) -> _HelperRun:
+        # One id the helper cannot parse as a uint32 would exit it 1 and lose the
+        # whole run, so drop it here and let fetch_all count it as failed (M10).
+        out_of_range = frozenset(a for a in app_ids if not 0 < a < _MAX_APP_ID)
+        for app_id in sorted(out_of_range):
+            _log.warning("manifest_fetch.app_id_out_of_range", app_id=app_id)
+        sent = [a for a in app_ids if a not in out_of_range]
         apps_file = scratch / "apps.txt"
-        apps_file.write_text("".join(f"{a}\n" for a in app_ids))
+        apps_file.write_text("".join(f"{a}\n" for a in sent))
         argv = [
             str(self._binary),
             "fetch",
@@ -192,25 +213,24 @@ class SteamManifestFetcher:
                 argv, capture_output=True, text=True, timeout=self._timeout_sec
             )
         except subprocess.TimeoutExpired as e:
-            # TimeoutExpired carries bytes even with text=True.
-            err = (
-                e.stderr.decode("utf-8", "replace")
-                if isinstance(e.stderr, bytes)
-                else (e.stderr or "")
+            # The apps it reported ok before it hung are on disk: keep them (I1).
+            # fetch_all archives them, then logs the timeout and raises.
+            apps, summary = self._parse_stdout(_text(e.stdout), set(sent))
+            return _HelperRun(
+                -1, apps, summary, _text(e.stderr)[-500:], out_of_range, timed_out=True
             )
-            _log.error(
-                "manifest_fetch.helper_timed_out",
-                timeout_sec=self._timeout_sec,
-                stderr_tail=err[-500:],
-            )
-            raise RuntimeError(
-                f"steam manifest helper timed out after {self._timeout_sec:.0f}s;"
-                f" stderr tail: {err[-300:]}"
-            ) from e
-        requested = set(app_ids)
-        apps: dict[int, dict[str, object]] = {}  # last line per app wins
+        apps, summary = self._parse_stdout(proc.stdout, set(sent))
+        return _HelperRun(proc.returncode, apps, summary, (proc.stderr or "")[-500:], out_of_range)
+
+    @staticmethod
+    def _parse_stdout(
+        stdout: str, requested: set[int]
+    ) -> tuple[dict[int, dict[str, object]], dict[str, object] | None]:
+        """The helper's JSON lines: one per app (the last per app wins) and a summary.
+        A non-JSON line, a partial trailing line included, is skipped."""
+        apps: dict[int, dict[str, object]] = {}
         summary: dict[str, object] | None = None
-        for line in proc.stdout.splitlines():
+        for line in stdout.splitlines():
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
@@ -228,15 +248,19 @@ class SteamManifestFetcher:
                     )
                     continue
                 apps[app] = obj
-        return _HelperRun(proc.returncode, apps, summary, (proc.stderr or "")[-500:])
+        return apps, summary
 
-    def _archive_app(self, app_id: int, app_dir: Path, names: object) -> tuple[int, int] | None:
-        """Archive one ok app's manifests. Returns (fetched, skipped), or None when
-        the helper listed no readable manifest for it. Names must match
-        <depot>_<gid>.manifest exactly, so a listed name can never escape app_dir."""
+    def _archive_app(
+        self, app_id: int, app_dir: Path, names: object
+    ) -> tuple[int, int, int] | None:
+        """Archive one ok app's manifests. Returns (fetched, skipped, empty), or None
+        when the helper listed no readable manifest for it. `empty` counts manifests
+        that parsed to no valid SHA: nothing is written for them, and the caller
+        fails the app. Names must match <depot>_<gid>.manifest exactly, so a listed
+        name can never escape app_dir."""
         if not isinstance(names, list):
             return None
-        fetched = skipped = 0
+        fetched = skipped = empty = 0
         seen = False
         for name in names:
             match = _MANIFEST_NAME_RE.fullmatch(name) if isinstance(name, str) else None
@@ -252,20 +276,27 @@ class SteamManifestFetcher:
                 continue
             seen = True
             shas = parse_steamkit_manifest(path.read_bytes())
+            if not any(_SHA1_RE.match(s) for s in shas):
+                # A listed manifest with no chunk SHA archives nothing: a failure,
+                # never a quiet "skipped" (M5b).
+                empty += 1
+                _log.warning("manifest_fetch.empty_manifest", app_id=app_id, name=name)
+                continue
             if self._write_shas(app_id, int(match["depot"]), match["gid"], shas):
                 fetched += 1
             else:
                 skipped += 1
-        return (fetched, skipped) if seen else None
+        return (fetched, skipped, empty) if seen else None
 
     @staticmethod
-    def _log_helper_failed(run: _HelperRun, session: str, reason: str) -> None:
+    def _log_helper_failed(run: _HelperRun, outcome: str, reason: str, logons: int | None) -> None:
         """The helper's stderr is its human log. Log it whole-ish BEFORE raising:
         the router truncates the exception text, cutting the final error line."""
         _log.error(
             "manifest_fetch.helper_failed",
             helper_exit=run.returncode,
-            session=session,
+            helper_outcome=outcome,
+            logons=logons,
             reason=reason,
             stderr_tail=run.stderr_tail,
         )
@@ -276,14 +307,19 @@ class SteamManifestFetcher:
         counted; a session that stopped early raises AFTER archiving what it got."""
         self.login_from_session()
         app_ids = self._enumerate_app_ids()
+        if not app_ids:
+            # Nothing to fetch: do not log on to Steam for it (M5a).
+            _log.warning("manifest_fetch.no_apps")
+            return FetchResult(fetched=0, skipped=0, failed=0, apps=0)
         fetched = skipped = failed = not_attempted = 0
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 scratch = Path(tmp)
                 run = self._run_helper(app_ids, scratch)
+                failed += len(run.out_of_range)
                 for app_id, line in run.apps.items():
                     status = line.get("status")
-                    if status == "not_attempted":
+                    if status == "not_attempted" and run.returncode != 0:
                         not_attempted += 1
                         continue
                     written = (
@@ -305,18 +341,38 @@ class SteamManifestFetcher:
                         continue
                     fetched += written[0]
                     skipped += written[1]
+                    if written[2]:
+                        failed += 1  # M5b: a manifest that archived nothing fails its app
+                if run.timed_out:
+                    _log.error(
+                        "manifest_fetch.helper_timed_out",
+                        timeout_sec=self._timeout_sec,
+                        fetched=fetched,
+                        skipped=skipped,
+                        stderr_tail=run.stderr_tail,
+                    )
+                    raise RuntimeError(
+                        f"steam manifest helper timed out after {self._timeout_sec:.0f}s"
+                        f" (archived fetched={fetched} skipped={skipped} first);"
+                        f" stderr tail: {run.stderr_tail[-300:]}"
+                    )
                 if run.returncode == 0:
                     # A clean exit that never mentioned an app is a failure for it.
                     # After a session stop (exit 2/3/4) the raise below reports it.
                     for app_id in app_ids:
-                        if app_id not in run.apps:
+                        if app_id not in run.apps and app_id not in run.out_of_range:
                             failed += 1
                             _log.warning("manifest_fetch.app_unreported", app_id=app_id)
         except BaseException as e:  # ③: a timeout-style escape must not kill the agent silently
             _log.error("manifest_fetch.run_aborted", reason=f"{type(e).__name__}: {e}"[:200])
             raise
         summary = run.summary or {}
-        session = str(summary.get("session") or "")
+        # Not `session`: the live logger redacts any key containing it (M1).
+        outcome = str(summary.get("session") or "")[:50]
+        raw_logons = summary.get("logons")
+        logons = (
+            raw_logons if isinstance(raw_logons, int) and not isinstance(raw_logons, bool) else None
+        )
         summary_reason = str(summary.get("reason") or "")[:300]
         _log.info(
             "manifest_fetch.done",
@@ -326,20 +382,21 @@ class SteamManifestFetcher:
             failed=failed,
             not_attempted=not_attempted,
             helper_exit=run.returncode,
-            session=session,
+            helper_outcome=outcome,
+            logons=logons,
             reason=summary_reason,
             stderr_tail=run.stderr_tail,
         )
         if run.returncode in _HELPER_STOPS:
             reason = summary_reason or _HELPER_STOPS[run.returncode]
-            self._log_helper_failed(run, session, summary_reason)
+            self._log_helper_failed(run, outcome, summary_reason, logons)
             raise HelperSessionError(
                 f"steam manifest helper stopped ({_HELPER_STOPS[run.returncode]}): {reason}"
                 f" | fetched={fetched} skipped={skipped} failed={failed}"
                 f" not_attempted={not_attempted}"
             )
         if run.returncode != 0 or run.summary is None:
-            self._log_helper_failed(run, session, summary_reason)
+            self._log_helper_failed(run, outcome, summary_reason, logons)
             raise RuntimeError(
                 f"steam manifest helper failed (exit {run.returncode});"
                 f" stderr tail: {run.stderr_tail[-300:]}"

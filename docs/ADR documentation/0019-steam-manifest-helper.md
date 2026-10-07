@@ -61,9 +61,11 @@ Shape of the result:
   then a summary); stderr is the human log. Exit codes: 0 completed, 1
   unexpected, 2 login refused, 3 session import failed, 4 disconnected twice, 64
   usage.
-- Exactly one Steam logon per run. After a dropped connection or a Steam log-off,
-  wait 60 s and reconnect **once**; a second loss ends the run with the rest
-  `not_attempted` and exit 4.
+- One Steam logon per run, plus at most one on the single reconnect. After a
+  dropped connection or a Steam log-off, wait 60 s and reconnect **once**; a
+  second loss ends the run with the rest `not_attempted` and exit 4. Before each
+  logon the CM connection itself may be tried up to 3 times (5 s, then 15 s
+  apart); that adds no logons. Every summary reports the count as `logons`.
 - `fetch_all()` keeps its signature and `FetchResult`, so the agent API does not
   change. Python runs the helper once, counts every requested app (a requested
   app with no result line counts as failed), and writes `.shas` only for `ok`
@@ -87,7 +89,12 @@ Shape of the result:
   whole downloader. Fresh code on SteamKit2 (LGPL-2.1, used as a separate
   replaceable assembly) is smaller and keeps the licence of our own code clean.
   The depot-selection rules are reproduced from DepotDownloader 3.4.0's behaviour
-  and pinned by tests rather than copied.
+  rather than copied, and pinned by `DepotSelectorTests` (OS, architecture,
+  language and low-violence filters; the public manifest id; the `depotfromapp`
+  redirect, and a depot with its own manifests winning over its `depotfromapp`).
+  Two parity divergences remain by design: no licence-ownership pre-check (an
+  unowned depot is found by its `AccessDenied` key answer instead), and one
+  `depotfromapp` hop.
 - **Keep both tools behind a switch.** Would give an instant in-place rollback.
   CI fails any amd64 image over 250 MiB, and DepotDownloader is ~75 MiB of it, so
   both cannot ship; raising the limit far enough for both was not worth carrying
@@ -109,10 +116,18 @@ Shape of the result:
   `login` command, and the operator runs it once with a TTY and approves on the
   Steam app. A rejected token is never silent.
 - **Failures are no longer silent.** Apps the helper never reports are now
-  counted as failed (`manifest_fetch.app_unreported`). A run that reports none
-  fails the job; partial skips turn it red past
-  `fetch_manifests_max_failure_ratio` (0.75). The helper's stderr tail and summary
-  are logged on every failure.
+  counted as failed (`manifest_fetch.app_unreported`), as are out-of-range app
+  ids, `not_attempted` after a clean exit, and manifests that parse to no SHA. A
+  run that reports none fails the job; partial failures turn the heartbeat red
+  past `fetch_manifests_max_failure_ratio`, 10% since 2026-10-07 (Karl; it was
+  0.75, tuned to DepotDownloader's rate-limited ~0.59 steady state).
+  What is logged on a failure depends on how the helper ended. A non-zero exit
+  or a missing summary logs `manifest_fetch.helper_failed` with the exit code,
+  the summary's outcome, `logons` and reason (when the helper printed a
+  summary), and the stderr tail. A timeout prints no summary, so it logs
+  `manifest_fetch.helper_timed_out` with the stderr tail and the counts it
+  archived. A helper that never starts logs only `manifest_fetch.run_aborted`
+  with the exception, and neither stderr nor a summary.
 - **Rollback is by image tag**, not a switch: `docker tag
   orchestrator:dpa-pre-361 orchestrator:dpa`, then recreate the agent in an
   inter-sweep gap, after syncing `orchestrator-manifests` as
@@ -120,9 +135,9 @@ Shape of the result:
   DepotDownloader's 1,211-login behaviour, so it is a fallback, not a steady
   state.
 - **Closure evidence** is expected to be the Monday run after deploy:
-  `fetch_manifests.done` with `failed` near 0, one Steam login in the helper's
-  log, the 06:00 MDT SteamPrefill run ending `END steam prefill ok`, and Kuma 176
-  staying UP. #361 closes only on that evidence.
+  `fetch_manifests.done` with `failed` near 0, `"logons": 1` in the agent's
+  `manifest_fetch.done` line, the 06:00 MDT SteamPrefill run ending `END steam
+  prefill ok`, and Kuma 176 staying UP. #361 closes only on that evidence.
 
 ## References
 

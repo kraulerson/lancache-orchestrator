@@ -3201,12 +3201,16 @@ ssh root@10.100.23.105 'docker exec orchestrator orchestrator-cli cache fetch-ma
 ```
 
 Watch the job to completion. Expected:
-- the agent log shows exactly one `logged on as` line from the helper;
+- `manifest_fetch.done` has `"logons": 1` (the helper's own count of its
+  connect-and-logon calls; 2 means it reconnected once). Do not grep for
+  `logged on as`: that line is printed twice per logon, and the helper's stderr
+  is folded into one `stderr_tail` field, so it cannot count logons (final
+  review M2);
 - `manifest_fetch.done` has `failed` near 0 and `not_attempted=0`;
 - no `manifest_fetch.app_failed` stream.
 
 ```bash
-ssh karl@192.168.1.30 'docker logs --since 6h orchestrator-agent 2>&1 | grep -cE "logged on as"; docker logs --since 6h orchestrator-agent 2>&1 | grep "\"manifest_fetch.done\"" | tail -1'
+ssh karl@192.168.1.30 'docker logs --since 6h orchestrator-agent 2>&1 | grep "\"manifest_fetch.done\"" | tail -1 | grep -oE "\"(logons|failed|not_attempted)\": [0-9]+"'
 ```
 
 - [ ] **Step 5: Parity on live data**

@@ -6,7 +6,7 @@
 **Persona:** Senior Security Engineer — hunt vulnerabilities, describe the
 concrete exploit, do not check boxes.
 
-**Findings: 0 (SEV-1: 0, SEV-2: 0, SEV-3: 0, SEV-4: 0).** Five residual risks are
+**Findings: 0 (SEV-1: 0, SEV-2: 0, SEV-3: 0, SEV-4: 0).** Six residual risks are
 recorded below; none is a defect in the shipped behaviour, and one (licence
 notices) must be closed before the first release tag.
 
@@ -65,8 +65,9 @@ listening socket.
   `p/csharp` (27 rules): **1 finding**, adjudicated as a false positive under
   check 6. Nothing else in this audit is automated SAST for C#.
 - **gitleaks** over `origin/main..HEAD`: **no leaks found**. Output under check 5.
-- The helper's 46 xUnit tests run inside the image build; a failing test, or a
-  test run that finds zero tests, fails the build.
+- The helper's 60 xUnit tests (46 at the audit, 14 added by the final-review fix
+  wave) run inside the image build; a failing test, or a test run that finds zero
+  tests, fails the build.
 
 ## Check 1 — the token never reaches output, logs or argv
 
@@ -84,38 +85,49 @@ only catches a direct call, so the behaviour is also pinned by tests:
 (`SessionStoreTests.cs:70`) and from `SteamSession.ToString()` (`:160`); the other
 `SessionImportException` texts are safe by construction (they interpolate a path,
 a username or a fixed phrase, never the token), not by test. `FetchRunnerTests`
-asserts the token is absent from both the JSON results and the human log. Error texts carry exception types and
-HTTP status codes only, never a raw library message, so no token and no URL query
-string can reach a log. The `--username` flag on argv is an account name, not a
-credential. **Verdict: pass.**
+asserts the token is absent from both the JSON results and the human log. A
+failure raised by SteamKit2 or .NET is reported by its exception type and HTTP
+status code only, never by its message, so no token and no URL query string can
+reach a log: `SteamKitGateway.Describe` builds the per-request texts
+(`SteamKitGatewayTests.Describe_never_passes_a_library_exceptions_message_through`),
+and the CLI's catch-all prints the type name and a fixed text
+(`CliTests.An_unexpected_failure_prints_its_type_but_never_its_message`). Until
+the final-review fix wave, that catch-all printed the raw `e.Message`. The
+helper's own error texts (paths, app and depot ids, `EResult` names) are printed
+as written. The `--username` flag on argv is an account name, not a credential.
+The two greps above were re-run on the fix-wave tree with the same result (no
+output, exit 1). **Verdict: pass.**
 
 ## Check 2 — the subprocess is an argv list, with no shell and a timeout
 
 ```
 $ grep -n "subprocess.run" -A3 src/orchestrator/platform/steam/manifest_fetcher.py
-189:            proc = subprocess.run(  # noqa: S603  argv list, no shell
-190-                argv, capture_output=True, text=True, timeout=self._timeout_sec
-191-            )
-192-        except subprocess.TimeoutExpired as e:
+212:            proc = subprocess.run(  # noqa: S603  argv list, no shell
+213-                argv, capture_output=True, text=True, timeout=self._timeout_sec
+214-            )
+215-        except subprocess.TimeoutExpired as e:
 ```
 
-`argv` is a list built at lines 174-187 from the configured binary path, fixed
-subcommand and flags, and paths under a scratch directory. No `shell=True`, so no
-word-splitting or metacharacter interpretation. `timeout=` is always passed; a
-hang is killed after the configured ceiling (2 h by default) and logged as
-`manifest_fetch.helper_timed_out` with the stderr tail. **Verdict: pass.**
+(Re-run on the final-review fix-wave tree.) `argv` is a list built at lines
+197-210 from the configured binary path, fixed subcommand and flags, and paths
+under a scratch directory. No `shell=True`, so no word-splitting or
+metacharacter interpretation. `timeout=` is always passed; a hang is killed after
+the configured ceiling (2 h by default). The `ok` apps it reported before the
+kill are archived, then the run logs `manifest_fetch.helper_timed_out` with the
+stderr tail and the archived counts, and raises. **Verdict: pass.**
 
 ## Check 3 — manifest names cannot escape the scratch directory
 
 ```
 $ grep -n "_MANIFEST_NAME_RE" src/orchestrator/platform/steam/manifest_fetcher.py
-37:_MANIFEST_NAME_RE = re.compile(r"(?P<depot>\d+)_(?P<gid>\d+)\.manifest")
-240:            match = _MANIFEST_NAME_RE.fullmatch(name) if isinstance(name, str) else None
+38:_MANIFEST_NAME_RE = re.compile(r"(?P<depot>\d+)_(?P<gid>\d+)\.manifest")
+266:            match = _MANIFEST_NAME_RE.fullmatch(name) if isinstance(name, str) else None
 ```
 
-`fullmatch` against `\d+_\d+\.manifest` admits only digits, one underscore and a
-fixed suffix: no `/`, no `..`, no NUL, no leading `-`. The name is joined onto the
-app directory only after the match (`manifest_fetcher.py:242`); a non-string or a
+(Re-run on the final-review fix-wave tree.) `fullmatch` against
+`\d+_\d+\.manifest` admits only digits, one underscore and a fixed suffix: no
+`/`, no `..`, no NUL, no leading `-`. The name is joined onto the app directory
+only after the match (`manifest_fetcher.py:268`); a non-string or a
 non-matching name is skipped and logged as `manifest_fetch.manifest_name_skipped`.
 Test `test_a_manifest_name_outside_the_pattern_is_never_read` lists
 `../../../1_2.manifest` (which a `.search` pattern would accept), plants a valid
@@ -146,7 +158,12 @@ version, not a floor. Both projects commit a `packages.lock.json`, and the image
 build restores in locked mode for both runtime identifiers, so a changed or
 unlisted package fails the build rather than floating. The SDK image is pinned by
 digest, as the Python base image is. The test-only packages never reach the
-published output. **Verdict: pass.** The lock file's `contentHash` entries do
+published output. One gap in what the lock files cover: the .NET runtime and
+host packs that a self-contained publish pulls in
+(`Microsoft.NETCore.App.Runtime.linux-*`, `Microsoft.NETCore.App.Host.linux-*`)
+are not in `packages.lock.json` (`grep -c` finds 0 entries); the lock file
+records only the two target RIDs. Their version is fixed by the SDK inside the
+digest-pinned SDK image, not by a lock-file hash. **Verdict: pass.** The lock file's `contentHash` entries do
 catch a same-version content swap at restore (NU1403). What they do not catch is
 a package that was already bad when the lock file was written: there is no
 signature-verification policy, so the first lock is only as trustworthy as the
@@ -212,10 +229,15 @@ file is created 0600 inside a 0700 directory and fsynced before the rename, so
 the token is never readable by another user, even for an instant. **Fixed.**
 
 **2. Reconnect storm.** A bug that looped on logon would recreate the very
-problem #361 fixes. The helper makes exactly one logon attempt; on a dropped
-connection or a Steam log-off it waits 60 s and reconnects once, then exits 4.
-A connect failure on the first logon is `login_refused`, exit 2, with no retry.
-Tested against a fake gateway. **Not exploitable.**
+problem #361 fixes. The helper sends one logon per connection; on a dropped
+connection or a Steam log-off it waits 60 s and reconnects once, then exits 4,
+so a run makes at most 2 logons. Before each logon the CM connection itself is
+tried up to 3 times (5 s, then 15 s apart; `ConnectRetryTests`), which adds no
+logons. A connect that never succeeds, or a logon Steam never answers, is
+reported as "could not reach Steam" (`login_refused`, exit 2, on the first
+logon; exit 4 on the reconnect), and the logon is never retried. Every summary
+reports the count as `logons`. Tested against a fake gateway; the gateway's
+network half is unproven live until Task 10. **Not exploitable.**
 
 **3. Mid-request drop misattributed to one app.** Session loss is detected from
 both the helper's own flag and the client's connected state, so a drop in the
@@ -226,9 +248,12 @@ error. Correctness, not security. **Not a finding.**
 `error`, and Python archives `.shas` only for `ok` apps, so a partly fetched app
 is retried the next week rather than recorded as complete. **Not a finding.**
 
-**5. CDN token and URL leakage in errors.** Every error text is built from the
-exception type and HTTP status only. A raw library message, which could carry a
-URL query string with the CDN token, is never logged. **Not exploitable.**
+**5. CDN token and URL leakage in errors.** A library or runtime exception is
+reported by its type and HTTP status only: `SteamKitGateway.Describe` for
+per-request failures, and, since the final-review fix wave, the CLI's catch-all
+too (it previously printed the raw `e.Message`). A raw library message, which
+could carry a URL query string with the CDN token, is never logged. Both are
+pinned by tests (`SteamKitGatewayTests`, `CliTests`). **Not exploitable.**
 
 **6. Wrong-owner depot key treated as "not owned".** Only `AccessDenied` is read
 as "not owned"; any other refusal is an error for the app. This avoids filing a
@@ -264,3 +289,7 @@ notice requirement is incomplete until the release tag.**
    drops root `*.md`. It gives no SteamKit2 source location. Licence texts for
    ZstdSharp and the .NET runtime were fetched from main or master, not the
    shipped tags. All of this is to be resolved before the first release tag.
+6. **DepotDownloader's `account.config` stays on the volume after the import**
+   (review N3). The helper imports the refresh token from it once and never
+   deletes it, so the mount holds a second copy of the token, in DepotDownloader's
+   own file mode rather than the helper's 0600, until an operator removes it.

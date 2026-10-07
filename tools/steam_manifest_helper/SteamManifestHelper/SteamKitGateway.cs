@@ -5,8 +5,10 @@ using SteamKit2.CDN;
 namespace SteamManifestHelper;
 
 /// <summary>ISteamGateway on SteamKit2 3.4.0, mirroring DepotDownloader 3.4.0's calls
-/// (Steam3Session.cs, CDNClientPool.cs, ContentDownloader.cs:740-860). Not
-/// unit-tested: proven live by the Task 1 spike and the Task 10 first run.</summary>
+/// (Steam3Session.cs, CDNClientPool.cs, ContentDownloader.cs:740-860). Its network
+/// half is unproven live: the Task 1 spike ran scratch code making the same SteamKit2
+/// calls, not this class, which first meets Steam at Task 10. Its pure helpers are
+/// unit-tested (SteamKitGatewayTests, ConnectRetryTests).</summary>
 public sealed class SteamKitGateway : ISteamGateway
 {
     private static readonly TimeSpan StepTimeout = TimeSpan.FromSeconds(60);
@@ -80,14 +82,32 @@ public sealed class SteamKitGateway : ISteamGateway
         client.Disconnect();
     }
 
+    /// <summary>Connect (up to 3 attempts, ConnectRetry), then log on exactly once. A
+    /// connect that never succeeds, or a logon Steam never answers, is a network fault,
+    /// not a refusal: it throws SessionLostException ("could not connect to Steam").
+    /// Only Steam's own EResult answer becomes Refused or TokenRejected.</summary>
     public async Task<LogOnResult> ConnectAndLogOnAsync(SteamSession session, CancellationToken ct)
     {
-        connected = NewSignal();
-        loggedOn = new TaskCompletionSource<EResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
-            client.Connect();
-            await connected.Task.WaitAsync(StepTimeout, ct);
+            await ConnectRetry.RunAsync(async () =>
+            {
+                connected = NewSignal();
+                loggedOn = new TaskCompletionSource<EResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                try
+                {
+                    client.Connect();
+                    await connected.Task.WaitAsync(StepTimeout, ct);
+                }
+                catch (Exception e) when (e is SessionLostException or TimeoutException)
+                {
+                    // Close a half-open attempt now, so its DisconnectedCallback lands during
+                    // the wait and cannot fault the next attempt's fresh signal.
+                    client.Disconnect();
+                    log.WriteLine($"connect attempt failed: {(e is SessionLostException ? e.Message : "no answer within 60 s")}");
+                    throw;
+                }
+            }, wait => Task.Delay(wait, ct));
             user.LogOn(new SteamUser.LogOnDetails
             {
                 Username = session.Username,
@@ -110,7 +130,9 @@ public sealed class SteamKitGateway : ISteamGateway
         }
         catch (Exception e) when (e is SessionLostException or TimeoutException)
         {
-            return new LogOnResult(LogOnOutcome.Refused, $"could not connect to Steam: {e.Message}");
+            client.Disconnect();
+            throw new SessionLostException(
+                $"could not connect to Steam: {(e is SessionLostException ? e.Message : "no answer within 60 s")}");
         }
     }
 
@@ -129,7 +151,7 @@ public sealed class SteamKitGateway : ISteamGateway
     /// <summary>Text for a failure that is safe to log and to hand to Python: the exception
     /// type and an HTTP status code, never e.Message. A web exception's message can carry
     /// the request URL, and a CDN URL can carry an auth token in its query string.</summary>
-    private static string Describe(Exception e) => e switch
+    internal static string Describe(Exception e) => e switch
     {
         SteamRequestException request => request.Message,
         SteamKitWebRequestException web => $"{nameof(SteamKitWebRequestException)}: HTTP {(int)web.StatusCode}",
@@ -137,7 +159,7 @@ public sealed class SteamKitGateway : ISteamGateway
         _ => e.GetType().Name,
     };
 
-    private static HttpStatusCode? StatusOf(Exception e) => e switch
+    internal static HttpStatusCode? StatusOf(Exception e) => e switch
     {
         SteamKitWebRequestException web => web.StatusCode,
         HttpRequestException http => http.StatusCode,
@@ -145,7 +167,7 @@ public sealed class SteamKitGateway : ISteamGateway
     };
 
     /// <summary>A timeout or an HTTP 5xx: the host is unwell, not the request.</summary>
-    private static bool IsSlowFailure(Exception e) =>
+    internal static bool IsSlowFailure(Exception e) =>
         e is TaskCanceledException or TimeoutException
         || e.InnerException is TimeoutException
         || (int?)StatusOf(e) >= 500;
@@ -199,15 +221,17 @@ public sealed class SteamKitGateway : ISteamGateway
     public async Task<byte[]?> GetDepotKeyAsync(uint depotId, uint appId, CancellationToken ct)
     {
         var key = await Call(() => apps.GetDepotDecryptionKey(depotId, appId).ToTask(), $"depot key {depotId}", ct);
-        return key.Result switch
-        {
-            EResult.OK => key.DepotKey,
-            // Only AccessDenied means "this account does not own the depot". Busy,
-            // RateLimitExceeded and the like are transient failures, never not_owned.
-            EResult.AccessDenied => null,
-            _ => throw new SteamRequestException($"depot key {depotId}: {key.Result}"),
-        };
+        return MapDepotKey(depotId, key.Result, key.DepotKey);
     }
+
+    internal static byte[]? MapDepotKey(uint depotId, EResult result, byte[] key) => result switch
+    {
+        EResult.OK => key,
+        // Only AccessDenied means "this account does not own the depot". Busy,
+        // RateLimitExceeded and the like are transient failures, never not_owned.
+        EResult.AccessDenied => null,
+        _ => throw new SteamRequestException($"depot key {depotId}: {result}"),
+    };
 
     public async Task SaveManifestAsync(uint depotId, uint containingAppId, ulong manifestId, byte[] depotKey, string path, CancellationToken ct)
     {

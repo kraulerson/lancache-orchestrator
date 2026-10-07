@@ -74,6 +74,38 @@ public sealed class CliTests : IDisposable
     }
 
     [Fact]
+    public async Task An_unexpected_failure_prints_its_type_but_never_its_message()
+    {
+        var sessionDir = Path.Combine(root, "s");
+        SessionStore.Save(sessionDir, new SteamSession("kraulerson", "eyJ-test"));
+        var apps = Path.Combine(root, "apps.txt");
+        File.WriteAllText(apps, "10\n");
+        var gateway = new FakeSteamGateway();
+        gateway.LogOnThrows.Enqueue(new InvalidOperationException("GET https://x/y?token=SECRET failed"));
+        var stderr = new StringWriter();
+        var stdout = new StringWriter();
+        var code = await Cli.RunAsync(
+            ["fetch", "--apps", apps, "--out", Path.Combine(root, "out"), "--session-dir", sessionDir, "--username", "kraulerson"],
+            stdout, stderr, () => gateway, CancellationToken.None);
+        Assert.Equal(ExitCodes.Unexpected, code);
+        Assert.Contains("unexpected: InvalidOperationException", stderr.ToString());
+        Assert.DoesNotContain("SECRET", stderr.ToString());
+        Assert.DoesNotContain("SECRET", stdout.ToString());
+    }
+
+    [Fact]
+    public async Task A_failed_import_summary_reports_zero_logons()
+    {
+        var apps = Path.Combine(root, "apps.txt");
+        File.WriteAllText(apps, "10\n");
+        var stdout = new StringWriter();
+        await Cli.RunAsync(
+            ["fetch", "--apps", apps, "--out", Path.Combine(root, "out"), "--session-dir", Path.Combine(root, "s"), "--username", "kraulerson", "--import-from", Path.Combine(root, "nope")],
+            stdout, new StringWriter(), () => new FakeSteamGateway(), CancellationToken.None);
+        Assert.Equal(0, JsonDocument.Parse(stdout.ToString().Trim()).RootElement.GetProperty("logons").GetInt32());
+    }
+
+    [Fact]
     public void App_ids_are_read_once_each_and_blank_lines_are_skipped()
     {
         var apps = Path.Combine(root, "apps.txt");

@@ -35,8 +35,37 @@ for handoff clarity. Categories are ordered by impact severity.
   manifests and writing `.shas`. `fetch_all()` and `FetchResult` are unchanged.
 - **Apps the helper never reports are now counted as failed**
   (`manifest_fetch.app_unreported`). A run that reports none fails the job;
-  partial skips turn it red past `fetch_manifests_max_failure_ratio` (0.75). The
-  helper's stderr tail and summary are logged on every failure.
+  partial failures turn the heartbeat red past `fetch_manifests_max_failure_ratio`.
+- **`fetch_manifests_max_failure_ratio` drops from 0.75 to 0.10** (Karl,
+  2026-10-07). 0.75 sat above DepotDownloader's ~0.59 steady state, which was the
+  rate limit #361 removes; the one-login spike saw 0 failures in 100 apps, so
+  0.75 would have read UP at 74% failed. To be re-checked against the first live
+  run.
+- **What is logged on a failure depends on how the helper ended.** A non-zero
+  exit or a missing summary logs `manifest_fetch.helper_failed` (exit code,
+  `helper_outcome`, `logons`, the summary's reason when there is one, and the
+  stderr tail). A timeout prints no summary: it logs
+  `manifest_fetch.helper_timed_out` with the stderr tail. A helper that never
+  starts logs only `manifest_fetch.run_aborted`.
+- **Final-review fixes before the first deploy:**
+  - A timeout no longer discards finished work: the `ok` apps reported before the
+    kill are archived, then the run raises.
+  - The CM connection is tried up to 3 times (5 s, then 15 s apart) before the
+    single logon, which is never retried. A connect that never succeeds, or a
+    logon Steam never answers, now reads "could not reach Steam" instead of a
+    login refusal.
+  - Every summary carries `logons`; the agent logs it in `manifest_fetch.done`, so
+    the live one-login check reads `"logons": 1` there.
+  - The summary's session status is logged as `helper_outcome`: the live logger
+    redacted any key containing "session", so it always read `<redacted>`.
+  - No longer green with nothing archived: an empty selection never starts the
+    helper (`manifest_fetch.no_apps`); a manifest that parses to no SHA fails its
+    app (`manifest_fetch.empty_manifest`); a `not_attempted` line after a clean
+    exit counts as failed.
+  - An app id that does not fit a uint32 is dropped and counted as failed
+    (`manifest_fetch.app_id_out_of_range`) instead of failing the whole run.
+  - The helper's catch-all prints the exception type and a fixed text, never the
+    exception's message, which can carry a URL.
 - **DepotDownloader is removed** from the image, along with the
   `manifest_fetch_delay_sec`, `manifest_fetch_max_retries` and
   `manifest_fetch_retry_backoff_sec` settings. `depotdownloader_binary` becomes

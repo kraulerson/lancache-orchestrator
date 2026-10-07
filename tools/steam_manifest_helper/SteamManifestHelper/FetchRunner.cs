@@ -6,19 +6,30 @@ public sealed class FetchRunner(ISteamGateway gateway, TextWriter results, TextW
 {
     public static readonly TimeSpan ReconnectWait = TimeSpan.FromSeconds(60);
 
+    /// <summary>Calls to ConnectAndLogOnAsync, reported in every summary as "logons" so
+    /// a live run can be checked for the one-login rule. A call whose connect failed
+    /// before LogOn was sent still counts: this is an upper bound, never an undercount.</summary>
+    private int logons;
+
+    private Task<LogOnResult> LogOnAsync(SteamSession session, CancellationToken ct)
+    {
+        logons++;
+        return gateway.ConnectAndLogOnAsync(session, ct);
+    }
+
     public async Task<int> RunAsync(SteamSession session, IReadOnlyList<uint> appIds, string outDir, CancellationToken ct)
     {
         LogOnResult logon;
         try
         {
-            logon = await gateway.ConnectAndLogOnAsync(session, ct);
+            logon = await LogOnAsync(session, ct);
         }
         catch (Exception e) when (e is SessionLostException or SteamRequestException)
         {
             // The token was never judged, so no "run login" advice here.
             var unreachable = $"could not reach Steam: {e.Message}";
             log.WriteLine(unreachable);
-            ResultWriter.Write(results, new RunSummary(SessionStatus.LoginRefused, unreachable));
+            ResultWriter.Write(results, new RunSummary(SessionStatus.LoginRefused, unreachable, logons));
             return ExitCodes.LoginRefused;
         }
         if (logon.Outcome != LogOnOutcome.Ok)
@@ -27,7 +38,7 @@ public sealed class FetchRunner(ISteamGateway gateway, TextWriter results, TextW
                 ? $"Steam rejected the saved login ({logon.Detail}). Run: SteamManifestHelper login --username {session.Username} --session-dir <session dir>"
                 : $"Steam refused the login: {logon.Detail}";
             log.WriteLine(reason);
-            ResultWriter.Write(results, new RunSummary(SessionStatus.LoginRefused, reason));
+            ResultWriter.Write(results, new RunSummary(SessionStatus.LoginRefused, reason, logons));
             return ExitCodes.LoginRefused;
         }
         log.WriteLine($"logged on as {session.Username}; fetching {appIds.Count} apps");
@@ -53,7 +64,7 @@ public sealed class FetchRunner(ISteamGateway gateway, TextWriter results, TextW
                 LogOnResult again;
                 try
                 {
-                    again = await gateway.ConnectAndLogOnAsync(session, ct);
+                    again = await LogOnAsync(session, ct);
                 }
                 catch (Exception e) when (e is SessionLostException or SteamRequestException)
                 {
@@ -66,7 +77,7 @@ public sealed class FetchRunner(ISteamGateway gateway, TextWriter results, TextW
                 log.WriteLine("reconnected; retrying the interrupted app");
             }
         }
-        ResultWriter.Write(results, new RunSummary(SessionStatus.Completed, ""));
+        ResultWriter.Write(results, new RunSummary(SessionStatus.Completed, "", logons));
         return ExitCodes.Completed;
     }
 
@@ -77,7 +88,7 @@ public sealed class FetchRunner(ISteamGateway gateway, TextWriter results, TextW
             ResultWriter.Write(results, new AppResult(appIds[i], AppStatus.NotAttempted, Reason: reason));
         }
         log.WriteLine(reason);
-        ResultWriter.Write(results, new RunSummary(SessionStatus.Disconnected, reason));
+        ResultWriter.Write(results, new RunSummary(SessionStatus.Disconnected, reason, logons));
         return ExitCodes.Disconnected;
     }
 
