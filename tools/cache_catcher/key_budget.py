@@ -95,7 +95,9 @@ def effective_capacity(zone_keys, ram_keys):
     the number is bounded by cannot tell the operator what to do about it, which
     is the defect #326 and #330 both describe.
     """
-    known = [(k, name) for k, name in ((zone_keys, "zone"), (ram_keys, "ram")) if k]
+    # `is not None`, not truthiness: a ceiling of 0 is an answer -- no room at
+    # all -- and dropping it fell back to the zone and read healthy (#363).
+    known = [(k, name) for k, name in ((zone_keys, "zone"), (ram_keys, "ram")) if k is not None]
     if not known:
         return Ceiling(None, "unknown")
     keys, name = min(known)
@@ -158,6 +160,17 @@ def verdict(sample, ceiling, history, floor=0.75, horizon_days=90.0):
         return Verdict(
             "down",
             f"ceiling unknown (CACHE_INDEX_SIZE and RAM both unreadable); {objects_m:.1f}M objects",
+        )
+
+    if ceiling.keys <= 0:
+        # In practice only a RAM_BUDGET_BYTES below one key's size gets here
+        # (#363); the probe passes zone_capacity_keys a whole number of MB. Say
+        # which setting to fix, rather than dividing by it.
+        setting = "RAM_BUDGET_BYTES" if ceiling.name == "ram" else "CACHE_INDEX_SIZE"
+        return Verdict(
+            "down",
+            f"OVER FLOOR: {objects_m:.1f}M objects, {ceiling.name} ceiling is "
+            f"{ceiling.keys} keys, so no room; check {setting}",
         )
 
     used = sample.objects / ceiling.keys

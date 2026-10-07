@@ -19,6 +19,20 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — the cache-index alarm can no longer read healthy with no room (#363) — 2026-10-06
+
+- **A ceiling of zero is now an answer, not an unknown.** `effective_capacity()`
+  filtered ceilings by truthiness, so a RAM ceiling of exactly 0 was dropped and
+  the alarm measured against the 80M zone instead: roughly 44% used, **up**,
+  when the host could hold no keys at all. That is the false-healthy direction
+  the alarm was built to rule out.
+- A non-positive ceiling now reads `OVER FLOOR ... so no room; check
+  RAM_BUDGET_BYTES` instead of dividing by it. It is only reachable through a
+  `RAM_BUDGET_BYTES` below one key's size, an operator typo, so no live reading
+  was ever affected.
+- Found by the UAT 17 exploratory agent, never filed, and surfaced at
+  consolidation.
+
 ### Fixed — the cache-index alarm can no longer crash on a bad message (#362) — 2026-10-06
 
 - **`kuma.push()` now keeps its "Never raises" promise for every input.**

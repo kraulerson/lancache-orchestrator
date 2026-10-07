@@ -283,3 +283,27 @@ def test_a_poisoned_history_never_yields_an_up_verdict():
     v = verdict(_sample(35_700_000), effective_capacity(ZONE_KEYS, RAM_KEYS), poisoned)
     assert "nan" not in v.msg.lower(), "a NaN must never reach the operator-visible message"
     assert "trend unknown" in v.msg, "an unusable history must say so in words"
+
+
+# --- #363: a ceiling of zero is a real answer, not an unknown one ---------
+
+
+def test_a_ceiling_of_zero_is_kept_rather_than_treated_as_unknown():
+    """#363. `if k` dropped a correctly computed ceiling of 0, so the alarm fell
+    back to the 80M zone and reported roughly 44% used -- healthy -- when the
+    host could hold no keys at all. Zero is an answer; only None means unknown."""
+    c = effective_capacity(zone_keys=ZONE_KEYS, ram_keys=0)
+    assert c.keys == 0
+    assert c.name == "ram"
+
+
+@pytest.mark.parametrize("ram_keys", [0, -75_203_707], ids=["zero", "negative"])
+def test_a_non_positive_ceiling_reads_over_floor_and_names_the_setting(ram_keys):
+    """No room is the most urgent state the gauge can report, so it must read
+    OVER FLOOR, not divide by zero. It only arises from a RAM_BUDGET_BYTES below
+    one key's size, so the message names that setting: an alarm that cannot say
+    what to fix is the defect #326 and #330 describe."""
+    v = verdict(_sample(35_600_000), effective_capacity(ZONE_KEYS, ram_keys), [])
+    assert v.status == "down"
+    assert v.msg.startswith("OVER FLOOR")
+    assert "RAM_BUDGET_BYTES" in v.msg
