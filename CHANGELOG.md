@@ -19,6 +19,19 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — the cache-index alarm can no longer crash on a bad message (#362) — 2026-10-06
+
+- **`kuma.push()` now keeps its "Never raises" promise for every input.**
+  `len(msg)` and `url.strip()` both ran outside the `try`, so a `None` message or
+  a non-string URL raised. No caller passes either today. But inside `alert()`
+  the exception would reach the fanotify loop and kill the guard.
+- A `None` or non-string message now sends as text, because a heartbeat with an
+  odd message is still a heartbeat. A message that cannot be rendered at all
+  reports undelivered. A mutation test confirms that test fails if rendering
+  moves back outside the `try`.
+- Found by the UAT 17 exploratory agent, never filed, and surfaced at
+  consolidation.
+
 ### Data Model — migration 0018 retires a status no code can produce or clear — 2026-09-21
 
 - **19 owned games carried `status='failed'` permanently (#316).** No module
