@@ -2,6 +2,7 @@ import json
 import shutil
 import struct
 import sys
+import tempfile
 
 import pytest
 from structlog.testing import capture_logs
@@ -50,7 +51,16 @@ def _fetcher(tmp_path, **kw):
     )
 
 
-def _fake_helper(tmp_path, *, lines, exit_code=0, manifests=None, extra_stdout="", sleep=0.0):
+def _fake_helper(
+    tmp_path,
+    *,
+    lines,
+    exit_code=0,
+    manifests=None,
+    extra_stdout="",
+    sleep=0.0,
+    stderr="helper log line",
+):
     """Write an executable stand-in for SteamManifestHelper. It records its argv and
     the app list it was given, writes `manifests` ({app: {name: [shas]}}) under
     --out, prints `lines` as JSON (plus `extra_stdout`), and exits `exit_code`."""
@@ -63,6 +73,7 @@ def _fake_helper(tmp_path, *, lines, exit_code=0, manifests=None, extra_stdout="
         },
         "extra": extra_stdout,
         "sleep": sleep,
+        "stderr": stderr,
         "record": str(tmp_path),
     }
     # A shebang cannot carry a path with a space (this repo lives under "Claude
@@ -85,7 +96,7 @@ def _fake_helper(tmp_path, *, lines, exit_code=0, manifests=None, extra_stdout="
         "time.sleep(spec['sleep'])\n"
         "if spec['extra']: print(spec['extra'])\n"
         "for line in spec['lines']: print(json.dumps(line))\n"
-        "sys.stderr.write('helper log line\\n')\n"
+        "sys.stderr.write(spec['stderr'] + '\\n')\n"
         "sys.exit(spec['exit'])\n"
     )
     script.chmod(0o755)
@@ -261,7 +272,20 @@ def test_enumerate_does_not_refetch_an_app_that_already_has_shas(tmp_path):
 
 def test_one_helper_call_carries_every_selected_app(tmp_path):
     _setup(tmp_path, [10, 20, 30])
-    _fake_helper(tmp_path, lines=[_DONE])
+    _fake_helper(
+        tmp_path,
+        lines=[
+            {"app": 10, "status": "ok", "manifests": ["100_1.manifest"]},
+            {"app": 20, "status": "ok", "manifests": ["200_1.manifest"]},
+            {"app": 30, "status": "ok", "manifests": ["300_1.manifest"]},
+            _DONE,
+        ],
+        manifests={
+            10: {"100_1.manifest": [_SHA_A]},
+            20: {"200_1.manifest": [_SHA_A]},
+            30: {"300_1.manifest": [_SHA_A]},
+        },
+    )
     _fetcher(tmp_path).fetch_all()
     assert (tmp_path / "calls.log").read_text().count("call") == 1
     assert (tmp_path / "apps-seen.txt").read_text().split() == ["10", "20", "30"]
@@ -335,7 +359,8 @@ def test_a_refused_login_raises_with_steams_reason(tmp_path):
         ],
         exit_code=2,
     )
-    with pytest.raises(HelperSessionError, match="RateLimitExceeded"):
+    # Exit 2 also covers "could not reach Steam", so the label must not say "refused".
+    with pytest.raises(HelperSessionError, match=r"login failed\).*RateLimitExceeded"):
         _fetcher(tmp_path).fetch_all()
 
 
@@ -381,8 +406,9 @@ def test_a_failed_session_import_raises_naming_the_login_command(tmp_path):
 def test_a_hung_helper_is_killed(tmp_path):
     _setup(tmp_path, [10])
     _fake_helper(tmp_path, lines=[_DONE], sleep=10.0)
-    with pytest.raises(RuntimeError, match="timed out"):
+    with capture_logs() as logs, pytest.raises(RuntimeError, match="timed out"):
         _fetcher(tmp_path, timeout_sec=1.0).fetch_all()
+    assert [e for e in logs if e["event"] == "manifest_fetch.helper_timed_out"]
 
 
 def test_a_stray_non_json_stdout_line_is_ignored(tmp_path):
@@ -418,22 +444,36 @@ def test_ok_with_no_readable_manifest_counts_as_failed(tmp_path):
     assert _fetcher(tmp_path).fetch_all() == FetchResult(fetched=1, skipped=0, failed=1, apps=2)
 
 
-def test_a_manifest_name_outside_the_pattern_is_never_read(tmp_path):
-    # App 10 lists a traversal name; app 20 is good, so the run doesn't hit the
-    # all-failed rule and the assertion is about the name alone.
+def test_a_manifest_name_outside_the_pattern_is_never_read(tmp_path, monkeypatch):
+    # App 10 lists a traversal name that WOULD match a loosened pattern
+    # (`.search` finds "1_2.manifest" in it); app 20 is good, so the run doesn't
+    # hit the all-failed rule and the assertion is about the name alone.
+    #
+    # Scratch layout: <tmp>/manifests/10/ is app 10's dir, so "../../../" from it
+    # lands in <tmp>'s parent. Pin the tempdir to tmp_path/t so that parent is a
+    # place the test controls, and plant a VALID manifest exactly there.
+    root = tmp_path / "t"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
     _setup(tmp_path, [10, 20])
-    (tmp_path / "secret.manifest").write_bytes(_manifest_bytes([_SHA_B]))
+    (root / "1_2.manifest").write_bytes(_manifest_bytes([_SHA_B]))
     _fake_helper(
         tmp_path,
         lines=[
-            {"app": 10, "status": "ok", "manifests": ["../../../secret.manifest"]},
+            {"app": 10, "status": "ok", "manifests": ["../../../1_2.manifest"]},
             {"app": 20, "status": "ok", "manifests": ["200_2.manifest"]},
             _DONE,
         ],
-        manifests={20: {"200_2.manifest": [_SHA_A]}},
+        # App 10 has a real, UNLISTED manifest, so <out>/10/ exists on disk.
+        manifests={10: {"100_1.manifest": [_SHA_A]}, 20: {"200_2.manifest": [_SHA_A]}},
     )
-    assert _fetcher(tmp_path).fetch_all() == FetchResult(fetched=1, skipped=0, failed=1, apps=2)
+    with capture_logs() as logs:
+        result = _fetcher(tmp_path).fetch_all()
+    assert result == FetchResult(fetched=1, skipped=0, failed=1, apps=2)
     assert [p.name for p in (tmp_path / "archive" / "v1").glob("*.shas")] == ["20_20_200_2.shas"]
+    assert not (tmp_path / "archive/v1/10_10_1_2.shas").exists()
+    skipped = [e for e in logs if e["event"] == "manifest_fetch.manifest_name_skipped"]
+    assert [e["name"] for e in skipped] == ["../../../1_2.manifest"]
 
 
 def test_total_failure_still_raises(tmp_path):
@@ -455,3 +495,118 @@ def test_a_helper_session_counts_as_a_session(tmp_path):
     (cfg / "steam-manifest-helper").mkdir(parents=True)
     (cfg / "steam-manifest-helper" / "session.json").write_text("{}")
     _fetcher(tmp_path).login_from_session()
+
+
+# --- fix round 1: unreported apps, duplicates, and the helper's own stderr -------
+
+
+def test_apps_the_helper_never_reports_count_as_failed(tmp_path):
+    _setup(tmp_path, [10, 20, 30])
+    _fake_helper(
+        tmp_path,
+        lines=[{"app": 10, "status": "ok", "manifests": ["100_1.manifest"]}, _DONE],
+        manifests={10: {"100_1.manifest": [_SHA_A]}},
+    )
+    with capture_logs() as logs:
+        result = _fetcher(tmp_path).fetch_all()
+    assert result == FetchResult(fetched=1, skipped=0, failed=2, apps=3)
+    unreported = sorted(e["app_id"] for e in logs if e["event"] == "manifest_fetch.app_unreported")
+    assert unreported == [20, 30]
+
+
+def test_a_summary_only_run_raises_all_failed(tmp_path):
+    _setup(tmp_path, [10, 20])
+    _fake_helper(tmp_path, lines=[_DONE])
+    with pytest.raises(RuntimeError, match="all 2 apps"):
+        _fetcher(tmp_path).fetch_all()
+
+
+def test_a_session_stop_does_not_count_unreported_apps_as_failed(tmp_path):
+    # Exit 2: the helper prints only the summary. The raise reports it; the
+    # unreported apps are not double-counted as per-app failures.
+    _setup(tmp_path, [10, 20])
+    _fake_helper(
+        tmp_path,
+        lines=[{"summary": True, "session": "login_refused", "reason": "nope"}],
+        exit_code=2,
+    )
+    with pytest.raises(HelperSessionError, match="failed=0 not_attempted=0"):
+        _fetcher(tmp_path).fetch_all()
+
+
+def test_a_duplicate_app_line_counts_once(tmp_path):
+    _setup(tmp_path, [10])
+    line = {"app": 10, "status": "ok", "manifests": ["100_1.manifest"]}
+    _fake_helper(
+        tmp_path,
+        lines=[line, line, _DONE],
+        manifests={10: {"100_1.manifest": [_SHA_A]}},
+    )
+    assert _fetcher(tmp_path).fetch_all() == FetchResult(fetched=1, skipped=0, failed=0, apps=1)
+
+
+def test_an_unrequested_app_line_is_ignored(tmp_path):
+    _setup(tmp_path, [10])
+    _fake_helper(
+        tmp_path,
+        lines=[
+            {"app": 10, "status": "ok", "manifests": ["100_1.manifest"]},
+            {"app": 99, "status": "ok", "manifests": ["990_1.manifest"]},
+            _DONE,
+        ],
+        manifests={10: {"100_1.manifest": [_SHA_A]}, 99: {"990_1.manifest": [_SHA_B]}},
+    )
+    with capture_logs() as logs:
+        result = _fetcher(tmp_path).fetch_all()
+    assert result == FetchResult(fetched=1, skipped=0, failed=0, apps=1)
+    assert [p.name for p in (tmp_path / "archive" / "v1").glob("*.shas")] == ["10_10_100_1.shas"]
+    assert [e["app_id"] for e in logs if e["event"] == "manifest_fetch.app_unrequested"] == [99]
+
+
+def test_the_helpers_stderr_tail_is_logged_when_it_fails_without_a_summary(tmp_path):
+    _setup(tmp_path, [10])
+    _fake_helper(
+        tmp_path,
+        lines=[],
+        exit_code=1,
+        stderr="x" * 400 + "\nFATAL: the helper's last error line",
+    )
+    with capture_logs() as logs, pytest.raises(RuntimeError, match="exit 1"):
+        _fetcher(tmp_path).fetch_all()
+    failed = [e for e in logs if e["event"] == "manifest_fetch.helper_failed"]
+    assert len(failed) == 1
+    assert failed[0]["helper_exit"] == 1
+    assert failed[0]["stderr_tail"].rstrip().endswith("FATAL: the helper's last error line")
+
+
+def test_a_session_stop_logs_the_helper_failure_too(tmp_path):
+    _setup(tmp_path, [10])
+    _fake_helper(
+        tmp_path,
+        lines=[{"summary": True, "session": "login_refused", "reason": "Steam said no"}],
+        exit_code=2,
+    )
+    with capture_logs() as logs, pytest.raises(HelperSessionError):
+        _fetcher(tmp_path).fetch_all()
+    failed = [e for e in logs if e["event"] == "manifest_fetch.helper_failed"]
+    assert len(failed) == 1
+    assert (failed[0]["session"], failed[0]["reason"]) == ("login_refused", "Steam said no")
+    assert "helper log line" in failed[0]["stderr_tail"]
+
+
+def test_the_done_event_carries_the_session_reason_and_stderr_tail(tmp_path):
+    _setup(tmp_path, [10])
+    _fake_helper(
+        tmp_path,
+        lines=[
+            {"app": 10, "status": "ok", "manifests": ["100_1.manifest"]},
+            {"summary": True, "session": "completed", "reason": "all good"},
+        ],
+        manifests={10: {"100_1.manifest": [_SHA_A]}},
+    )
+    with capture_logs() as logs:
+        _fetcher(tmp_path).fetch_all()
+    done = [e for e in logs if e["event"] == "manifest_fetch.done"]
+    assert len(done) == 1
+    assert (done[0]["session"], done[0]["reason"]) == ("completed", "all good")
+    assert "helper log line" in done[0]["stderr_tail"]
