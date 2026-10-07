@@ -31,11 +31,12 @@ ARG TARGETARCH
 WORKDIR /src
 COPY tools/steam_manifest_helper/ ./
 RUN dotnet restore SteamManifestHelper.Tests/SteamManifestHelper.Tests.csproj --locked-mode \
- && dotnet test SteamManifestHelper.Tests/SteamManifestHelper.Tests.csproj --no-restore -c Release
+ && dotnet test SteamManifestHelper.Tests/SteamManifestHelper.Tests.csproj --no-restore -c Release \
+      -- RunConfiguration.TreatNoTestsAsError=true
 # Restore WITHOUT -r: the lock file records both RIDs from <RuntimeIdentifiers> in
 # the csproj, and -r would narrow that list and fail NU1004 in locked mode. The
 # listed RIDs' runtime packs are fetched at restore; publish -r then picks one.
-RUN RID="linux-$( [ "$TARGETARCH" = "arm64" ] && echo arm64 || echo x64 )" \
+RUN case "$TARGETARCH" in amd64) RID=linux-x64;; arm64) RID=linux-arm64;; *) echo "unsupported TARGETARCH '$TARGETARCH'" >&2; exit 1;; esac \
  && dotnet restore SteamManifestHelper/SteamManifestHelper.csproj --locked-mode \
  && dotnet publish SteamManifestHelper/SteamManifestHelper.csproj --no-restore -c Release -r "$RID" \
       --self-contained true -p:PublishSingleFile=false -p:PublishTrimmed=false -o /steam-manifest-helper \
