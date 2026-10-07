@@ -111,6 +111,35 @@ public sealed class SessionStoreTests : IDisposable
     }
 
     [Fact]
+    public void The_session_directory_is_private_to_its_owner()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        var sessionDir = Path.Combine(root, "helper");
+        SessionStore.Save(sessionDir, new SteamSession("kraulerson", Token));
+        Assert.Equal(
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+            File.GetUnixFileMode(sessionDir));
+    }
+
+    [Fact]
+    public void Save_leaves_only_the_session_file_behind()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        var sessionDir = Path.Combine(root, "helper");
+        SessionStore.Save(sessionDir, new SteamSession("kraulerson", "first-token"));
+        SessionStore.Save(sessionDir, new SteamSession("kraulerson", Token));
+        var files = Directory.GetFileSystemEntries(sessionDir);
+        Assert.Equal([Path.Combine(sessionDir, SessionStore.FileName)], files);
+        Assert.Equal(Token, SessionStore.Load(sessionDir, "kraulerson", null).RefreshToken);
+    }
+
+    [Fact]
     public void A_saved_session_for_another_account_is_refused()
     {
         var sessionDir = Path.Combine(root, "helper");

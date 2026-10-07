@@ -109,14 +109,38 @@ public static class SessionStore
 
     public static void Save(string sessionDir, SteamSession session)
     {
-        Directory.CreateDirectory(sessionDir);
+        // The token is private from the moment it touches disk: the directory is
+        // created 0700 and the temp file is created 0600, never chmod-ed afterwards.
+        if (OperatingSystem.IsWindows())
+        {
+            Directory.CreateDirectory(sessionDir);
+        }
+        else
+        {
+            Directory.CreateDirectory(sessionDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
         var path = Path.Combine(sessionDir, FileName);
-        var temp = path + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(session));
+        var temp = Path.Combine(sessionDir, $".{FileName}.{Path.GetRandomFileName()}");
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
         if (!OperatingSystem.IsWindows())
         {
-            File.SetUnixFileMode(temp, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
         }
-        File.Move(temp, path, overwrite: true);
+
+        try
+        {
+            using (var stream = new FileStream(temp, options))
+            {
+                JsonSerializer.Serialize(stream, session);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temp, path, overwrite: true);
+        }
+        catch
+        {
+            File.Delete(temp);
+            throw;
+        }
     }
 }
