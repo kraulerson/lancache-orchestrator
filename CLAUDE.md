@@ -1,5 +1,7 @@
 # CLAUDE.md — lancache_orchestrator
 
+When you finish a task, hit a blocker, or need a decision, send your TLDR (status, options, recommendation, blockers, context headroom) to @Maestro using send-message.
+
 ## Project Identity
 - **Project:** lancache_orchestrator
 - **Description:** Orchestrator to verify lancache is updating all games correctly
