@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UAT Session 17</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0f0f17; color: #cdd6f4; line-height: 1.5; padding: 24px; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin-bottom: 4px; }
+  .meta { color: #a6adc8; font-size: 0.9rem; margin-bottom: 24px; }
+  .progress-bar { background: #1e1e2e; border-radius: 8px; height: 8px; margin-bottom: 24px; overflow: hidden; }
+  .progress-fill { background: #a6e3a1; height: 100%; width: 0%; transition: width 0.3s; }
+  .progress-text { text-align: center; color: #a6adc8; font-size: 0.85rem; margin-bottom: 24px; }
+  h2 { font-size: 1.2rem; color: #89b4fa; margin: 32px 0 16px; padding-bottom: 8px; border-bottom: 1px solid #313244; }
+  .fixture-ref { background: #11111b; border: 1px solid #313244; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 0.85rem; color: #a6adc8; }
+  .fixture-ref strong { color: #cdd6f4; }
+  .fixture-ref code { background: #313244; padding: 2px 6px; border-radius: 3px; color: #f9e2af; }
+  .scenario { background: #1e1e2e; border-radius: 8px; margin-bottom: 12px; overflow: hidden; border-left: 4px solid #45475a; transition: border-color 0.2s; }
+  .scenario.pass { border-left-color: #a6e3a1; }
+  .scenario.fail { border-left-color: #f38ba8; }
+  .scenario-header { padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+  .scenario-num { background: #313244; color: #a6adc8; font-size: 0.8rem; font-weight: 600; padding: 2px 8px; border-radius: 4px; min-width: 28px; text-align: center; }
+  .scenario-title { flex: 1; font-weight: 500; }
+  .btn-group { display: flex; gap: 4px; }
+  .btn { padding: 6px 14px; border: 1px solid #45475a; border-radius: 4px; background: transparent; color: #cdd6f4; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
+  .btn:hover { background: #313244; }
+  .btn.pass-btn.active { background: #a6e3a1; color: #1e1e2e; border-color: #a6e3a1; font-weight: 600; }
+  .btn.fail-btn.active { background: #f38ba8; color: #1e1e2e; border-color: #f38ba8; font-weight: 600; }
+  .btn.skip-btn.active { background: #f9e2af; color: #1e1e2e; border-color: #f9e2af; font-weight: 600; }
+  .scenario-details { padding: 0 16px 8px 16px; display: none; }
+  .scenario-details.open { display: block; }
+  .steps { background: #11111b; padding: 10px 14px; border-radius: 4px; font-size: 0.85rem; color: #a6adc8; margin-bottom: 8px; }
+  .steps strong { color: #cdd6f4; }
+  .scenario-notes { padding: 4px 16px 12px 16px; }
+  .notes-input { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; resize: vertical; min-height: 36px; }
+  .notes-input:focus { outline: none; border-color: #89b4fa; }
+  .toggle-details { background: none; border: none; color: #6c7086; cursor: pointer; font-size: 0.75rem; padding: 4px 8px; }
+  .toggle-details:hover { color: #89b4fa; }
+  .bugs-section { margin-top: 40px; }
+  .bug-entry { background: #1e1e2e; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #f38ba8; }
+  .bug-row { display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .bug-field { flex: 1; min-width: 200px; }
+  .bug-field label { display: block; color: #a6adc8; font-size: 0.8rem; margin-bottom: 4px; }
+  .bug-field input, .bug-field select, .bug-field textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 4px; font-size: 0.85rem; font-family: inherit; }
+  .bug-field textarea { resize: vertical; min-height: 60px; }
+  .bug-field input:focus, .bug-field select:focus, .bug-field textarea:focus { outline: none; border-color: #89b4fa; }
+  .bug-field select { appearance: auto; }
+  .add-bug-btn { background: #313244; border: 1px dashed #45475a; color: #a6adc8; padding: 10px; border-radius: 8px; width: 100%; cursor: pointer; font-size: 0.85rem; margin-bottom: 12px; }
+  .add-bug-btn:hover { border-color: #f38ba8; color: #f38ba8; }
+  .remove-bug { background: none; border: none; color: #f38ba8; cursor: pointer; font-size: 0.8rem; float: right; }
+  .overall-notes { margin-top: 32px; }
+  .overall-notes textarea { width: 100%; background: #11111b; border: 1px solid #45475a; color: #cdd6f4; padding: 12px; border-radius: 8px; font-size: 0.9rem; font-family: inherit; resize: vertical; min-height: 100px; }
+  .overall-notes textarea:focus { outline: none; border-color: #89b4fa; }
+  .export-section { margin-top: 32px; text-align: center; padding: 24px; }
+  .export-btn { background: #89b4fa; color: #1e1e2e; border: none; padding: 12px 32px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; }
+  .export-btn:hover { background: #74c7ec; }
+  .export-btn:active { transform: scale(0.98); }
+  .copy-msg { color: #a6e3a1; margin-top: 8px; font-size: 0.85rem; display: none; }
+</style>
+</head>
+<body>
+
+<h1>UAT Session 17</h1>
+<div class="meta">Date: 2026-09-22 | Features: keys_zone Alarm, Retire failed status | Tester: <input id="tester-name" type="text" placeholder="Your name" style="background:#1e1e2e;border:1px solid #45475a;color:#cdd6f4;padding:4px 8px;border-radius:4px;font-size:0.85rem;width:140px;"></div>
+
+<div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+<div class="progress-text" id="progress-text">0 / 0 completed</div>
+
+<h2>Feature 28: keys_zone Alarm (cache index early warning)</h2>
+<div class="fixture-ref">
+  <strong>Where to look</strong>:<br>
+  <code>http://10.100.23.57:3001</code> — Uptime Kuma dashboard<br>
+  <code>lancache:key-budget</code> / <code>lancache:cache-guard</code> / <code>lancache:cache-eviction</code> — the three indicators<br>
+  Your Telegram history around 2026-09-19 23:07 UTC — the deliberate alarm test<br>
+</div>
+<div id="feature28"></div>
+
+<h2>Feature 29: Retiring the stuck 'failed' status (#316, #317)</h2>
+<div class="fixture-ref">
+  <strong>Where to look</strong>:<br>
+  Game_shelf — the games list and their cache badges<br>
+  <strong>NOT YET DEPLOYED</strong> — scenarios 7 and 8 cannot be run until I confirm the migration is live.<br>
+  Deploying needs a quiet window between cache sweeps; one has not opened yet.<br>
+</div>
+<div id="feature29"></div>
+
+<div class="bugs-section">
+  <h2>Bugs Found</h2>
+  <div id="bugs-list"></div>
+  <button class="add-bug-btn" onclick="addBug()">+ Add Bug</button>
+</div>
+
+<div class="overall-notes">
+  <h2>Overall Notes</h2>
+  <textarea id="overall-notes" placeholder="Free-form observations, UX concerns, suggestions, things that felt wrong even if they technically worked..."></textarea>
+</div>
+
+<div class="export-section">
+  <button class="export-btn" onclick="exportResults()">Copy Results to Clipboard</button>
+  <div class="copy-msg" id="copy-msg">Copied! Paste into terminal or save to submissions folder.</div>
+</div>
+
+<script>
+
+const scenarios = [
+  {
+    "id": 1,
+    "feature": 28,
+    "title": "The cache-index gauge reports a number and says what limits it",
+    "steps": "You are at a browser, logged in to nothing in particular.\n1. Open Uptime Kuma at http://10.100.23.57:3001\n2. Find the monitor named lancache:key-budget\n3. Read its most recent message",
+    "expected": "It is GREEN and the message reads something like '35.7M objects, 48% of ram ceiling 75.0M, trend unknown'. It must name which limit is closest - the word 'ram' or 'zone'. A number with no named limit is a fail."
+  },
+  {
+    "id": 2,
+    "feature": 28,
+    "title": "The gauge updates itself once a day without being asked",
+    "steps": "You are in Uptime Kuma at http://10.100.23.57:3001.\n1. Open the monitor lancache:key-budget\n2. Look at the list of past check-ins and their times",
+    "expected": "There is roughly one check-in every 24 hours, around 22:37 UTC, with no long gaps. Two check-ins on consecutive days is enough to pass this."
+  },
+  {
+    "id": 3,
+    "feature": 28,
+    "title": "The watchdog reports in every 15 minutes",
+    "steps": "You are in Uptime Kuma at http://10.100.23.57:3001.\n1. Open the monitor lancache:cache-guard\n2. Look at the recent check-ins and read the latest message",
+    "expected": "GREEN, reporting in every 15 minutes with no gaps, and the message says 'guard alive'. This monitor answers only 'is the watchdog running' - it should never mention cache loss."
+  },
+  {
+    "id": 4,
+    "feature": 28,
+    "title": "Cache loss is a SEPARATE indicator from the watchdog",
+    "steps": "You are in Uptime Kuma at http://10.100.23.57:3001, with both lancache:cache-guard and lancache:cache-eviction visible in the list.\n1. Open lancache:cache-eviction and read its message\n2. Open lancache:cache-guard and read its message\n3. Confirm they are two separate entries",
+    "expected": "Both are GREEN and they are two distinct indicators. cache-eviction says no eviction alert recently; cache-guard says the guard is alive. The separation is the point: one says the watchdog works, the other says whether cache is being lost. One combined indicator would be a fail."
+  },
+  {
+    "id": 5,
+    "feature": 28,
+    "title": "A real cache-loss alarm reaches your phone",
+    "steps": "You are looking at Telegram on your phone, in the chat that receives storage alerts.\n1. Scroll back to 2026-09-19, around 23:07 UTC\n2. Look for an alert mentioning cache eviction",
+    "expected": "You received a Telegram alert saying cache eviction was detected. This was a deliberate test using dummy files - no real cache was touched. If no alert arrived, the alarm cannot reach you, which is SEV-1."
+  },
+  {
+    "id": 6,
+    "feature": 28,
+    "title": "All three indicators are wired to send notifications",
+    "steps": "You are in Uptime Kuma at http://10.100.23.57:3001 with edit access.\n1. Open lancache:key-budget and check its Notifications setting\n2. Do the same for lancache:cache-guard\n3. Do the same for lancache:cache-eviction",
+    "expected": "All three have 'Telegram - Storage' ticked. An indicator with no notification turns red on a dashboard and tells nobody - that happened on this system before and went unnoticed for months."
+  },
+  {
+    "id": 7,
+    "feature": 29,
+    "title": "REQUIRES DEPLOY - the 19 permanently-failed games now read Blocked",
+    "steps": "Preconditions: the migration must be deployed first - it is NOT live yet, and I will tell you when it is.\n1. Open Game_shelf\n2. Filter or search for games showing a failed cache status\n3. Spot-check Unreal Tournament, The Sims 4, and RPG Maker XP",
+    "expected": "No game shows 'failed' any more. Those titles show 'blocked' instead. Blocked is honest here: they genuinely cannot be downloaded - Epic refuses them, or they are tools that are never on the download list."
+  },
+  {
+    "id": 8,
+    "feature": 29,
+    "title": "REQUIRES DEPLOY - nothing ELSE changed status",
+    "steps": "Preconditions: the migration must be deployed first, and scenario 7 should already look right.\n1. Open Game_shelf\n2. Look at the overall counts of cached versus not-cached games\n3. Compare against roughly 1837 cached and 1355 not-downloaded",
+    "expected": "Only the 19 changed. The cached and not-downloaded counts are essentially unchanged. If other games moved, the migration touched rows it should not have, which is SEV-1."
+  },
+  {
+    "id": 9,
+    "feature": 29,
+    "title": "A failed download no longer corrupts the cache record",
+    "steps": "You are in Game_shelf, browsing your Epic games.\n1. Find CHUCHEL\n2. Look at its cache status badge\n3. If the page shows when it was last checked, note that too",
+    "expected": "Its cache status is unchanged by the failed download attempt on 2026-09-21. A job going wrong must record that the JOB failed, without claiming anything new about what is in the cache. This was already confirmed in the database; you are confirming it looks right."
+  },
+  {
+    "id": 10,
+    "feature": 28,
+    "title": "Your judgement - would these indicators actually tell you something is wrong?",
+    "steps": "You are in Uptime Kuma at http://10.100.23.57:3001 with all three lancache indicators on screen.\n1. Read each one's current message\n2. Imagine receiving a Telegram alert from each in turn\n3. For each, ask yourself whether you would know what to do",
+    "expected": "Each alert tells you which thing is wrong and roughly what to do about it. If any would leave you thinking 'it is red, but what does that mean' - say so. That exact confusion is the defect this project keeps hitting, and your judgement is the only test for it."
+  }
+];
+
+function renderScenarios() {
+  scenarios.forEach(s => {
+    const container = document.getElementById('feature' + s.feature);
+    if (!container) return;
+    container.innerHTML += '<div class="scenario" id="scenario-' + s.id + '">' +
+      '<div class="scenario-header">' +
+        '<span class="scenario-num">' + s.id + '</span>' +
+        '<span class="scenario-title">' + s.title + '</span>' +
+        '<button class="toggle-details" onclick="toggleDetails(' + s.id + ')">details</button>' +
+        '<div class="btn-group">' +
+          '<button class="btn pass-btn" onclick="setResult(' + s.id + ',\'pass\',this)">Pass</button>' +
+          '<button class="btn fail-btn" onclick="setResult(' + s.id + ',\'fail\',this)">Fail</button>' +
+          '<button class="btn skip-btn" onclick="setResult(' + s.id + ',\'skip\',this)">Skip</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="scenario-details open" id="details-' + s.id + '">' +
+        '<div class="steps"><strong>Steps:</strong><br>' + s.steps.replace(/\n/g,'<br>') + '</div>' +
+        '<div class="steps"><strong>Expected:</strong><br>' + s.expected + '</div>' +
+      '</div>' +
+      '<div class="scenario-notes">' +
+        '<textarea class="notes-input" id="notes-' + s.id + '" placeholder="Notes — observations, issues, anything worth recording"></textarea>' +
+      '</div>' +
+    '</div>';
+  });
+}
+
+const results = {};
+
+function setResult(id, result, btn) {
+  results[id] = result;
+  const sc = document.getElementById('scenario-' + id);
+  sc.className = 'scenario ' + (result === 'skip' ? '' : result);
+  sc.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  updateProgress();
+}
+
+function toggleDetails(id) {
+  document.getElementById('details-' + id).classList.toggle('open');
+}
+
+function updateProgress() {
+  const done = Object.keys(results).length;
+  const pct = (done / scenarios.length * 100).toFixed(0);
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent = done + ' / ' + scenarios.length + ' completed';
+}
+
+var bugCount = 0;
+
+function addBug() {
+  bugCount++;
+  var n = bugCount;
+  document.getElementById('bugs-list').innerHTML +=
+    '<div class="bug-entry" id="bug-' + n + '">' +
+      '<button class="remove-bug" onclick="document.getElementById(\'bug-' + n + '\').remove()">remove</button>' +
+      '<div class="bug-row">' +
+        '<div class="bug-field"><label>Severity</label><select id="bug-sev-' + n + '">' +
+          '<option>SEV-1 (crash/data loss)</option><option>SEV-2 (broken, workaround exists)</option>' +
+          '<option selected>SEV-3 (minor UX)</option><option>SEV-4 (polish/enhancement)</option>' +
+        '</select></div>' +
+        '<div class="bug-field"><label>Feature</label><select id="bug-feat-' + n + '">' +
+          '<option>28 - keys_zone Alarm</option><option>29 - Retire failed status</option>' +
+        '</select></div>' +
+      '</div>' +
+      '<div class="bug-field"><label>Description</label><input id="bug-desc-' + n + '" placeholder="What went wrong?"></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Steps to Reproduce</label><textarea id="bug-steps-' + n + '" placeholder="1. ...\n2. ...\n3. ..."></textarea></div>' +
+      '<div class="bug-field" style="margin-top:8px"><label>Expected vs Actual</label><textarea id="bug-exp-' + n + '" placeholder="Expected: ...\nActual: ..."></textarea></div>' +
+    '</div>';
+}
+
+function exportResults() {
+  var tester = document.getElementById('tester-name').value || 'Unknown';
+  var md = '# ' + document.querySelector('h1').textContent + ' Results\n\n';
+  md += '**Date:** 2026-09-22\n';
+  md += '**Tester:** ' + tester + '\n';
+  md += '**Features:** keys_zone Alarm, Retire failed status\n\n';
+
+  var pass = 0, fail = 0, skip = 0;
+  for (var k in results) {
+    if (results[k] === 'pass') pass++;
+    else if (results[k] === 'fail') fail++;
+    else if (results[k] === 'skip') skip++;
+  }
+  var untested = scenarios.length - Object.keys(results).length;
+  md += '**Summary:** ' + pass + ' passed, ' + fail + ' failed, ' + skip + ' skipped, ' + untested + ' not tested\n\n---\n\n';
+
+  md += '## Scenarios\n\n';
+  md += '| # | Scenario | Result | Notes |\n';
+  md += '|---|---|---|---|\n';
+  scenarios.forEach(function(s) {
+    var r = results[s.id] || 'not tested';
+    var icon = r === 'pass' ? 'PASS' : r === 'fail' ? 'FAIL' : r === 'skip' ? 'SKIP' : '-';
+    var el = document.getElementById('notes-' + s.id);
+    var notes = el ? el.value.replace(/\|/g, '/').replace(/\n/g, ' ').replace(/`/g, "'").replace(/\[/g, '(').replace(/\]/g, ')').replace(/\*/g, '-') : '';
+    md += '| ' + s.id + ' | ' + s.title + ' | ' + icon + ' | ' + notes + ' |\n';
+  });
+
+  var bugEntries = document.querySelectorAll('.bug-entry');
+  if (bugEntries.length > 0) {
+    md += '\n---\n\n## Bugs Found\n\n';
+    var i = 0;
+    bugEntries.forEach(function(el) {
+      i++;
+      var id = el.id.split('-')[1];
+      var sev = document.getElementById('bug-sev-' + id);
+      var feat = document.getElementById('bug-feat-' + id);
+      var desc = document.getElementById('bug-desc-' + id);
+      var steps = document.getElementById('bug-steps-' + id);
+      var exp = document.getElementById('bug-exp-' + id);
+      md += '### Bug ' + i + '\n';
+      md += '- **Severity:** ' + (sev ? sev.value : '') + '\n';
+      md += '- **Feature:** ' + (feat ? feat.value : '') + '\n';
+      md += '- **Description:** ' + (desc ? desc.value : '') + '\n';
+      md += '- **Steps:** ' + (steps ? steps.value.replace(/\n/g, '; ') : '') + '\n';
+      md += '- **Expected vs Actual:** ' + (exp ? exp.value.replace(/\n/g, '; ') : '') + '\n\n';
+    });
+  }
+
+  var overall = document.getElementById('overall-notes').value;
+  if (overall) {
+    md += '\n---\n\n## Overall Notes\n\n' + overall + '\n';
+  }
+
+  navigator.clipboard.writeText(md).then(function() {
+    var msg = document.getElementById('copy-msg');
+    msg.style.display = 'block';
+    setTimeout(function() { msg.style.display = 'none'; }, 3000);
+  });
+}
+
+renderScenarios();
+updateProgress();
+</script>
+</body>
+</html>
