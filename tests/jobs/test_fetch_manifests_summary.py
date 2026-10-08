@@ -58,6 +58,25 @@ class TestSummariseTally:
         assert ok is False
         assert "failed=200" in msg
 
+    @pytest.mark.parametrize(
+        ("failed", "expected_ok"),
+        [(59, True), (84, True), (85, False)],
+        ids=["first_live_run_4.9pct", "6.94pct_is_up", "7.02pct_is_down"],
+    )
+    def test_the_default_alarm_boundary_sits_at_seven_percent(
+        self, failed: int, expected_ok: bool
+    ) -> None:
+        """#361 (Karl, 2026-10-08): the first live run measured 59/1211 = 4.9% (job
+        46856). 84/1211 = 6.94% is still UP and 85/1211 = 7.02% is DOWN."""
+        from orchestrator.core.settings import Settings
+
+        ratio = Settings(orchestrator_token="a" * 32).fetch_manifests_max_failure_ratio
+        tally = {"fetched": 1211 - failed, "skipped": 0, "failed": failed, "apps": 1211}
+        ok, msg = summarise_tally(tally, ratio)
+
+        assert ok is expected_ok
+        assert f"failed={failed}" in msg
+
     def test_crossing_the_threshold_is_down(self) -> None:
         ok, msg = summarise_tally({"fetched": 0, "skipped": 0, "failed": 900, "apps": 1000}, 0.75)
 
