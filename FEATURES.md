@@ -1411,14 +1411,14 @@ failure-ratio threshold **without** changing `jobs.state` (#294).
   - `src/orchestrator/jobs/summary.py` — `JobSummary`
   - Env: `ORCH_KUMA_PUSH_LIBRARY_SYNC`, `_SWEEP`, `_SCHEDULED_PREFILL`,
     `_FETCH_MANIFESTS` (secrets — the URL is the whole credential; unset disables that
-    heartbeat), `ORCH_FETCH_MANIFESTS_MAX_FAILURE_RATIO` (default 0.10 since #361;
-    0.75 before)
+    heartbeat), `ORCH_FETCH_MANIFESTS_MAX_FAILURE_RATIO` (default 0.07 since 2026-10-08;
+    0.10 from 2026-10-07 and 0.75 before)
 
 **Test Coverage:** 28 in `tests/jobs/test_worker_heartbeats.py` (monitor selection as a
 pure function, including every kind × every manual source; wiring for up, down-with-error,
 silence on a manual trigger, and a push that raises leaving the job succeeded), 8 in
 `tests/clients/test_heartbeat.py` (driven through `httpx.MockTransport`, asserting the
-real outgoing request), 15 in `tests/jobs/test_fetch_manifests_summary.py`.
+real outgoing request), 19 in `tests/jobs/test_fetch_manifests_summary.py`.
 
 **Known Limitations:**
   - Monitoring is fire-and-forget: a push rejected by Kuma (e.g. a paused monitor,
@@ -1884,7 +1884,7 @@ once, fetches every app's manifests in that session, and reports one JSON line p
 app. Python calls it once, keeps choosing games and writing `.shas`, and now
 counts apps the helper never reports as failed (`manifest_fetch.app_unreported`).
 A run that reports none fails the job; partial failures turn it red past
-`fetch_manifests_max_failure_ratio` (10% since 2026-10-07; it was 0.75).
+`fetch_manifests_max_failure_ratio` (7% since 2026-10-08; 10% on 2026-10-07; it was 0.75).
 DepotDownloader is removed from the image.
 
 **Key Interfaces:**
@@ -1931,11 +1931,10 @@ DepotDownloader is removed from the image.
     still archived. If every manifest in a run parses empty, the run logs
     `manifest_fetch.all_manifests_empty` and raises, as parser or format drift. A
     run that reports none fails the job; partial failures turn the Kuma heartbeat
-    red past `fetch_manifests_max_failure_ratio`, **10%** since 2026-10-07 (Karl;
-    it was 0.75, tuned to DepotDownloader's rate-limited ~0.59 steady state; the
-    Task 1 spike's 100-app sample would score about 1-2% under production rules,
-    on a sample biased toward clean apps). Karl set 10% on 2026-10-07 and
-    re-checks it against the first live run.
+    red past `fetch_manifests_max_failure_ratio`, **7%** since 2026-10-08 (Karl;
+    it was 0.75, tuned to DepotDownloader's rate-limited ~0.59 steady state, then
+    10% on 2026-10-07). The first live run (job 46856) measured 4.9% (59/1211),
+    and Karl set 7% above that on 2026-10-08.
   - **The connect is retried, the logon never is.** The gateway tries the CM
     connection up to 3 times (5 s, then 15 s apart) before its single `LogOn`. A
     connect that never succeeds, or a logon Steam never answers, is reported as
@@ -1976,14 +1975,12 @@ the repo's `.semgrep/` rules are Python only (0 findings over 118 `.py` files); 
 `docs/security-audits/steam-manifest-helper-security-audit.md`.
 
 **Known Limitations:**
-  - **Not yet deployed.** Closure needs the Monday run after deploy:
-    `fetch_manifests.done` with `failed` near 0, one Steam login in the helper
-    log, the 06:00 MDT SteamPrefill run ending `END steam prefill ok`, and Kuma 176
-    UP. The live check for one login reads `"logons": 1` from the
-    `manifest_fetch.done` line. The Task 1 spike imported the live token and
-    logged on, but it ran scratch code making the same SteamKit2 calls. The
-    production `SteamKitGateway` (its connect retry included) and the production
-    `SessionStore` import both first meet Steam and the live volume at Task 10.
+  - **Deployed 2026-10-08 (merge 87662e0).** First live run, job 46856: logons=1,
+    fetched=257, skipped=3000, failed=59 of 1211 (4.9%), not_attempted=0. Parity
+    spot-check: 150/150 identical against DepotDownloader-written .shas. #361
+    closes on the following Monday's evidence: `fetch_manifests.done` with
+    `"logons": 1` and `failed` under the 7% alarm, the 06:00 MDT SteamPrefill run
+    ending `END steam prefill ok`, and Kuma 176 UP.
   - The token sits in plain JSON on the persistent mount, as DepotDownloader's
     did; `login` needs a TTY.
   - `THIRD_PARTY_NOTICES.md` does not reach the image (`.dockerignore` drops root

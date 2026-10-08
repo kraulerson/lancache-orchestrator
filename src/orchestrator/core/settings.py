@@ -279,14 +279,13 @@ class Settings(BaseSettings):
     # (#294). It does NOT fail the job: a partially-failing run is still a run that
     # happened, and conflating the two makes 'failed' useless as a signal.
     #
-    # 0.10 since #361 (Karl, 2026-10-07). The earlier 0.75 was tuned to sit above
+    # 0.07 since #361 (Karl, 2026-10-08). The earlier 0.75 was tuned to sit above
     # the DepotDownloader-era steady state (698/1174 ≈ 0.59 on 2026-08-25), whose
     # failures were the rate limits of 1,211 logins per run — the cause #361
-    # removes, so 0.75 would have read UP at 74% failed. The Task 1 spike's 100-app
-    # sample would score about 1-2% under production rules, on a sample biased
-    # toward clean apps; Karl set 10% on 2026-10-07 and re-checks it against the
-    # first live run.
-    fetch_manifests_max_failure_ratio: float = Field(default=0.10, ge=0.0, le=1.0)
+    # removes, so 0.75 would have read UP at 74% failed. The first live run of
+    # the one-login helper (job 46856, 2026-10-08) measured 4.9% (59/1211); Karl
+    # set 7% above that, tightened from the 10% he chose on 2026-10-07.
+    fetch_manifests_max_failure_ratio: float = Field(default=0.07, ge=0.0, le=1.0)
     # #225: after a game is prefilled, auto-exclude classifier-flagged non-games
     # (soundtracks/tools/servers/demos) from FUTURE prefill. Runs on the same
     # interval as the scheduled prefill; download-once-then-block.

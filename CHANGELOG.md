@@ -19,6 +19,18 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Changed — the weekly manifest-fetch alarm goes red above 7% failed, not 10% (#361) — 2026-10-08
+
+- **Measured rate.** The first live run of the one-login helper (job 46856,
+  2026-10-08 14:21-15:51 UTC) logged `apps=1211 fetched=257 skipped=3000 failed=59
+  not_attempted=0 helper_exit=0 logons=1`, a failure rate of 4.9% (59/1211).
+  Failures by kind: 47 `error`, 11 `no_depots`, 1 `not_owned`.
+- **Decision.** Karl lowered the `fetch_manifests_max_failure_ratio` default from
+  0.10 to 0.07 on 2026-10-08, so Kuma 176 goes DOWN above 7% (85 of 1211 or more;
+  84 of 1211 is still UP). Boundary tests pin both sides.
+- **Recurring cause.** 26 of the 47 `error` failures are depot-key timeouts, tracked
+  in issue #369, the largest single source of recurring failures.
+
 ### Changed — the weekly Steam manifest fetch logs in once, not 1,211 times (#361) — 2026-10-07
 
 - **Root cause: one Steam login per game, and a back-off that never ran.**

@@ -1,6 +1,6 @@
 # ADR-0019: A One-Login Steam Manifest Helper
 
-<!-- Last Updated: 2026-10-07 -->
+<!-- Last Updated: 2026-10-08 -->
 
 **Status:** Accepted — 2026-10-07 (Orchestrator: Karl Raulerson). Issue #361.
 Design: `docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`.
@@ -123,6 +123,8 @@ Shape of the result:
   format drift. A run that reports none fails the job; partial failures turn the heartbeat red
   past `fetch_manifests_max_failure_ratio`, 10% since 2026-10-07 (Karl; it was
   0.75, tuned to DepotDownloader's rate-limited ~0.59 steady state).
+  Amended 2026-10-08: 7%. The first live run (job 46856) measured 4.9%
+  (59/1211), and Karl lowered the threshold to 0.07.
   What is logged on a failure depends on how the helper ended. A non-zero exit
   or a missing summary logs `manifest_fetch.helper_failed` with the exit code,
   the summary's outcome, `logons` and reason (when the helper printed a
