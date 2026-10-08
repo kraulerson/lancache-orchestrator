@@ -19,7 +19,7 @@ None. No SEV-1 to SEV-4 findings.
 
 ## Non-findings (explicitly checked, clean)
 
-- **No new input.** The value is a settings default, overridable only through the `ORCH_FETCH_MANIFESTS_MAX_FAILURE_RATIO` environment variable that already existed. No request, header or file feeds it.
+- **No new input.** The value is a settings default, overridable only through the `ORCH_FETCH_MANIFESTS_MAX_FAILURE_RATIO` setting, which already existed and is read through the existing operator configuration channels (process environment, `.env`, and the `/run/secrets` directory; `settings.py:54-55`). None of those is a request, a header or a user-supplied file.
 - **No auth, data or filesystem path touched.** `summarise_tally` is unchanged; it compares a ratio with the threshold.
 - **Failure mode is fail-loud.** A lower threshold makes the heartbeat go DOWN sooner, never later, so the change cannot hide a failing run.
 - **Bounds retained.** The `ge=0.0, le=1.0` validator is untouched.

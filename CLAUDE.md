@@ -142,13 +142,14 @@ or 24 hours past the last commit touching this file.
   `starlette` and `uvicorn`, so it is fixed by recompiling rather than editing —
   `pip-compile --upgrade-package anyio`, keeping `--allow-unsafe` on the dev file
   or the recompile also drops the `pip` and `setuptools` pins.
-- **#361 (one-login Steam manifest helper) is BUILT but NOT deployed** (branch
-  `design/361-steam-manifest-helper`, 2026-10-07). A C# SteamKit2 helper logs in
-  once per weekly `fetch_manifests` run instead of 1,211 times (DepotDownloader is
-  removed from the image); closes on the first Monday run after deploy. Spec:
+- **#361 (one-login Steam manifest helper) is DEPLOYED as of 2026-10-08** (merge
+  87662e0; first live run job 46856 had logons=1 and failed 4.9%; failure alarm at
+  7%; rollback tag `dpa-pre-361`). A C# SteamKit2 helper logs in once per weekly
+  `fetch_manifests` run instead of 1,211 times (DepotDownloader is removed from the
+  image); closes on the next Monday's evidence. Spec:
   `docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`; plan:
   `docs/superpowers/plans/2026-10-07-steam-manifest-helper.md`; ADR 0019; Feature
-  30. Rollback is by the `dpa-pre-361` image tag.
+  30.
 
 **Authoritative sources — prefer these over this summary, which is a snapshot:**
 `FEATURES.md` (what exists) · `CHANGELOG.md` (what changed) · `PROJECT_BIBLE.md`

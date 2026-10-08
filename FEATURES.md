@@ -1418,7 +1418,7 @@ failure-ratio threshold **without** changing `jobs.state` (#294).
 pure function, including every kind × every manual source; wiring for up, down-with-error,
 silence on a manual trigger, and a push that raises leaving the job succeeded), 8 in
 `tests/clients/test_heartbeat.py` (driven through `httpx.MockTransport`, asserting the
-real outgoing request), 15 in `tests/jobs/test_fetch_manifests_summary.py`.
+real outgoing request), 19 in `tests/jobs/test_fetch_manifests_summary.py`.
 
 **Known Limitations:**
   - Monitoring is fire-and-forget: a push rejected by Kuma (e.g. a paused monitor,
@@ -1975,14 +1975,12 @@ the repo's `.semgrep/` rules are Python only (0 findings over 118 `.py` files); 
 `docs/security-audits/steam-manifest-helper-security-audit.md`.
 
 **Known Limitations:**
-  - **Not yet deployed.** Closure needs the Monday run after deploy:
-    `fetch_manifests.done` with `failed` near 0, one Steam login in the helper
-    log, the 06:00 MDT SteamPrefill run ending `END steam prefill ok`, and Kuma 176
-    UP. The live check for one login reads `"logons": 1` from the
-    `manifest_fetch.done` line. The Task 1 spike imported the live token and
-    logged on, but it ran scratch code making the same SteamKit2 calls. The
-    production `SteamKitGateway` (its connect retry included) and the production
-    `SessionStore` import both first meet Steam and the live volume at Task 10.
+  - **Deployed 2026-10-08 (merge 87662e0).** First live run, job 46856: logons=1,
+    fetched=257, skipped=3000, failed=59 of 1211 (4.9%), not_attempted=0. Parity
+    spot-check: 150/150 identical against DepotDownloader-written .shas. #361
+    closes on the following Monday's evidence: `fetch_manifests.done` with
+    `"logons": 1` and `failed` under the 7% alarm, the 06:00 MDT SteamPrefill run
+    ending `END steam prefill ok`, and Kuma 176 UP.
   - The token sits in plain JSON on the persistent mount, as DepotDownloader's
     did; `login` needs a TTY.
   - `THIRD_PARTY_NOTICES.md` does not reach the image (`.dockerignore` drops root

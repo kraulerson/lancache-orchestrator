@@ -77,6 +77,12 @@ class TestSummariseTally:
         assert ok is expected_ok
         assert f"failed={failed}" in msg
 
+    def test_a_ratio_exactly_at_the_threshold_is_still_up(self) -> None:
+        """Down means strictly above the ratio; 1/4 == 0.25 exactly in float."""
+        ok, _ = summarise_tally({"fetched": 3, "skipped": 0, "failed": 1, "apps": 4}, 0.25)
+
+        assert ok is True
+
     def test_crossing_the_threshold_is_down(self) -> None:
         ok, msg = summarise_tally({"fetched": 0, "skipped": 0, "failed": 900, "apps": 1000}, 0.75)
 

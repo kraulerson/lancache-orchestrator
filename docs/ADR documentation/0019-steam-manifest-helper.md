@@ -1,6 +1,6 @@
 # ADR-0019: A One-Login Steam Manifest Helper
 
-<!-- Last Updated: 2026-10-07 -->
+<!-- Last Updated: 2026-10-08 -->
 
 **Status:** Accepted — 2026-10-07 (Orchestrator: Karl Raulerson). Issue #361.
 Design: `docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`.
