@@ -19,8 +19,9 @@ def cache() -> None:
 def cache_fetch_manifests(ctx: click.Context) -> None:
     """Fetch manifests (no chunk bytes) for the cached library.
 
-    Triggers the agent's DepotDownloader manifest-only run so the validator
-    can cover apps that SteamPrefill skipped. Reuses the fetch_manifests
+    Triggers the agent's manifest-only run (one Steam login, through
+    SteamManifestHelper) so the validator can cover apps that SteamPrefill
+    skipped. Reuses the fetch_manifests
     in-flight dedup — at most one run at a time."""
     client = make_client(ctx)
     resp = client.post("/api/v1/fetch-manifests")

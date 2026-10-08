@@ -761,20 +761,28 @@ class TestManifestArchiveSettings:
 
 def test_manifest_fetcher_settings_defaults():
     s = Settings(orchestrator_token="a" * 32)
-    assert s.depotdownloader_binary == Path("/depotdownloader/DepotDownloader")
+    assert s.steam_manifest_helper_binary == Path("/steam-manifest-helper/SteamManifestHelper")
     assert s.depotdownloader_config_dir == Path("/depotdownloader-config")
-    # #228: raised 3→8s (3s still tripped Steam's logon rate limiter) + bounded
-    # transient-failure retry with exponential backoff.
-    assert s.manifest_fetch_delay_sec == 8.0
-    assert s.manifest_fetch_max_retries == 3
-    assert s.manifest_fetch_retry_backoff_sec == 15.0
+    # #361: one login per run replaced the per-app delay and retry settings.
+    assert s.manifest_fetch_timeout_sec == 7200.0
+    assert not hasattr(s, "manifest_fetch_delay_sec")
+
+
+def test_fetch_manifests_failure_ratio_defaults_to_ten_percent():
+    """#361 I2 (Karl, 2026-10-07): 0.75 was tuned to DepotDownloader's rate-limited
+    ~0.59 steady state. With one login per run the spike saw 0 failures in 100 apps,
+    so the alarm now fires above 10%."""
+    s = Settings(orchestrator_token="a" * 32)
+    assert s.fetch_manifests_max_failure_ratio == 0.10
 
 
 def test_manifest_fetcher_settings_env_override(monkeypatch):
-    monkeypatch.setenv("ORCH_MANIFEST_FETCH_DELAY_SEC", "5.5")
+    monkeypatch.setenv("ORCH_MANIFEST_FETCH_TIMEOUT_SEC", "60")
     monkeypatch.setenv("ORCH_DEPOTDOWNLOADER_CONFIG_DIR", "/custom/dd")
+    # A removed setting left in an env file must not break boot (extra="ignore").
+    monkeypatch.setenv("ORCH_MANIFEST_FETCH_DELAY_SEC", "8")
     s = Settings(orchestrator_token="a" * 32)
-    assert s.manifest_fetch_delay_sec == 5.5
+    assert s.manifest_fetch_timeout_sec == 60.0
     assert s.depotdownloader_config_dir == Path("/custom/dd")
 
 

@@ -48,10 +48,11 @@
     "sweep-pass-marker",
     "313-heartbeat-delivery-gates-dedupe-stamp",
     "keys-zone-alarm",
-    "cache-truth-terminal-states"
+    "cache-truth-terminal-states",
+    "steam-manifest-helper"
   ],
-  "features_since_last_test": 0,
-  "features_since_last_health_check": 3,
+  "features_since_last_test": 1,
+  "features_since_last_health_check": 1,
   "test_interval": 2,
   "last_test_session": "2026-10-07",
   "testing_required": false,

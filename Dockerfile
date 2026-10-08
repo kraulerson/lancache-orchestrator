@@ -20,18 +20,27 @@ COPY pyproject.toml .
 COPY src/ src/
 RUN /build/.venv/bin/pip install --no-cache-dir --no-deps .
 
-# DepotDownloader — pinned binary for the Steam manifest-only fetcher
-# (validation-coverage gap). Downloaded and verified in the builder so the
-# runtime stage stays lean (no curl/unzip in the runtime base image).
-ARG DEPOTDOWNLOADER_VERSION=3.4.0
-ARG DEPOTDOWNLOADER_SHA256=a999dec66b4850fc961bd50366696d23c2d0fad7b18790e6a5647b2f19097a53
-RUN set -eux; \
-    curl -fsSL -o /tmp/dd.zip "https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_${DEPOTDOWNLOADER_VERSION}/DepotDownloader-linux-x64.zip"; \
-    echo "${DEPOTDOWNLOADER_SHA256}  /tmp/dd.zip" | sha256sum -c -; \
-    mkdir -p /depotdownloader; \
-    unzip /tmp/dd.zip -d /depotdownloader; \
-    chmod +x /depotdownloader/DepotDownloader; \
-    rm /tmp/dd.zip
+# ── Stage 1b: Steam manifest helper (.NET, #361) ─────────────────
+# Built on the BUILD platform and cross-published for the TARGET architecture, so
+# CI's arm64 build never runs the .NET compiler under QEMU. The tests run first:
+# a failing helper test fails the image build. Published self-contained but NOT
+# single-file and NOT trimmed, so SteamKit2.dll (LGPL-2.1) stays a separate,
+# replaceable file.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0@sha256:e70cdb7f80b0348f5cb85f19a8f670fca061f033d57eed12fa003d58b0e06317 AS helper
+ARG TARGETARCH
+WORKDIR /src
+COPY tools/steam_manifest_helper/ ./
+RUN dotnet restore SteamManifestHelper.Tests/SteamManifestHelper.Tests.csproj --locked-mode \
+ && dotnet test SteamManifestHelper.Tests/SteamManifestHelper.Tests.csproj --no-restore -c Release \
+      -- RunConfiguration.TreatNoTestsAsError=true
+# Restore WITHOUT -r: the lock file records both RIDs from <RuntimeIdentifiers> in
+# the csproj, and -r would narrow that list and fail NU1004 in locked mode. The
+# listed RIDs' runtime packs are fetched at restore; publish -r then picks one.
+RUN case "$TARGETARCH" in amd64) RID=linux-x64;; arm64) RID=linux-arm64;; *) echo "unsupported TARGETARCH '$TARGETARCH'" >&2; exit 1;; esac \
+ && dotnet restore SteamManifestHelper/SteamManifestHelper.csproj --locked-mode \
+ && dotnet publish SteamManifestHelper/SteamManifestHelper.csproj --no-restore -c Release -r "$RID" \
+      --self-contained true -p:PublishSingleFile=false -p:PublishTrimmed=false -o /steam-manifest-helper \
+ && cp -r licenses /steam-manifest-helper/licenses
 
 # ── Stage 2: runtime ────────────────────────────────────────────
 FROM python:3.12-slim@sha256:520153e2deb359602c9cffd84e491e3431d76e7bf95a3255c9ce9433b76ab99a AS runtime
@@ -65,9 +74,9 @@ COPY --from=builder /build/src /app/src
 # Addresses UAT-1 adversarial F7.
 VOLUME ["/var/lib/orchestrator"]
 
-# linux-x64 build is self-contained (bundles .NET); the image is shared
-# control+agent but only the agent invokes it.
-COPY --from=builder /depotdownloader /depotdownloader
+# Self-contained .NET helper (#361); the image is shared control+agent, but only
+# the agent invokes it.
+COPY --from=helper /steam-manifest-helper /steam-manifest-helper
 
 WORKDIR /app
 

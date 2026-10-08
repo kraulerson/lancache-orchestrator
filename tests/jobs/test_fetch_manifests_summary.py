@@ -31,15 +31,32 @@ class TestSummariseTally:
         assert "fetched=40" in msg
         assert "failed=0" in msg
 
-    def test_todays_real_tally_is_up_but_carries_the_numbers(self) -> None:
-        """698/1174 is the current steady state — visible, not alarming."""
+    def test_a_tally_under_the_threshold_is_up_but_carries_the_numbers(self) -> None:
         ok, msg = summarise_tally(
             {"fetched": 48, "skipped": 1477, "failed": 698, "apps": 1174}, 0.75
         )
 
-        assert ok is True, "the steady state must not hold the monitor permanently red"
+        assert ok is True
         assert "failed=698" in msg
         assert "apps=1174" in msg
+
+    def test_the_depotdownloader_era_tally_is_down_at_the_default(self) -> None:
+        """#361 I2: 698/1174 (0.59) was DepotDownloader's rate-limited steady state.
+        With one login per run it is a collapse, so the default must alarm on it."""
+        from orchestrator.core.settings import Settings
+
+        ratio = Settings(orchestrator_token="a" * 32).fetch_manifests_max_failure_ratio
+        tally = {"fetched": 48, "skipped": 1477, "failed": 698, "apps": 1174}
+        ok, _ = summarise_tally(tally, ratio)
+
+        assert ok is False
+
+    def test_sixteen_and_a_half_percent_failed_is_down_at_ten_percent(self) -> None:
+        tally = {"fetched": 1011, "skipped": 0, "failed": 200, "apps": 1211}
+        ok, msg = summarise_tally(tally, 0.10)
+
+        assert ok is False
+        assert "failed=200" in msg
 
     def test_crossing_the_threshold_is_down(self) -> None:
         ok, msg = summarise_tally({"fetched": 0, "skipped": 0, "failed": 900, "apps": 1000}, 0.75)
@@ -102,7 +119,7 @@ class TestHandlerReturnsTheSummary:
 
         class _Agent:
             async def fetch_manifests(self):
-                return {"fetched": 48, "skipped": 1477, "failed": 698, "apps": 1174}
+                return {"fetched": 48, "skipped": 1477, "failed": 50, "apps": 1174}
 
         result = await fetch_manifests_handler({"id": 1}, Deps(pool=None, agent_client=_Agent()))
 
@@ -111,4 +128,17 @@ class TestHandlerReturnsTheSummary:
             "heartbeat and the monitor goes green over a half-failing run"
         )
         assert result.ok is True
-        assert "failed=698" in result.msg
+        assert "failed=50" in result.msg
+
+    async def test_the_handler_reports_down_above_the_default_threshold(self) -> None:
+        from orchestrator.jobs.handlers.fetch_manifests import fetch_manifests_handler
+        from orchestrator.jobs.worker import Deps
+
+        class _Agent:
+            async def fetch_manifests(self):
+                return {"fetched": 1011, "skipped": 0, "failed": 200, "apps": 1211}
+
+        result = await fetch_manifests_handler({"id": 1}, Deps(pool=None, agent_client=_Agent()))
+
+        assert result is not None
+        assert result.ok is False

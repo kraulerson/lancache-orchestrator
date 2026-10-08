@@ -1,5 +1,7 @@
 # CLAUDE.md — lancache_orchestrator
 
+When you finish a task, hit a blocker, or need a decision, send your TLDR (status, options, recommendation, blockers, context headroom) to @Maestro using send-message.
+
 ## Project Identity
 - **Project:** lancache_orchestrator
 - **Description:** Orchestrator to verify lancache is updating all games correctly
@@ -34,7 +36,7 @@ or 24 hours past the last commit touching this file.
   `docs/superpowers/`.
 - **Not yet released:** all 164 `CHANGELOG.md` entries sit under `[Unreleased]`;
   no version has been tagged.
-- **Tests:** 2027 passing (3 deselected) as of 2026-10-06, after the #362/#363 fixes.
+- **Tests:** 2043 passing (3 deselected) as of 2026-10-07, after the #361 helper work.
   The long-stale 1867 figure here caused the UAT-17 automated-suite agent to
   compute a wrong delta before it was corrected — quoting a number nobody
   re-derives is how it spreads. Re-derive it rather than trusting this line.
@@ -140,6 +142,13 @@ or 24 hours past the last commit touching this file.
   `starlette` and `uvicorn`, so it is fixed by recompiling rather than editing —
   `pip-compile --upgrade-package anyio`, keeping `--allow-unsafe` on the dev file
   or the recompile also drops the `pip` and `setuptools` pins.
+- **#361 (one-login Steam manifest helper) is BUILT but NOT deployed** (branch
+  `design/361-steam-manifest-helper`, 2026-10-07). A C# SteamKit2 helper logs in
+  once per weekly `fetch_manifests` run instead of 1,211 times (DepotDownloader is
+  removed from the image); closes on the first Monday run after deploy. Spec:
+  `docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`; plan:
+  `docs/superpowers/plans/2026-10-07-steam-manifest-helper.md`; ADR 0019; Feature
+  30. Rollback is by the `dpa-pre-361` image tag.
 
 **Authoritative sources — prefer these over this summary, which is a snapshot:**
 `FEATURES.md` (what exists) · `CHANGELOG.md` (what changed) · `PROJECT_BIBLE.md`
