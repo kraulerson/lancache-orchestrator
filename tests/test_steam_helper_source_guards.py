@@ -17,6 +17,62 @@ _GATEWAY = (
 )
 
 
+def _span_of_call(source: str, call: str) -> tuple[int, int]:
+    """Offsets of the first `call` (ending in "(") through its matching ")"."""
+    start = source.index(call)
+    depth = 1
+    pos = start + len(call)
+    while depth:
+        depth += {"(": 1, ")": -1}.get(source[pos], 0)
+        pos += 1
+    return start, pos
+
+
+def _depot_key_retry_problems(source: str) -> list[str]:
+    """Why `GetDepotKeyAsync` does not re-send dropped requests, or [] if it does."""
+    head = source.index("GetDepotKeyAsync(")
+    body_start = source.index("{", head)
+    body = source[body_start : source.index("internal static byte[]? MapDepotKey", head)]
+    problems = []
+    if "RequestRetry.RunAsync(" not in body:
+        return ["GetDepotKeyAsync does not call RequestRetry.RunAsync("]
+    start, end = _span_of_call(body, "RequestRetry.RunAsync(")
+    if "MapDepotKey(" in body[start:end]:
+        problems.append("MapDepotKey( is inside the RequestRetry.RunAsync( call")
+    if "MapDepotKey(" not in body[end:]:
+        problems.append("MapDepotKey( does not come after the RequestRetry.RunAsync( call")
+    if "attempts: 3" not in body[start:end]:
+        problems.append("the RequestRetry.RunAsync( call does not pass attempts: 3")
+    return problems
+
+
+def test_depot_key_request_is_re_sent_but_an_eresult_refusal_is_not():
+    """#369: Steam drops ~1% of depot-key requests with no answer. Only the request
+    is retried (`RequestRetry.RunAsync`); `MapDepotKey` turns an explicit EResult
+    into not_owned or a failure and must run once, after the retry, never inside it."""
+    assert _depot_key_retry_problems(_GATEWAY.read_text()) == []
+
+
+def test_the_depot_key_guard_flags_the_unfixed_gateway():
+    """Mutation proof: the pre-#369 shape (one bare attempt) and a MapDepotKey
+    inside the retry lambda are both reported."""
+    head = "Task<byte[]?> GetDepotKeyAsync(uint d, uint a, CancellationToken ct)\n{\n"
+    tail = "}\ninternal static byte[]? MapDepotKey(uint d, EResult r, byte[] k) => k;\n"
+    unfixed = (
+        head
+        + 'var key = await Call(() => apps.Get(d, a).ToTask(), $"k", ct);\n'
+        + "return MapDepotKey(d, key.Result, key.DepotKey);\n"
+        + tail
+    )
+    assert _depot_key_retry_problems(unfixed)
+    inside = (
+        head + "return await RequestRetry.RunAsync(async () => MapDepotKey(d, 0, k), 3);\n" + tail
+    )
+    assert any("inside" in p for p in _depot_key_retry_problems(inside))
+    one_attempt = _GATEWAY.read_text().replace("attempts: 3,", "attempts: 1,")
+    assert any("attempts: 3" in p for p in _depot_key_retry_problems(one_attempt))
+
+
 def test_session_file_is_0600_from_creation_not_chmod_ed_afterwards():
     """#361 review cm4: the refresh token must never sit on disk in a wider mode.
     `UnixCreateMode` sets 0600 as the file is created; `SetUnixFileMode` after

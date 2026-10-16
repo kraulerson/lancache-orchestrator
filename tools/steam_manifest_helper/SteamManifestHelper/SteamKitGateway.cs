@@ -220,7 +220,13 @@ public sealed class SteamKitGateway : ISteamGateway
 
     public async Task<byte[]?> GetDepotKeyAsync(uint depotId, uint appId, CancellationToken ct)
     {
-        var key = await Call(() => apps.GetDepotDecryptionKey(depotId, appId).ToTask(), $"depot key {depotId}", ct);
+        // Steam drops ~1% of these requests without answering (#369); a dropped or failed
+        // request (a SteamRequestException from Call) is re-sent, up to 3 sends.
+        // MapDepotKey stays outside: an explicit EResult refusal is an answer and is never re-sent.
+        var key = await RequestRetry.RunAsync(
+            () => Call(() => apps.GetDepotDecryptionKey(depotId, appId).ToTask(), $"depot key {depotId}", ct),
+            attempts: 3,
+            onRetry: (n, e) => log.WriteLine($"depot key {depotId}: attempt {n} failed ({e.Message}), re-sending"));
         return MapDepotKey(depotId, key.Result, key.DepotKey);
     }
 

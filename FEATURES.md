@@ -1954,17 +1954,32 @@ DepotDownloader is removed from the image.
     manifest, `AccessDenied` alone means "not owned", and others) are listed in
     the spec.
 
-**Test Coverage:** 60 xUnit tests for the helper (session store, depot selection,
-CDN auth, CLI, fetch runner against a fake gateway, the connect-retry policy, and
+  - **Dropped depot-key requests are re-sent (#369, 2026-10-16).** Steam silently
+    drops about 1% of `ClientGetDepotDecryptionKey` requests (20 of 1,988 got no
+    answer in 55 s; answered ones took 224 ms at most), and one dropped request
+    used to fail its whole app. `GetDepotKeyAsync` now sends up to 3 times
+    (`RequestRetry`), retrying only a dropped or failed request (`SteamRequestException`); an explicit
+    `EResult` refusal is an answer and is never re-sent, and a lost session still
+    belongs to the single reconnect.
+  - **Cron weekdays must be names (UAT 18 B3).** `fetch_manifests_cron` defaults to
+    `0 5 * * tue` (Tuesday 05:00 UTC, Monday 23:00 MDT; behaviour unchanged).
+    APScheduler 3.x counts 0 as Monday, so the old `1` fired on Tuesday while
+    reading as Monday. All three cron settings now reject a day-of-week field
+    containing any digit (`1`, `0-4`, `*/2`, `mon,3`).
+
+**Test Coverage:** 65 xUnit tests for the helper (session store, depot selection,
+CDN auth, CLI, fetch runner against a fake gateway, the connect-retry and
+request-retry policies, and
 the gateway's pure helpers: `Describe`, the depot-key mapping, `StatusOf`,
 `IsSlowFailure`), run during the image build, which fails on a failing or empty
 run. Python: the fetcher tests drive a scripted stand-in helper (one call per
 run, exit 2/3/4, timeout kill with partial results kept, hostile manifest names,
 unrequested and missing app lines, empty selection, empty manifests, out-of-range
 ids, `helper_outcome` through the live logging chain). Static guards:
-`tests/test_steam_helper_source_guards.py` (session file 0600 from creation) and
-`tests/test_dockerfile.py` (every `dotnet restore` locked). Full suite **2059
-passed, 3 deselected** after the final-review fix wave. gitleaks clean. semgrep:
+`tests/test_steam_helper_source_guards.py` (session file 0600 from creation; the
+depot-key request is retried with `MapDepotKey` outside the retry) and
+`tests/test_dockerfile.py` (every `dotnet restore` locked). Full suite **2104
+passed, 3 deselected** after the #369 fixes (it was 2059 after the final-review fix wave). gitleaks clean. semgrep:
 the repo's `.semgrep/` rules are Python only (0 findings over 118 `.py` files); the C# helper was scanned separately with
 `p/csharp`, 1 finding (`unsafe-path-combine` on the operator-supplied
 `--session-dir`), adjudicated a false positive in the security audit.
@@ -1978,9 +1993,9 @@ the repo's `.semgrep/` rules are Python only (0 findings over 118 `.py` files); 
   - **Deployed 2026-10-08 (merge 87662e0).** First live run, job 46856: logons=1,
     fetched=257, skipped=3000, failed=59 of 1211 (4.9%), not_attempted=0. Parity
     spot-check: 150/150 identical against DepotDownloader-written .shas. #361
-    closes on the following Monday's evidence: `fetch_manifests.done` with
-    `"logons": 1` and `failed` under the 7% alarm, the 06:00 MDT SteamPrefill run
-    ending `END steam prefill ok`, and Kuma 176 UP.
+    is CLOSED (it auto-closed 2026-10-08; the evidence comment was posted
+    2026-10-16). The weekly fetch failures it left are tracked in #369, fixed by the
+    depot-key retry above.
   - The token sits in plain JSON on the persistent mount, as DepotDownloader's
     did; `login` needs a TTY.
   - `THIRD_PARTY_NOTICES.md` does not reach the image (`.dockerignore` drops root

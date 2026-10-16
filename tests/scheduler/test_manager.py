@@ -95,7 +95,7 @@ class TestSchedulerManager:
             enabled=True,
             library_sync_interval_sec=21600,
             validation_sweep_enabled=True,
-            validation_sweep_cron="0 3 * * 0",
+            validation_sweep_cron="0 3 * * sun",
         )
         try:
             await mgr.start()
@@ -111,7 +111,7 @@ class TestSchedulerManager:
             enabled=True,
             library_sync_interval_sec=21600,
             validation_sweep_enabled=False,
-            validation_sweep_cron="0 3 * * 0",
+            validation_sweep_cron="0 3 * * sun",
         )
         try:
             await mgr.start()
@@ -288,7 +288,7 @@ class TestFetchManifestsRegistration:
             enabled=True,
             library_sync_interval_sec=21600,
             fetch_manifests_enabled=True,
-            fetch_manifests_cron="0 5 * * 1",
+            fetch_manifests_cron="0 5 * * tue",
         )
         try:
             await mgr.start()

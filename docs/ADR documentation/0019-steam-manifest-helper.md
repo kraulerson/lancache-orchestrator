@@ -102,7 +102,7 @@ Shape of the result:
 
 ## 4. Consequences
 
-- **One login per run**, replacing 1,211. The Monday job no longer holds the
+- **One login per run**, replacing 1,211. The weekly job (Tuesday 05:00 UTC, Monday 23:00 MDT) no longer holds the
   account in a rate limit, so the SteamPrefill 06:00 MDT run is not refused.
 - **A new .NET component in the image.** The image grows by roughly 11 MiB net
   (about 254 MiB against the 275 MiB limit): +86 MiB for the self-contained
@@ -138,7 +138,7 @@ Shape of the result:
   `docs/deploy/INSTALL.md` §6 requires. No rebuild. Rolling back also restores
   DepotDownloader's 1,211-login behaviour, so it is a fallback, not a steady
   state.
-- **Closure evidence** is expected to be the Monday run after deploy:
+- **Closure evidence** is expected to be the first weekly run after deploy (Tuesday 05:00 UTC, Monday 23:00 MDT):
   `fetch_manifests.done` with `failed` near 0, `"logons": 1` in the agent's
   `manifest_fetch.done` line, the 06:00 MDT SteamPrefill run ending `END steam
   prefill ok`, and Kuma 176 staying UP. #361 closes only on that evidence.
