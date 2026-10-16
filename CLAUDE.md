@@ -146,7 +146,9 @@ or 24 hours past the last commit touching this file.
   87662e0; first live run job 46856 had logons=1 and failed 4.9%; failure alarm at
   7%; rollback tag `dpa-pre-361`). A C# SteamKit2 helper logs in once per weekly
   `fetch_manifests` run instead of 1,211 times (DepotDownloader is removed from the
-  image); closes on the next Monday's evidence. Spec:
+  image). **#361 is CLOSED** (auto-closed 2026-10-08; the evidence comment was
+  posted 2026-10-16); the weekly fetch failures it left are tracked in #369, fixed
+  by a depot-key retry. The weekly fetch runs Tuesday 05:00 UTC (Monday 23:00 MDT). Spec:
   `docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`; plan:
   `docs/superpowers/plans/2026-10-07-steam-manifest-helper.md`; ADR 0019; Feature
   30.

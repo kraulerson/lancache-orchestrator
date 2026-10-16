@@ -19,6 +19,41 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — Steam manifest helper re-sends depot-key requests Steam drops (#369); cron weekdays must be named (UAT 18 B3) — 2026-10-16
+
+- **Root cause (B1, SEV-2).** Steam silently drops about 1% of
+  `ClientGetDepotDecryptionKey` requests: in an instrumented run 20 of 1,988 got no
+  answer within 55 s, while answered ones took 100 ms at p50 and 224 ms at most, so
+  a dropped request is dropped, not slow. `GetDepotKeyAsync` made one attempt,
+  SteamKit2's ~10 s job timeout became a `SteamRequestException`, and `FetchRunner`
+  failed the whole app. Apps need about 12 key requests each (app 24010 needs
+  1,184). At 1% dropped per request, the share of apps with at least one drop is
+  1 - 0.99^12 = 11.4% for a 12-request app; measured, 148 of 1,212 apps (12.2%)
+  failed, and the weekly run hit 13.5%, above the 7% alarm.
+- **Fix.** New `RequestRetry` (`tools/steam_manifest_helper`) sends the request up
+  to 3 times, retrying only a `SteamRequestException`; `SessionLostException` and
+  every other exception propagate at once, and there is no delay because the job
+  timeout already spaces the attempts. `MapDepotKey` stays outside the retry, so an
+  explicit `EResult` refusal is never re-sent. In a scratch build a re-sent request
+  was answered on the second attempt every time (2 of 2, about 0.5 s) and 145 of 148
+  previously failing apps succeeded. xUnit +5 (60 to 65); a source guard in
+  `tests/test_steam_helper_source_guards.py` pins the call shape.
+- **Cron weekday (UAT 18 B3, SEV-3).** APScheduler 3.x counts 0 as Monday, so
+  `fetch_manifests_cron = "0 5 * * 1"` fired on Tuesday while the docs said Monday.
+  Karl kept Tuesday: the default is now `"0 5 * * tue"` (Tuesday 05:00 UTC, Monday
+  23:00 MDT; behaviour unchanged), and `validation_sweep_cron`,
+  `scheduled_prefill_cron` and `fetch_manifests_cron` now reject a day-of-week field
+  containing any digit (`1`, `0-4`, `*/2`, `mon,3`) with a message that says to use
+  day names (`mon`..`sun`). `*` and names, including ranges like `mon-fri`, are
+  accepted. The `SchedulerManager`
+  constructor default matches.
+- **Docs (B2, SEV-3).** The fetch-ratio alarm is Kuma **182**
+  (`job:orch-fetch-manifests`); 176 is `job:steam-prefill`. The 2026-10-08 entry
+  below and the 7% security audit named 176 and are corrected, and the docs that
+  called the weekly fetch "Monday" now say Tuesday 05:00 UTC (Monday 23:00 MDT).
+- **Not done here.** DepotDownloader parity for skipping unowned depots (the licence
+  gate) is filed as a separate issue, #371.
+
 ### Changed — the weekly manifest-fetch alarm goes red above 7% failed, not 10% (#361) — 2026-10-08
 
 - **Measured rate.** The first live run of the one-login helper (job 46856,
@@ -26,7 +61,7 @@ for handoff clarity. Categories are ordered by impact severity.
   not_attempted=0 helper_exit=0 logons=1`, a failure rate of 4.9% (59/1211).
   Failures by kind: 47 `error`, 11 `no_depots`, 1 `not_owned`.
 - **Decision.** Karl lowered the `fetch_manifests_max_failure_ratio` default from
-  0.10 to 0.07 on 2026-10-08, so Kuma 176 goes DOWN above 7% (85 of 1211 or more;
+  0.10 to 0.07 on 2026-10-08, so Kuma 182 (`job:orch-fetch-manifests`) goes DOWN above 7% (85 of 1211 or more;
   84 of 1211 is still UP). Boundary tests pin both sides.
 - **Recurring cause.** 26 of the 47 `error` failures are depot-key timeouts, tracked
   in issue #369, the largest single source of recurring failures.

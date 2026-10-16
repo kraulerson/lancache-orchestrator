@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import warnings
 from functools import cached_property, lru_cache
 from pathlib import Path
@@ -46,6 +47,24 @@ _SPIKE_F_CHUNK_CONCURRENCY = 32
 # env-var failure has `loc=('ORCH_TOKEN',)`, not `('orchestrator_token',)`. Keep
 # in sync with the `orchestrator_token` AliasChoices below (review 2026-06-02).
 _SECRET_FIELD_NAMES = frozenset({"orchestrator_token", "orch_token"})
+
+
+def _checked_cron(name: str, v: str) -> str:
+    """Fail-fast on a malformed cron by constructing the trigger now, and reject a
+    day-of-week field containing any digit (UAT 18 B3). APScheduler 3.x counts 0 as
+    Monday, unlike standard cron (0 = Sunday), so "1" would mean Tuesday while reading
+    as Monday, and "*/2" or "mon,3" are off by one day the same way."""
+    try:
+        CronTrigger.from_crontab(v)
+    except Exception as e:  # apscheduler raises ValueError on bad expressions
+        raise ValueError(f"invalid {name} {v!r}: {e}") from e
+    if re.search(r"\d", v.split()[4]):
+        raise ValueError(
+            f"invalid {name} {v!r}: use day names (mon..sun) in the day-of-week field, "
+            "not digits (also in steps like */2 or lists like mon,3), because "
+            "APScheduler 3.x counts 0 as Monday, unlike standard cron"
+        )
+    return v
 
 
 class Settings(BaseSettings):
@@ -305,10 +324,11 @@ class Settings(BaseSettings):
     # it is a property of the hardware, and the 2026-09-01 incident was a
     # storage change silently invalidating a number nobody could see.
     validate_assumed_chunks_per_sec: float = Field(default=40.0, gt=0)
-    # Manifest-only fetcher (SteamManifestHelper, #361) weekly cron — Monday 05:00 UTC,
-    # offset from the sweep (03/09/15/21) and host prefill crons. 5-field, UTC.
+    # Manifest-only fetcher (SteamManifestHelper, #361) weekly cron — Tuesday 05:00 UTC
+    # (Monday 23:00 MDT), offset from the sweep (03/09/15/21) and host prefill crons.
+    # 5-field, UTC. Day-of-week must be a name: APScheduler 3.x counts 0 as Monday.
     fetch_manifests_enabled: bool = True
-    fetch_manifests_cron: str = "0 5 * * 1"
+    fetch_manifests_cron: str = "0 5 * * tue"
 
     # --- Misc --------------------------------------------------------
     manifest_size_cap_bytes: int = Field(default=134_217_728, gt=0)
@@ -460,31 +480,19 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_sweep_cron(cls, v: str) -> str:
         """Fail-fast on a malformed cron (IS2) by constructing the trigger now."""
-        try:
-            CronTrigger.from_crontab(v)
-        except Exception as e:  # apscheduler raises ValueError on bad expressions
-            raise ValueError(f"invalid validation_sweep_cron {v!r}: {e}") from e
-        return v
+        return _checked_cron("validation_sweep_cron", v)
 
     @field_validator("scheduled_prefill_cron", mode="after")
     @classmethod
     def _validate_scheduled_prefill_cron(cls, v: str) -> str:
         """Fail-fast on a malformed cron by constructing the trigger now."""
-        try:
-            CronTrigger.from_crontab(v)
-        except Exception as e:  # apscheduler raises ValueError on bad expressions
-            raise ValueError(f"invalid scheduled_prefill_cron {v!r}: {e}") from e
-        return v
+        return _checked_cron("scheduled_prefill_cron", v)
 
     @field_validator("fetch_manifests_cron", mode="after")
     @classmethod
     def _validate_fetch_manifests_cron(cls, v: str) -> str:
         """Fail-fast on a malformed fetch_manifests cron by constructing the trigger now."""
-        try:
-            CronTrigger.from_crontab(v)
-        except Exception as e:
-            raise ValueError(f"invalid fetch_manifests_cron {v!r}: {e}") from e
-        return v
+        return _checked_cron("fetch_manifests_cron", v)
 
     @field_validator("orchestrator_token", mode="before")
     @classmethod

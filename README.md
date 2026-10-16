@@ -84,7 +84,7 @@ The bearer token (`orchestrator_token`) is the only required field. Every other 
 | `ORCH_SCHEDULER_ENABLED` | bool | `true` | Disable scheduler subsystem (`/health.scheduler_running` reports `false`, 503) |
 | `ORCH_SCHEDULER_LIBRARY_SYNC_INTERVAL_SEC` | int (60..86400) | `21600` | Library_sync schedule cadence (default 6 h) |
 | `ORCH_VALIDATION_SWEEP_ENABLED` | bool | `true` | Weekly F13 validation sweep (eviction-drift detection) |
-| `ORCH_VALIDATION_SWEEP_CRON` | 5-field cron (UTC) | `0 3 * * 0` | Sweep schedule (default Sundays 03:00 UTC) |
+| `ORCH_VALIDATION_SWEEP_CRON` | 5-field cron (UTC) | `0 3,9,15,21 * * *` | Sweep schedule (default every 6 h at 03/09/15/21 UTC). Name any weekday (`mon`..`sun`); digits in the day-of-week field are rejected at boot (APScheduler counts 0 as Monday) |
 | `ORCH_SWEEP_BATCH_SIZE` | int (≥1) | `10` | Games validated per batch during a sweep |
 | `ORCH_JOB_MAX_RUNTIME_SEC` | float (≥0) | `21600` (6 h) | Per-job wall-clock budget; a wedged handler is cancelled + the job failed (self-heal). `0` disables |
 | `ORCH_STEAM_LICENSE_WAIT_SEC` | float | `60` | How long the worker waits for the Steam license list before signalling a retryable timeout |

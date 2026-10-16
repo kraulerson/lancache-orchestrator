@@ -7,11 +7,11 @@
 **Auditor:** self-review (Senior Security Engineer persona) + ruff + mypy + full suite
 **Phase:** 2 (Construction), Build Loop step 2.4
 
-<!-- Last Updated: 2026-10-08 -->
+<!-- Last Updated: 2026-10-16 -->
 
 ## Scope
 
-Karl lowered the Kuma 176 alarm threshold from 10% to 7% after the first live run of the one-login Steam manifest helper (#361) measured 4.9% (59/1211, job 46856). The change is one `float` default (bounded `0.0 <= x <= 1.0` by the existing `Field`) plus tests and docs.
+Karl lowered the Kuma 182 (`job:orch-fetch-manifests`) alarm threshold from 10% to 7% after the first live run of the one-login Steam manifest helper (#361) measured 4.9% (59/1211, job 46856). The change is one `float` default (bounded `0.0 <= x <= 1.0` by the existing `Field`) plus tests and docs.
 
 ## Audit findings
 

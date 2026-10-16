@@ -776,6 +776,49 @@ def test_fetch_manifests_failure_ratio_defaults_to_seven_percent():
     assert s.fetch_manifests_max_failure_ratio == 0.07
 
 
+_CRON_FIELDS = ("validation_sweep_cron", "scheduled_prefill_cron", "fetch_manifests_cron")
+
+
+def test_fetch_manifests_cron_default_fires_on_a_tuesday():
+    """UAT 18 B3: APScheduler 3.x counts 0 as Monday, so the old default "0 5 * * 1"
+    fired on Tuesday while reading as Monday. Karl kept Tuesday and named it."""
+    from datetime import UTC, datetime
+
+    from apscheduler.triggers.cron import CronTrigger
+
+    s = Settings(orchestrator_token="a" * 32)
+    assert s.fetch_manifests_cron == "0 5 * * tue"
+    trigger = CronTrigger.from_crontab(s.fetch_manifests_cron, timezone="UTC")
+    fire = trigger.get_next_fire_time(None, datetime(2026, 10, 16, tzinfo=UTC))
+    assert fire is not None
+    assert fire.strftime("%A %H:%M") == "Tuesday 05:00"
+
+
+@pytest.mark.parametrize("field", _CRON_FIELDS)
+@pytest.mark.parametrize("dow", ["1", "0-4", "1,3", "6", "*/2", "*/3", "mon,3"])
+def test_numeric_cron_weekday_is_rejected_with_a_day_name_hint(field, dow):
+    with pytest.raises(ValidationError) as exc:
+        Settings(orchestrator_token="a" * 32, **{field: f"0 5 * * {dow}"})
+    message = str(exc.value)
+    assert field in message
+    assert "day names" in message
+    assert "mon" in message
+    assert "APScheduler" in message
+
+
+@pytest.mark.parametrize("field", _CRON_FIELDS)
+@pytest.mark.parametrize("dow", ["*", "mon", "tue", "mon-fri", "tue,thu"])
+def test_named_or_wildcard_cron_weekday_is_accepted(field, dow):
+    s = Settings(orchestrator_token="a" * 32, **{field: f"0 5 * * {dow}"})
+    assert getattr(s, field) == f"0 5 * * {dow}"
+
+
+def test_sweep_and_prefill_cron_defaults_still_load():
+    s = Settings(orchestrator_token="a" * 32)
+    assert s.validation_sweep_cron == "0 3,9,15,21 * * *"
+    assert s.scheduled_prefill_cron == "45 3,9,15,21 * * *"
+
+
 def test_manifest_fetcher_settings_env_override(monkeypatch):
     monkeypatch.setenv("ORCH_MANIFEST_FETCH_TIMEOUT_SEC", "60")
     monkeypatch.setenv("ORCH_DEPOTDOWNLOADER_CONFIG_DIR", "/custom/dd")
