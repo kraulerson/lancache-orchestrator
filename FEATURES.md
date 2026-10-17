@@ -1716,7 +1716,7 @@ semgrep/gitleaks/ruff/mypy clean.
 ## Feature 28: keys_zone Alarm (#346-adjacent)
 
 **Phase Built:** 2 (Construction)
-**Status:** Complete — pending live verification (2026-09-18)
+**Status:** Complete — live-verified 2026-09-19 (merged as PR #347). Both schedules fired unattended on real slots, and monitor 220's eviction DOWN path was exercised deliberately while 218 and 219 stayed green.
 
 **Summary:** The cache index now has an alarm. The 2026-07-31 mass deletion was
 nginx's cache-manager evicting live game data from a ~94%-full `keys_zone`, and
@@ -1807,7 +1807,7 @@ gitleaks clean.
 ## Feature 29: Retire the Unreachable 'failed' Status (#316, #317)
 
 **Phase Built:** 2 (Construction)
-**Status:** Complete — pending deploy and live verification (2026-09-21)
+**Status:** Complete — deployed and live-verified 2026-09-23. Migration 0018 applied on LXC 1105 at 20:46:49 UTC: `failed` went from 19 to 0 and `blocked` from 0 to 19. Re-checked 2026-10-16: still 0 `failed`, 19 `blocked`.
 
 **Summary:** 19 owned games were permanently stuck at `status='failed'`, a state
 no code can produce and no code can clear. Migration 0018 retires them to
