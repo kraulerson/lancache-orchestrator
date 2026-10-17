@@ -19,6 +19,56 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Documentation — the Bible described a Steam login, CLI commands, an API envelope and container hardening that do not exist — 2026-10-16
+
+- **`PROJECT_BIBLE.md` §3.1, §3.2, §3.3, §3.4 rewritten.** They still described
+  ADR-0001's single process with a gevent `steam-next` thread and "no sidecars".
+  That design was replaced by the control-plane/agent split in PRs #174–#199, and
+  the Steam worker was deleted (ADR-0013). Nothing in `src/` imports `steam-next`
+  or `gevent`. The sections now record:
+  - the two processes and the single job worker;
+  - SteamPrefill and the one-login manifest helper (ADR-0019) as the only
+    components that hold a Steam login, plus the session-free Steam code that
+    still runs in the control plane;
+  - the ADRs actually issued up to 0019, and what became of the six that were
+    scheduled at Phase 1 and never written;
+  - the pinned stack, which now includes the .NET helper.
+- **`PROJECT_BIBLE.md` §3.5 and §7.3 no longer claim hardening that is not live.**
+  `docker inspect` on LXC 1105 shows a writable root filesystem, no dropped
+  capabilities, no `no-new-privileges`, and the token supplied as the `ORCH_TOKEN`
+  env var rather than a secret file. Only non-root holds. Tracked in #374. The
+  token-rotation steps now name the real files on both hosts. §10.5 and §11.1
+  still state the original target and are not edited here; #374 records them.
+- **`PROJECT_BIBLE.md` §5.1 records migration 0018** and corrects:
+  - the table count, from eight entity tables to eleven;
+  - the list of `jobs` kinds;
+  - the migrations that created `prefill_exclusions` and `steam_app_info`.
+- **`PROJECT_BIBLE.md` §7.2 no longer documents `orchestrator-cli auth steam`.**
+  The section now names the components that hold Steam sessions and the helper's
+  exit codes and `login` renewal path. The Epic rules no longer claim things the
+  code does not do:
+  - an access token is not persisted;
+  - no hashed token is logged;
+  - there is no startup check of session-file modes.
+- **`PROJECT_BIBLE.md` §9 matches the code.**
+  - The CLI table is taken from `orchestrator-cli --help`. `auth steam` and
+    `db rollback` are gone, and `cache`, `selection`, `game list`, `game purge`
+    and `status` are added.
+  - Exit codes 4 and 130 are noted as not implemented, and exit 2 also covers
+    Click's usage errors.
+  - Output uses `✓`/`⚠`/`✗` glyphs, not `[OK]`/`[ERROR]`.
+  - The REST surface is 25 routes, not 12, and `/api/v1/stats` does not exist.
+  - Mutations return plain shapes such as `{"job_id": N}`; the DQ6
+    `{"ok","job_id","message"}` envelope promised to Game_shelf was never built.
+  - Unknown fields return 400, not 422.
+  - The docs pages are loopback-only and exempt from the bearer.
+  - The status page's real polling endpoints are listed.
+  - The CORS variable is `ORCH_CORS_ORIGINS`.
+- **`FEATURES.md` Features 28 and 29** no longer read "pending live
+  verification". Both were verified live: on 2026-09-19 and 2026-09-23.
+- **UAT 18 triage, B4 row:** records homelab's confirmation that the auto-update
+  idle guard is installed and proven, plus the two follow-ups homelab owns.
+
 ### Fixed — Steam manifest helper re-sends depot-key requests Steam drops (#369); cron weekdays must be named (UAT 18 B3) — 2026-10-16
 
 - **Root cause (B1, SEV-2).** Steam silently drops about 1% of
