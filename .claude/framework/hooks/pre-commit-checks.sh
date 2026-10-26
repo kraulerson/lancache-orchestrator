@@ -6,7 +6,14 @@ source "$SCRIPT_DIR/_helpers.sh" 2>/dev/null || exit 1
 
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
-echo "$COMMAND" | grep -qE '\bgit\b.*\bcommit\b' || exit 0
+# A _helpers.sh older than this hook (a framework sync left half done) lacks the
+# detector: judge by the text rule then, never let the commit through unchecked.
+if type command_runs_git_commit >/dev/null 2>&1; then
+  command_runs_git_commit "$COMMAND" || exit 0
+else
+  echo "NOTE — the framework's _helpers.sh is older than pre-commit-checks.sh; run the framework sync. Judging commits by the text rule until then." >&2
+  echo "$COMMAND" | grep -qE '\b[Gg][Ii][Tt]\b.*\bcommit\b' || exit 0
+fi
 
 ERRORS=""
 STAGED=$(git diff --cached --name-only 2>/dev/null || true)
@@ -15,6 +22,7 @@ STAGED=$(git diff --cached --name-only 2>/dev/null || true)
 SOURCE_CHANGED=false
 for f in $STAGED; do
   is_doc_or_config "$f" && continue
+  is_framework_managed "$f" && continue
   is_source_file "$f" && { SOURCE_CHANGED=true; break; }
 done
 [ "$SOURCE_CHANGED" = false ] && exit 0
