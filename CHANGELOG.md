@@ -19,6 +19,17 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Security — certifi trusted emSign roots with compromised intermediate keys (PYSEC-2026-4320) — 2026-10-25
+
+The CI dependency audit began failing on `main`'s pins with two newly disclosed advisories. It surfaced on PR #377, whose diff touches no requirements file.
+
+- **Security: `certifi` 2026.2.25 → 2026.10.23** in both lockfiles.
+  - **PYSEC-2026-4320** (alias GHSA-6q48-6c7w-9gw2): *"certifi bundles emSign root CAs with compromised intermediate CA keys"*, fixed in 2026.10.19.
+  - `certifi` is transitive via `httpx`, and it is the trust store for the orchestrator's HTTPS calls. Those include Epic's OAuth token, library, launcher and catalog services (`core/settings.py`) and the Steam store API (`platform/steam/store.py`). So until the fix is deployed, a certificate chaining to a compromised intermediate would be accepted on those calls.
+  - **The running images on both hosts still carry 2026.2.25.** The fix reaches production only when both planes are rebuilt and redeployed.
+- **Infrastructure: `setuptools` 84.0.0 → 84.2.1** in `requirements-dev.txt` only, for **GHSA-xmj3-9gf7-h52w** (LOW): a Windows path escape via `namespace_packages.txt` during legacy wheel installation. It is not shipped at runtime, and it does not apply on Linux or macOS.
+- **Infrastructure: fixed by recompiling,** as with `anyio` (#349): `pip-compile --upgrade-package certifi` on both lockfiles, and `--upgrade-package setuptools` on the dev file with `--allow-unsafe` kept, so the `pip` and `setuptools` pins survive. No other pin moved.
+
 ### Documentation — the Bible described a Steam login, CLI commands, an API envelope and container hardening that do not exist — 2026-10-16
 
 - **`PROJECT_BIBLE.md` §3.1, §3.2, §3.3, §3.4 rewritten.** They still described
