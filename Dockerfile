@@ -1,5 +1,5 @@
 # ── Stage 1: builder ─────────────────────────────────────────────
-FROM python:3.12-slim@sha256:520153e2deb359602c9cffd84e491e3431d76e7bf95a3255c9ce9433b76ab99a AS builder
+FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -43,7 +43,7 @@ RUN case "$TARGETARCH" in amd64) RID=linux-x64;; arm64) RID=linux-arm64;; *) ech
  && cp -r licenses /steam-manifest-helper/licenses
 
 # ── Stage 2: runtime ────────────────────────────────────────────
-FROM python:3.12-slim@sha256:520153e2deb359602c9cffd84e491e3431d76e7bf95a3255c9ce9433b76ab99a AS runtime
+FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS runtime
 
 ARG GIT_SHA=unknown
 ENV GIT_SHA=${GIT_SHA}
