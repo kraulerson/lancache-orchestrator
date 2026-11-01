@@ -26,7 +26,7 @@ RUN /build/.venv/bin/pip install --no-cache-dir --no-deps .
 # a failing helper test fails the image build. Published self-contained but NOT
 # single-file and NOT trimmed, so SteamKit2.dll (LGPL-2.1) stays a separate,
 # replaceable file.
-FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0@sha256:e70cdb7f80b0348f5cb85f19a8f670fca061f033d57eed12fa003d58b0e06317 AS helper
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0@sha256:de4fe90a98845d75910b9769662465c84de1a934665c431279d1382b2bddc02b AS helper
 ARG TARGETARCH
 WORKDIR /src
 COPY tools/steam_manifest_helper/ ./
