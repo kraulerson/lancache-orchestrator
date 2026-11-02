@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# changelog-sync-check.sh — PreToolUse (Write|Edit) advisory hook
+# changelog-sync-check.sh — PreToolUse (Bash|Write|Edit) advisory hook
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/_helpers.sh" 2>/dev/null || exit 1
 source "$SCRIPT_DIR/_preflight.sh"
 
 preflight_init
+preflight_bash_as_writes all
 [ -z "$_PF_FILE_PATH" ] && exit 0
 
 CHANGELOG=$(get_branch_config_value '.changelogFile')
@@ -15,7 +16,13 @@ echo "$_PF_FILE_PATH" | grep -q "$CHANGELOG" || exit 0
 HASH=$(get_project_hash)
 MARKER="/tmp/.claude_changelog_synced_${HASH}"
 if [ -f "$MARKER" ]; then
-  AGE=$(( $(date +%s) - $(stat -f %m "$MARKER" 2>/dev/null || stat -c %Y "$MARKER" 2>/dev/null || echo 0) ))
+  # GNU form first (#10): GNU `stat -f` is file-system status — it prints a block on
+  # stdout and fails, so the fallback's epoch was appended to it. BSD `stat -c` fails
+  # with nothing on stdout, so this order yields a clean epoch on both.
+  MTIME=$(stat -c %Y "$MARKER" 2>/dev/null || stat -f %m "$MARKER" 2>/dev/null || echo 0)
+  # Only a plain number reaches the arithmetic; anything else counts as stale.
+  case "$MTIME" in ''|*[!0-9]*) MTIME=0 ;; esac
+  AGE=$(( $(date +%s) - MTIME ))
   [ "$AGE" -lt 3600 ] && exit 0
 fi
 

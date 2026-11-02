@@ -33,6 +33,14 @@ case "$SOURCE" in
           "/tmp/.claude_plan_closed_${HASH}" \
           "/tmp/.claude_changelog_synced_${HASH}" \
           "/tmp/.claude_c7_degraded_${HASH}"
+    # The approval render record only when another session made it: it is bound to its
+    # session_id, and a startup that continues the same session (a reply sent with
+    # `claude -p --resume`) must still be able to pick (approval design B, D6).
+    SHOWN="/tmp/.claude_approval_shown_${HASH}"
+    if [ -f "$SHOWN" ]; then
+      SID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+      [ -n "$SID" ] && [ "$(jq -r '.session_id // empty' "$SHOWN" 2>/dev/null || echo "")" = "$SID" ] || rm -f "$SHOWN"
+    fi
     rm -f "/tmp/.claude_c7_${HASH}_"* 2>/dev/null || true
     rm -f "/tmp/.claude_stop_errors_hash_${HASH}"* 2>/dev/null || true
     git rev-parse HEAD > "/tmp/.claude_session_start_${HASH}" 2>/dev/null || true
@@ -59,13 +67,12 @@ if ! check_jq; then
 fi
 
 # Superpowers
+# Read where this session's settings live ($CLAUDE_CONFIG_DIR when set), so a
+# separate config folder is not reported from ~/.claude's plugins.
 SP_STATUS="verified"
-if [ -f "$HOME/.claude/settings.json" ] && check_jq; then
-  SP=$(jq -r '.enabledPlugins["superpowers@claude-plugins-official"] // false' "$HOME/.claude/settings.json" 2>/dev/null || echo "false")
-  if [ "$SP" != "true" ]; then
-    SP_STATUS="MISSING"
-    WARNINGS="${WARNINGS}\n  ! Superpowers plugin NOT installed. Run: claude > /plugins > search superpowers > install"
-  fi
+if check_jq && ! superpowers_enabled; then
+  SP_STATUS="MISSING"
+  WARNINGS="${WARNINGS}\n  ! Superpowers plugin NOT installed; source edits stay blocked until it is. Install: claude plugin install --scope user superpowers@claude-plugins-official (then start a new session)"
 fi
 
 # Context7
@@ -81,7 +88,11 @@ else
 fi
 
 # --- Discovery review (>90 days) ---
+# Only for a project init.sh made: in a Solo-adopted one (manifest adoption.adopted)
+# `init.sh --reconfigure` would rewrite the whole manifest, dropping the adoption record
+# and the project's sourceExtensions; Solo's assessment is its review (dogfood-3 row 22).
 LR=$(get_manifest_value '.discovery.lastReviewDate')
+[ "$(get_manifest_value '.adoption.adopted')" = "true" ] && LR=""
 if [ -n "$LR" ]; then
   NOW=$(date +%s)
   THEN=$(date -j -f "%Y-%m-%d" "$LR" +%s 2>/dev/null || date -d "$LR" +%s 2>/dev/null || echo "$NOW")
@@ -125,8 +136,15 @@ CTX=""
 
 # --- Output ---
 FW_VER=$(cat "$FRAMEWORK_CLONE/FRAMEWORK_VERSION" 2>/dev/null || echo "?")
+# Every source, compact included, is told the time (#30); not by a _helpers.sh older than
+# this hook (a sync left half done), which must not stop the directive.
+NOW_LINE=""
+type cdf_now_line >/dev/null 2>&1 && NOW_LINE=$(cdf_now_line)
 cat << CTXEOF
-FRAMEWORK COMPLIANCE DIRECTIVE: Your primary obligation is to follow all framework hooks and rules exactly. Never skip, circumvent, rationalize past, or fake compliance -- even if a change seems simple. When a hook blocks, follow its instructions. Markers are created automatically. Violation is session failure.
+FRAMEWORK COMPLIANCE DIRECTIVE: Your primary obligation is to follow all framework hooks and rules exactly. Never skip, circumvent, rationalize past, or fake compliance -- even if a change seems simple. When a hook blocks, follow its instructions. Markers are created by the framework or by the sanctioned scripts mark-plan-closed.sh and mark-plan-active.sh; never create one yourself. A commit is approved only when the user answers a question you recorded in .claude/pending-approval.json (the enforce-evaluate block message gives the shape); then commit with a lone \`git commit -m "…"\` as its own Bash call — no cd prefix (cd in an earlier call), no chaining, pipes or redirection, no -a, no paths, no --amend. Before you write a relative day (today, tomorrow, next week) or judge a deadline, use the latest \`Now:\` line, not memory. Violation is session failure.
+CTXEOF
+[ -n "$NOW_LINE" ] && printf "\n%s\n" "$NOW_LINE"
+cat << CTXEOF
 
 ZONES ARMED:
   # Discovery      -- Context7 ${C7_STATUS}, Superpowers ${SP_STATUS}

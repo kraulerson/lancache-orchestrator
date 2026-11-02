@@ -1,12 +1,12 @@
 # Runtime dependencies — lancache_orchestrator
 # Pin to exact versions; pip-compile generates hashes in requirements.txt
 fastapi==0.141.1
-uvicorn[standard]==0.52.4
+uvicorn[standard]==0.54.0
 httpx[http2]==0.28.1
 aiosqlite==0.22.1
 APScheduler==3.11.3
 structlog==26.1.0
-pydantic==2.13.4
+pydantic==2.13.5
 pydantic-settings==2.15.0
 click==8.4.2
 # Transitive from pydantic-settings; pinned here to override CVE GHSA-mf9w-mj56-hr94 in 1.2.1.

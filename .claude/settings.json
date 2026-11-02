@@ -14,20 +14,18 @@
       "Bash(rm -rf /)",
       "Bash(rm -rf /*)",
       "Bash(wget * | bash)",
+      "Edit(/.claude/approvals.jsonl)",
       "Edit(/.claude/framework/**)",
       "Edit(/.claude/manifest.json)",
       "Edit(/.claude/settings.json)",
       "Edit(/.claude/settings.local.json)",
+      "Edit(/.git/config)",
+      "Edit(/.git/hooks/**)",
+      "Edit(/.git/info/**)",
       "Edit(//private/tmp/.claude_*)",
       "Edit(//tmp/.claude_*)",
       "Read(./.env)",
-      "Read(./.env.*)",
-      "Write(/.claude/framework/**)",
-      "Write(/.claude/manifest.json)",
-      "Write(/.claude/settings.json)",
-      "Write(/.claude/settings.local.json)",
-      "Write(//private/tmp/.claude_*)",
-      "Write(//tmp/.claude_*)"
+      "Read(./.env.*)"
     ]
   },
   "hooks": {
@@ -76,16 +74,11 @@
           },
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/marker-guard.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "Write|Edit|NotebookEdit",
-        "hooks": [
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/enforce-superpowers.sh"
+          },
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/enforce-superpowers.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/marker-guard.sh"
           },
           {
             "type": "command",
@@ -138,6 +131,10 @@
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/compliance-reinforce.sh"
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/framework/hooks/record-approval.sh"
           }
         ]
       }
