@@ -1,4 +1,5 @@
-"""Parse DepotDownloader's raw .manifest (SteamKit2 ContentManifestPayload) ->
+"""Parse a raw .manifest as SteamKit2's DepotManifest.SaveToFile writes it (by
+SteamManifestHelper since #361, by DepotDownloader before; ContentManifestPayload) ->
 chunk SHA1 hex set. Sections are [u32 magic][u32 len][protobuf]; the payload
 (magic 0x71F617D0) holds repeated FileMapping (field 1), each with repeated
 ChunkData (field 6), each whose sha (field 1) is 20 raw bytes. Pure stdlib; a

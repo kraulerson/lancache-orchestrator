@@ -47,14 +47,17 @@
     "validate-timeout-recalibration",
     "sweep-pass-marker",
     "313-heartbeat-delivery-gates-dedupe-stamp",
-    "keys-zone-alarm"
+    "keys-zone-alarm",
+    "cache-truth-terminal-states",
+    "steam-manifest-helper",
+    "fetch-manifests-ratio-7pct"
   ],
-  "features_since_last_test": 1,
+  "features_since_last_test": 0,
   "features_since_last_health_check": 2,
   "test_interval": 2,
-  "last_test_session": "2026-09-18",
+  "last_test_session": "2026-10-16",
   "testing_required": false,
   "tester_count": 1,
   "bug_tracker": "github_issues",
-  "sessions_completed": 19
+  "sessions_completed": 21
 }

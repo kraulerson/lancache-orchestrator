@@ -113,3 +113,44 @@ def test_the_nosemgrep_suppression_names_the_fully_qualified_rule_id():
 
     assert len(suppressed) == 1, "expected exactly one suppressed import"
     assert "semgrep.no-urllib-on-main-loop" in suppressed[0]
+
+
+# --- #362: the message argument must not be able to break "Never raises" ---
+
+
+@pytest.mark.parametrize(
+    ("msg", "sent"),
+    [(None, ""), (42, "42")],
+    ids=["none", "int"],
+)
+def test_a_non_string_message_still_delivers_the_heartbeat(msg, sent):
+    """#362. `len(msg)` ran outside the try, so a None message raised TypeError
+    out of a function documented as "Never raises". No caller passes one today,
+    but if one did inside `alert()` the exception would reach the fanotify loop
+    and kill the guard. A heartbeat with an odd message is still a heartbeat:
+    dropping it would turn a cosmetic slip into a false DOWN."""
+    opener, calls = _recorder()
+    assert push("http://kuma/push/abc", "up", msg, opener=opener) is True
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(calls[0]).query, keep_blank_values=True)
+    assert query["msg"] == [sent]
+
+
+def test_a_message_that_cannot_be_rendered_reports_undelivered_and_never_raises():
+    """The contract is structural: whatever the message is, push() returns."""
+
+    class Unprintable:
+        def __str__(self):
+            raise RuntimeError("cannot render")
+
+    opener, calls = _recorder()
+    assert push("http://kuma/push/abc", "up", Unprintable(), opener=opener) is False
+    assert calls == []
+
+
+def test_a_non_string_url_reports_undelivered_and_never_raises():
+    """#362's other half: the disable check called `url.strip()` outside the try
+    too. Config values are always strings today; the contract must not depend on
+    that staying true."""
+    opener, calls = _recorder()
+    assert push(12345, "up", "fine", opener=opener) is False
+    assert calls == []

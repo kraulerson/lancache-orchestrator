@@ -1,7 +1,7 @@
-"""fetch_manifests job handler — trigger the agent's DepotDownloader manifest-only
-fetch (closes the validation-coverage gap). The agent self-enumerates the cached
-app set; this handler dispatches, logs the tally, and hands it back so the worker's
-Uptime Kuma heartbeat can carry it.
+"""fetch_manifests job handler — trigger the agent's manifest-only fetch through
+the one-login SteamManifestHelper (#361; closes the validation-coverage gap). The
+agent self-enumerates the cached app set; this handler dispatches, logs the tally,
+and hands it back so the worker's Uptime Kuma heartbeat can carry it.
 
 UAT-14 #294: the tally used to be logged and discarded, so the job recorded
 `succeeded` while 669 of 1170 apps failed and the failures lived only in the agent's

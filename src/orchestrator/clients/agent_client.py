@@ -246,8 +246,8 @@ class AgentClient:
         """Trigger a manifest-only fetch run on the agent (it self-enumerates the
         cached app set; no app-id list crosses the wire). POST + poll to done.
         Uses a 6-hour poll ceiling (fetch_manifests visits every cached app via
-        DepotDownloader; a full library can take hours — the default 2h ceiling
-        would time out mid-run on a large library)."""
+        the Steam manifest helper; a full library can take hours — the default 2h
+        ceiling would time out mid-run on a large library)."""
         return await self._post_then_poll("/v1/steam/fetch-manifests", {}, poll_timeout=21600.0)
 
     async def stat(self, hashes: list[str]) -> dict[str, int]:

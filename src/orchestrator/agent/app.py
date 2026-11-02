@@ -23,7 +23,7 @@ from orchestrator.api.middleware import (
 )
 from orchestrator.core.net import detect_non_loopback_bind
 from orchestrator.core.settings import Settings, get_settings
-from orchestrator.platform.steam.manifest_fetcher import DepotDownloaderManifestFetcher
+from orchestrator.platform.steam.manifest_fetcher import SteamManifestFetcher
 from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
 from orchestrator.validator.disk_stat import shutdown_cache_stat_executor
 
@@ -76,15 +76,13 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
                 timeout_sec=settings.steam_prefill_timeout_sec,
             )
         if not hasattr(app.state, "manifest_fetcher"):
-            app.state.manifest_fetcher = DepotDownloaderManifestFetcher(
-                binary=settings.depotdownloader_binary,
+            app.state.manifest_fetcher = SteamManifestFetcher(
+                binary=settings.steam_manifest_helper_binary,
                 config_dir=settings.depotdownloader_config_dir,
                 steam_config_dir=settings.steam_prefill_config_dir,
                 archive_dir=settings.steam_manifest_archive_dir,
-                delay_sec=settings.manifest_fetch_delay_sec,
                 username=settings.steam_username,
-                max_retries=settings.manifest_fetch_max_retries,
-                retry_backoff_sec=settings.manifest_fetch_retry_backoff_sec,
+                timeout_sec=settings.manifest_fetch_timeout_sec,
                 manifest_cache_dir=settings.steam_manifest_cache_dir,
             )
         interval = settings.manifest_archive_sync_interval_sec
@@ -136,15 +134,13 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
         # ORCH_STEAM_PREFILL_TIMEOUT_SEC completely inert.
         timeout_sec=settings.steam_prefill_timeout_sec,
     )
-    app.state.manifest_fetcher = DepotDownloaderManifestFetcher(
-        binary=settings.depotdownloader_binary,
+    app.state.manifest_fetcher = SteamManifestFetcher(
+        binary=settings.steam_manifest_helper_binary,
         config_dir=settings.depotdownloader_config_dir,
         steam_config_dir=settings.steam_prefill_config_dir,
         archive_dir=settings.steam_manifest_archive_dir,
-        delay_sec=settings.manifest_fetch_delay_sec,
         username=settings.steam_username,
-        max_retries=settings.manifest_fetch_max_retries,
-        retry_backoff_sec=settings.manifest_fetch_retry_backoff_sec,
+        timeout_sec=settings.manifest_fetch_timeout_sec,
         manifest_cache_dir=settings.steam_manifest_cache_dir,
     )
     app.include_router(health.router)

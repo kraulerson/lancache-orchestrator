@@ -1,5 +1,7 @@
 # CLAUDE.md — lancache_orchestrator
 
+When you finish a task, hit a blocker, or need a decision, send your TLDR (status, options, recommendation, blockers, context headroom) to @Maestro using send-message.
+
 ## Project Identity
 - **Project:** lancache_orchestrator
 - **Description:** Orchestrator to verify lancache is updating all games correctly
@@ -32,9 +34,13 @@ or 24 hours past the last commit touching this file.
   drivers) on the NAS beside lancache itself. See
   `docs/deploy/lxc-cutover-runbook.md` and the migration runbooks under
   `docs/superpowers/`.
-- **Not yet released:** all 134 `CHANGELOG.md` entries sit under `[Unreleased]`;
+- **Not yet released:** all 164 `CHANGELOG.md` entries sit under `[Unreleased]`;
   no version has been tagged.
-- **Tests:** 1867 passing (3 deselected). Run them as
+- **Tests:** 2043 passing (3 deselected) as of 2026-10-07, after the #361 helper work.
+  The long-stale 1867 figure here caused the UAT-17 automated-suite agent to
+  compute a wrong delta before it was corrected — quoting a number nobody
+  re-derives is how it spreads. Re-derive it rather than trusting this line.
+  Run them as
   `PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest` — the PATH prefix is
   required, or `tests/test_licenses.py` false-fails on a missing `pip-licenses`
   binary that is installed in `.venv/bin` but not otherwise on PATH. Bare `python`
@@ -114,9 +120,17 @@ or 24 hours past the last commit touching this file.
   unknown` — rather than extrapolating a falling count into a reassuring
   "never", which the spec calls the most dangerous output the function could
   give. That path was previously covered only by a unit test.
-  **Still unproven: monitor 220 actually going DOWN.** No eviction or mode-000
-  alert has fired since the promotion, so the alarm path remains tests-only —
-  the same shape of gap #317 tracks for `record_job_outcome()`.
+  **Monitor 220's DOWN path is now proven too (2026-09-19 23:07).** Exercised
+  deliberately: 12 files named `deadbeef0000000000000000000000NN` created and
+  `rm`-ed inside `/volume1/keyszone-alarm-test` as root **inside the container**
+  (`karl` cannot write `/volume1`). A scratch directory outside the cache tree
+  works because fanotify uses `FAN_MARK_FILESYSTEM` and `handle_delete()` filters
+  only on the filename regex, with no path filter. Result: actor `other` →
+  counts toward eviction → `ALERT eviction: cache eviction detected (10
+  deletes/60s) by other`; monitor 220 went `status=0` then latched
+  `cache loss alerted 6s ago; latched for 3600s`; deletes 11 and 12 were
+  cooldown-suppressed. **218 and 219 stayed green throughout**, which is the
+  direct proof the two-monitor split was right.
   **The zone is still provisioned beyond what the NAS has RAM to hold** —
   `10000m` needs ~10 GiB on a 15.4 GiB host carrying an 8 GiB agent limit, so the
   host OOMs before the index fills (**issue #346**, out of scope for the alarm
@@ -128,6 +142,16 @@ or 24 hours past the last commit touching this file.
   `starlette` and `uvicorn`, so it is fixed by recompiling rather than editing —
   `pip-compile --upgrade-package anyio`, keeping `--allow-unsafe` on the dev file
   or the recompile also drops the `pip` and `setuptools` pins.
+- **#361 (one-login Steam manifest helper) is DEPLOYED as of 2026-10-08** (merge
+  87662e0; first live run job 46856 had logons=1 and failed 4.9%; failure alarm at
+  7%; rollback tag `dpa-pre-361`). A C# SteamKit2 helper logs in once per weekly
+  `fetch_manifests` run instead of 1,211 times (DepotDownloader is removed from the
+  image). **#361 is CLOSED** (auto-closed 2026-10-08; the evidence comment was
+  posted 2026-10-16); the weekly fetch failures it left are tracked in #369, fixed
+  by a depot-key retry. The weekly fetch runs Tuesday 05:00 UTC (Monday 23:00 MDT). Spec:
+  `docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`; plan:
+  `docs/superpowers/plans/2026-10-07-steam-manifest-helper.md`; ADR 0019; Feature
+  30.
 
 **Authoritative sources — prefer these over this summary, which is a snapshot:**
 `FEATURES.md` (what exists) · `CHANGELOG.md` (what changed) · `PROJECT_BIBLE.md`

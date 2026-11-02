@@ -48,17 +48,20 @@ def push(url, status, msg="", opener=None):
 
     Returns:
         True if the monitor accepted the push, or if no URL is configured -- a
-        deliberate disable is nothing to retry. False only when a send was
-        attempted and did not arrive.
+        deliberate disable is nothing to retry. False when a send was attempted
+        and did not arrive, or when the url or message could not be made into a
+        request at all.
     """
-    if not url or not url.strip():
-        return True
-
-    trimmed = msg[-MSG_MAX_CHARS:] if len(msg) > MSG_MAX_CHARS else msg
-    query = urllib.parse.urlencode({"status": status, "msg": trimmed})
-    target = f"{url.strip()}?{query}"
-
     try:
+        # Everything is inside the try, because "Never raises" has to hold for
+        # the url and message too (#362). The message is rendered with str(): a
+        # None or int still sends as text, since dropping the heartbeat would
+        # read as a false DOWN.
+        if not url or not url.strip():
+            return True
+        text = "" if msg is None else str(msg)
+        query = urllib.parse.urlencode({"status": status, "msg": text[-MSG_MAX_CHARS:]})
+        target = f"{url.strip()}?{query}"
         open_url = opener or urllib.request.urlopen
         with open_url(target, timeout=TIMEOUT_SEC) as resp:
             return 200 <= int(resp.status) < 400

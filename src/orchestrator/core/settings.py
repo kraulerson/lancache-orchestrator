@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import warnings
 from functools import cached_property, lru_cache
 from pathlib import Path
@@ -46,6 +47,24 @@ _SPIKE_F_CHUNK_CONCURRENCY = 32
 # env-var failure has `loc=('ORCH_TOKEN',)`, not `('orchestrator_token',)`. Keep
 # in sync with the `orchestrator_token` AliasChoices below (review 2026-06-02).
 _SECRET_FIELD_NAMES = frozenset({"orchestrator_token", "orch_token"})
+
+
+def _checked_cron(name: str, v: str) -> str:
+    """Fail-fast on a malformed cron by constructing the trigger now, and reject a
+    day-of-week field containing any digit (UAT 18 B3). APScheduler 3.x counts 0 as
+    Monday, unlike standard cron (0 = Sunday), so "1" would mean Tuesday while reading
+    as Monday, and "*/2" or "mon,3" are off by one day the same way."""
+    try:
+        CronTrigger.from_crontab(v)
+    except Exception as e:  # apscheduler raises ValueError on bad expressions
+        raise ValueError(f"invalid {name} {v!r}: {e}") from e
+    if re.search(r"\d", v.split()[4]):
+        raise ValueError(
+            f"invalid {name} {v!r}: use day names (mon..sun) in the day-of-week field, "
+            "not digits (also in steps like */2 or lists like mon,3), because "
+            "APScheduler 3.x counts 0 as Monday, unlike standard cron"
+        )
+    return v
 
 
 class Settings(BaseSettings):
@@ -131,28 +150,23 @@ class Settings(BaseSettings):
     # Agent sync cadence (seconds) for copying live manifests into the archive.
     # 0 disables the periodic sync.
     manifest_archive_sync_interval_sec: int = Field(default=1800, ge=0)
-    # --- DepotDownloader manifest-only fetcher (validation-coverage gap) -----
+    # --- Steam manifest-only fetcher (validation-coverage gap) ---------------
     # Fetches manifests (NO chunks) for the cached library so validate covers
     # apps SteamPrefill skipped (already-up-to-date apps never (re)write a .bin).
-    # Self-contained .NET 8 binary; writes .shas sidecars into the archive.
-    depotdownloader_binary: Path = Path("/depotdownloader/DepotDownloader")
+    # #361: the one-login Steam manifest helper (C#, SteamKit2 3.4.0), replacing
+    # the per-app DepotDownloader invocation that logged in 1,211 times a run.
+    # Self-contained .NET 10 build; writes manifests the fetcher turns into .shas.
+    steam_manifest_helper_binary: Path = Path("/steam-manifest-helper/SteamManifestHelper")
+    # Persistent mount holding the Steam session. The helper keeps its own
+    # session.json under <dir>/steam-manifest-helper/, imported once from the
+    # DepotDownloader login already saved here.
     depotdownloader_config_dir: Path = Path("/depotdownloader-config")
-    # Steam account username for DepotDownloader's remembered-session path.
-    # A username is NOT a secret — it is passed on the argv as -username <user>
-    # so DepotDownloader can match the stored login key. Empty = no -username arg
-    # (single-account deploys where DD infers the account automatically).
+    # Steam account username. Not a secret: the helper takes it as --username to
+    # pick the right saved login. Required for manifest fetching.
     steam_username: str = ""
-    # Inter-request delay (seconds) between per-app DepotDownloader invocations.
-    # DepotDownloader is a per-app process (each run is its own Steam logon), so
-    # the run is throttled to stay under Steam's logon rate limit. Raised 3→8s
-    # (#228): back-to-back logons at 3s still tripped Steam rate limiting.
-    # 0 disables the delay.
-    manifest_fetch_delay_sec: float = Field(default=8.0, ge=0.0)
-    # #228: retry transient DepotDownloader failures (Steam rate-limit / lost CM
-    # connection / logon timeout) with exponential backoff so a rate-limited app
-    # recovers instead of being lost. Permanent failures are NOT retried.
-    manifest_fetch_max_retries: int = Field(default=3, ge=0)
-    manifest_fetch_retry_backoff_sec: float = Field(default=15.0, ge=0.0)
+    # Whole-run ceiling for the helper (#361). A hung helper is killed and the job
+    # fails. A setting, not a constant, so it is not another #315.
+    manifest_fetch_timeout_sec: float = Field(default=7200.0, gt=0.0)
     # How many UNCACHED apps library_sync looks up from the Steam store per run
     # (the store API is rate-limited ~200/5min; the rest fill on later syncs).
     steam_store_fetch_budget: int = Field(default=150, ge=0)
@@ -284,11 +298,13 @@ class Settings(BaseSettings):
     # (#294). It does NOT fail the job: a partially-failing run is still a run that
     # happened, and conflating the two makes 'failed' useless as a signal.
     #
-    # 0.75 is a starting point chosen to sit above the current steady state
-    # (698/1174 ≈ 0.59 on 2026-08-25) so the monitor is not born red, while still
-    # catching a genuine collapse. Tune it once the numbers have been visible for a
-    # while — that is the whole point of putting them on the monitor.
-    fetch_manifests_max_failure_ratio: float = Field(default=0.75, ge=0.0, le=1.0)
+    # 0.07 since #361 (Karl, 2026-10-08). The earlier 0.75 was tuned to sit above
+    # the DepotDownloader-era steady state (698/1174 ≈ 0.59 on 2026-08-25), whose
+    # failures were the rate limits of 1,211 logins per run — the cause #361
+    # removes, so 0.75 would have read UP at 74% failed. The first live run of
+    # the one-login helper (job 46856, 2026-10-08) measured 4.9% (59/1211); Karl
+    # set 7% above that, tightened from the 10% he chose on 2026-10-07.
+    fetch_manifests_max_failure_ratio: float = Field(default=0.07, ge=0.0, le=1.0)
     # #225: after a game is prefilled, auto-exclude classifier-flagged non-games
     # (soundtracks/tools/servers/demos) from FUTURE prefill. Runs on the same
     # interval as the scheduled prefill; download-once-then-block.
@@ -308,10 +324,11 @@ class Settings(BaseSettings):
     # it is a property of the hardware, and the 2026-09-01 incident was a
     # storage change silently invalidating a number nobody could see.
     validate_assumed_chunks_per_sec: float = Field(default=40.0, gt=0)
-    # Manifest-only fetcher (DepotDownloader) weekly cron — Monday 05:00 UTC,
-    # offset from the sweep (03/09/15/21) and host prefill crons. 5-field, UTC.
+    # Manifest-only fetcher (SteamManifestHelper, #361) weekly cron — Tuesday 05:00 UTC
+    # (Monday 23:00 MDT), offset from the sweep (03/09/15/21) and host prefill crons.
+    # 5-field, UTC. Day-of-week must be a name: APScheduler 3.x counts 0 as Monday.
     fetch_manifests_enabled: bool = True
-    fetch_manifests_cron: str = "0 5 * * 1"
+    fetch_manifests_cron: str = "0 5 * * tue"
 
     # --- Misc --------------------------------------------------------
     manifest_size_cap_bytes: int = Field(default=134_217_728, gt=0)
@@ -463,31 +480,19 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_sweep_cron(cls, v: str) -> str:
         """Fail-fast on a malformed cron (IS2) by constructing the trigger now."""
-        try:
-            CronTrigger.from_crontab(v)
-        except Exception as e:  # apscheduler raises ValueError on bad expressions
-            raise ValueError(f"invalid validation_sweep_cron {v!r}: {e}") from e
-        return v
+        return _checked_cron("validation_sweep_cron", v)
 
     @field_validator("scheduled_prefill_cron", mode="after")
     @classmethod
     def _validate_scheduled_prefill_cron(cls, v: str) -> str:
         """Fail-fast on a malformed cron by constructing the trigger now."""
-        try:
-            CronTrigger.from_crontab(v)
-        except Exception as e:  # apscheduler raises ValueError on bad expressions
-            raise ValueError(f"invalid scheduled_prefill_cron {v!r}: {e}") from e
-        return v
+        return _checked_cron("scheduled_prefill_cron", v)
 
     @field_validator("fetch_manifests_cron", mode="after")
     @classmethod
     def _validate_fetch_manifests_cron(cls, v: str) -> str:
         """Fail-fast on a malformed fetch_manifests cron by constructing the trigger now."""
-        try:
-            CronTrigger.from_crontab(v)
-        except Exception as e:
-            raise ValueError(f"invalid fetch_manifests_cron {v!r}: {e}") from e
-        return v
+        return _checked_cron("fetch_manifests_cron", v)
 
     @field_validator("orchestrator_token", mode="before")
     @classmethod

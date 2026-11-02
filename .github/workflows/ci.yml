@@ -209,8 +209,8 @@ jobs:
           SIZE=$(docker image inspect ${{ env.IMAGE_NAME }}:ci --format '{{.Size}}')
           SIZE_MB=$((SIZE / 1048576))
           echo "Image size: ${SIZE_MB} MB"
-          if [ "$SIZE_MB" -gt 250 ]; then
-            echo "::error::Image size ${SIZE_MB} MB exceeds 250 MB limit"
+          if [ "$SIZE_MB" -gt 275 ]; then
+            echo "::error::Image size ${SIZE_MB} MB exceeds 275 MB limit"
             exit 1
           fi
 

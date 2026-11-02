@@ -19,6 +19,238 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Security — certifi trusted emSign roots with compromised intermediate keys (PYSEC-2026-4320) — 2026-10-25
+
+The CI dependency audit began failing on `main`'s pins with two newly disclosed advisories. It surfaced on PR #377, whose diff touches no requirements file.
+
+- **Security: `certifi` 2026.2.25 → 2026.10.23** in both lockfiles.
+  - **PYSEC-2026-4320** (alias GHSA-6q48-6c7w-9gw2): *"certifi bundles emSign root CAs with compromised intermediate CA keys"*, fixed in 2026.10.19.
+  - `certifi` is transitive via `httpx`, and it is the trust store for the orchestrator's HTTPS calls. Those include Epic's OAuth token, library, launcher and catalog services (`core/settings.py`) and the Steam store API (`platform/steam/store.py`). So until the fix is deployed, a certificate chaining to a compromised intermediate would be accepted on those calls.
+  - **The running images on both hosts still carry 2026.2.25.** The fix reaches production only when both planes are rebuilt and redeployed.
+- **Infrastructure: `setuptools` 84.0.0 → 84.2.1** in `requirements-dev.txt` only, for **GHSA-xmj3-9gf7-h52w** (LOW): a Windows path escape via `namespace_packages.txt` during legacy wheel installation. It is not shipped at runtime, and it does not apply on Linux or macOS.
+- **Infrastructure: fixed by recompiling,** as with `anyio` (#349): `pip-compile --upgrade-package certifi` on both lockfiles, and `--upgrade-package setuptools` on the dev file with `--allow-unsafe` kept, so the `pip` and `setuptools` pins survive. No other pin moved.
+
+### Documentation — the Bible described a Steam login, CLI commands, an API envelope and container hardening that do not exist — 2026-10-16
+
+- **`PROJECT_BIBLE.md` §3.1, §3.2, §3.3, §3.4 rewritten.** They still described
+  ADR-0001's single process with a gevent `steam-next` thread and "no sidecars".
+  That design was replaced by the control-plane/agent split in PRs #174–#199, and
+  the Steam worker was deleted (ADR-0013). Nothing in `src/` imports `steam-next`
+  or `gevent`. The sections now record:
+  - the two processes and the single job worker;
+  - SteamPrefill and the one-login manifest helper (ADR-0019) as the only
+    components that hold a Steam login, plus the session-free Steam code that
+    still runs in the control plane;
+  - the ADRs actually issued up to 0019, and what became of the six that were
+    scheduled at Phase 1 and never written;
+  - the pinned stack, which now includes the .NET helper.
+- **`PROJECT_BIBLE.md` §3.5 and §7.3 no longer claim hardening that is not live.**
+  `docker inspect` on LXC 1105 shows a writable root filesystem, no dropped
+  capabilities, no `no-new-privileges`, and the token supplied as the `ORCH_TOKEN`
+  env var rather than a secret file. Only non-root holds. Tracked in #374. The
+  token-rotation steps now name the real files on both hosts. §10.5 and §11.1
+  still state the original target and are not edited here; #374 records them.
+- **`PROJECT_BIBLE.md` §5.1 records migration 0018** and corrects:
+  - the table count, from eight entity tables to eleven;
+  - the list of `jobs` kinds;
+  - the migrations that created `prefill_exclusions` and `steam_app_info`.
+- **`PROJECT_BIBLE.md` §7.2 no longer documents `orchestrator-cli auth steam`.**
+  The section now names the components that hold Steam sessions and the helper's
+  exit codes and `login` renewal path. The Epic rules no longer claim things the
+  code does not do:
+  - an access token is not persisted;
+  - no hashed token is logged;
+  - there is no startup check of session-file modes.
+- **`PROJECT_BIBLE.md` §9 matches the code.**
+  - The CLI table is taken from `orchestrator-cli --help`. `auth steam` and
+    `db rollback` are gone, and `cache`, `selection`, `game list`, `game purge`
+    and `status` are added.
+  - Exit codes 4 and 130 are noted as not implemented, and exit 2 also covers
+    Click's usage errors.
+  - Output uses `✓`/`⚠`/`✗` glyphs, not `[OK]`/`[ERROR]`.
+  - The REST surface is 25 routes, not 12, and `/api/v1/stats` does not exist.
+  - Mutations return plain shapes such as `{"job_id": N}`; the DQ6
+    `{"ok","job_id","message"}` envelope promised to Game_shelf was never built.
+  - Unknown fields return 400, not 422.
+  - The docs pages are loopback-only and exempt from the bearer.
+  - The status page's real polling endpoints are listed.
+  - The CORS variable is `ORCH_CORS_ORIGINS`.
+- **`FEATURES.md` Features 28 and 29** no longer read "pending live
+  verification". Both were verified live: on 2026-09-19 and 2026-09-23.
+- **UAT 18 triage, B4 row:** records homelab's confirmation that the auto-update
+  idle guard is installed and proven, plus the two follow-ups homelab owns.
+
+### Fixed — Steam manifest helper re-sends depot-key requests Steam drops (#369); cron weekdays must be named (UAT 18 B3) — 2026-10-16
+
+- **Root cause (B1, SEV-2).** Steam silently drops about 1% of
+  `ClientGetDepotDecryptionKey` requests: in an instrumented run 20 of 1,988 got no
+  answer within 55 s, while answered ones took 100 ms at p50 and 224 ms at most, so
+  a dropped request is dropped, not slow. `GetDepotKeyAsync` made one attempt,
+  SteamKit2's ~10 s job timeout became a `SteamRequestException`, and `FetchRunner`
+  failed the whole app. Apps need about 12 key requests each (app 24010 needs
+  1,184). At 1% dropped per request, the share of apps with at least one drop is
+  1 - 0.99^12 = 11.4% for a 12-request app; measured, 148 of 1,212 apps (12.2%)
+  failed, and the weekly run hit 13.5%, above the 7% alarm.
+- **Fix.** New `RequestRetry` (`tools/steam_manifest_helper`) sends the request up
+  to 3 times, retrying only a `SteamRequestException`; `SessionLostException` and
+  every other exception propagate at once, and there is no delay because the job
+  timeout already spaces the attempts. `MapDepotKey` stays outside the retry, so an
+  explicit `EResult` refusal is never re-sent. In a scratch build a re-sent request
+  was answered on the second attempt every time (2 of 2, about 0.5 s) and 145 of 148
+  previously failing apps succeeded. xUnit +5 (60 to 65); a source guard in
+  `tests/test_steam_helper_source_guards.py` pins the call shape.
+- **Cron weekday (UAT 18 B3, SEV-3).** APScheduler 3.x counts 0 as Monday, so
+  `fetch_manifests_cron = "0 5 * * 1"` fired on Tuesday while the docs said Monday.
+  Karl kept Tuesday: the default is now `"0 5 * * tue"` (Tuesday 05:00 UTC, Monday
+  23:00 MDT; behaviour unchanged), and `validation_sweep_cron`,
+  `scheduled_prefill_cron` and `fetch_manifests_cron` now reject a day-of-week field
+  containing any digit (`1`, `0-4`, `*/2`, `mon,3`) with a message that says to use
+  day names (`mon`..`sun`). `*` and names, including ranges like `mon-fri`, are
+  accepted. The `SchedulerManager`
+  constructor default matches.
+- **Docs (B2, SEV-3).** The fetch-ratio alarm is Kuma **182**
+  (`job:orch-fetch-manifests`); 176 is `job:steam-prefill`. The 2026-10-08 entry
+  below and the 7% security audit named 176 and are corrected, and the docs that
+  called the weekly fetch "Monday" now say Tuesday 05:00 UTC (Monday 23:00 MDT).
+- **Not done here.** DepotDownloader parity for skipping unowned depots (the licence
+  gate) is filed as a separate issue, #371.
+
+### Changed — the weekly manifest-fetch alarm goes red above 7% failed, not 10% (#361) — 2026-10-08
+
+- **Measured rate.** The first live run of the one-login helper (job 46856,
+  2026-10-08 14:21-15:51 UTC) logged `apps=1211 fetched=257 skipped=3000 failed=59
+  not_attempted=0 helper_exit=0 logons=1`, a failure rate of 4.9% (59/1211).
+  Failures by kind: 47 `error`, 11 `no_depots`, 1 `not_owned`.
+- **Decision.** Karl lowered the `fetch_manifests_max_failure_ratio` default from
+  0.10 to 0.07 on 2026-10-08, so Kuma 182 (`job:orch-fetch-manifests`) goes DOWN above 7% (85 of 1211 or more;
+  84 of 1211 is still UP). Boundary tests pin both sides.
+- **Recurring cause.** 26 of the 47 `error` failures are depot-key timeouts, tracked
+  in issue #369, the largest single source of recurring failures.
+
+### Changed — the weekly Steam manifest fetch logs in once, not 1,211 times (#361) — 2026-10-07
+
+- **Root cause: one Steam login per game, and a back-off that never ran.**
+  `fetch_manifests` started a DepotDownloader process per app (1,211 logins in a
+  run), holding the Steam account in a rate limit for hours and refusing the
+  06:00 MDT SteamPrefill run on three Mondays. The #228 back-off read `stderr`
+  while DepotDownloader writes to `stdout`: **0** `transient_retry` events across
+  729 failures on 2026-10-06.
+- **A new helper logs in once** (`tools/steam_manifest_helper/`, C#, SteamKit2
+  3.4.0, MIT). It imports the token DepotDownloader already saved, fetches every
+  app's manifests in that one session, waits 60 s and reconnects at most once on
+  a drop, and reports one JSON line per app.
+- **Python calls the helper once per run** and keeps choosing games, parsing
+  manifests and writing `.shas`. `fetch_all()` and `FetchResult` are unchanged.
+- **Apps the helper never reports are now counted as failed**
+  (`manifest_fetch.app_unreported`). A run that reports none fails the job;
+  partial failures turn the heartbeat red past `fetch_manifests_max_failure_ratio`.
+- **`fetch_manifests_max_failure_ratio` drops from 0.75 to 0.10** (Karl,
+  2026-10-07). 0.75 sat above DepotDownloader's ~0.59 steady state, which was the
+  rate limit #361 removes, so 0.75 would have read UP at 74% failed. The Task 1
+  spike's 100-app sample would score about 1-2% under production rules, on a
+  sample biased toward clean apps; Karl set 10% on 2026-10-07 and re-checks it
+  against the first live run.
+- **What is logged on a failure depends on how the helper ended.** A non-zero
+  exit or a missing summary logs `manifest_fetch.helper_failed` (exit code,
+  `helper_outcome`, `logons`, the summary's reason when there is one, and the
+  stderr tail). A timeout prints no summary: it logs
+  `manifest_fetch.helper_timed_out` with the stderr tail. A helper that never
+  starts logs only `manifest_fetch.run_aborted`.
+- **Final-review fixes before the first deploy:**
+  - A timeout no longer discards finished work: the `ok` apps reported before the
+    kill are archived, then the run raises.
+  - The CM connection is tried up to 3 times (5 s, then 15 s apart) before the
+    single logon, which is never retried. A connect that never succeeds, or a
+    logon Steam never answers, now reads "could not reach Steam" instead of a
+    login refusal.
+  - Every summary carries `logons`; the agent logs it in `manifest_fetch.done`, so
+    the live one-login check reads `"logons": 1` there.
+  - The summary's session status is logged as `helper_outcome`: the live logger
+    redacted any key containing "session", so it always read `<redacted>`.
+  - No longer green with nothing archived: an empty selection skips the helper,
+    logs a `manifest_fetch.no_apps` warning and returns `FetchResult(0, 0, 0, 0)`,
+    which still reports UP because `summarise_tally` treats apps=0 as ok; a
+    `not_attempted` line after a clean exit
+    counts as failed; a manifest that parses to no SHA is still skipped (zero-chunk
+    depots are real: 49 empty `.shas` live) but now warns
+    (`manifest_fetch.empty_manifest`), and a run in which every manifest parses
+    empty raises as parser or format drift (`manifest_fetch.all_manifests_empty`).
+  - An app id that does not fit a uint32 is dropped and counted as failed
+    (`manifest_fetch.app_id_out_of_range`) instead of failing the whole run.
+  - The helper's catch-all prints the exception type and a fixed text, never the
+    exception's message, which can carry a URL.
+- **DepotDownloader is removed** from the image, along with the
+  `manifest_fetch_delay_sec`, `manifest_fetch_max_retries` and
+  `manifest_fetch_retry_backoff_sec` settings. `depotdownloader_binary` becomes
+  `steam_manifest_helper_binary`, and a new `manifest_fetch_timeout_sec`
+  (`ORCH_MANIFEST_FETCH_TIMEOUT_SEC`, default 7200 s) bounds one helper run.
+- **A new `login` command renews the session** (`SteamManifestHelper login
+  --username <name> --session-dir <dir>`, needs a TTY and approval in the Steam
+  app). It is the only way to renew once DepotDownloader is gone; a rejected token
+  fails the run loudly and names it. See `docs/deploy/INSTALL.md`.
+- **CI's amd64 image limit is now 275 MiB** (was 250): the image is about
+  254 MiB with the 86 MiB self-contained helper in place of the 75 MiB
+  DepotDownloader. The image build runs the helper's tests and fails if it finds
+  no tests.
+- **Rollback is by image tag, not a switch:** `docker tag orchestrator:dpa-pre-361
+  orchestrator:dpa`, then recreate the agent in an inter-sweep gap, syncing
+  `orchestrator-manifests` first as `docs/deploy/INSTALL.md` §6 requires.
+- Not deployed yet. Security audit:
+  `docs/security-audits/steam-manifest-helper-security-audit.md`. ADR 0019.
+
+### Fixed — the cache-index alarm can no longer read healthy with no room (#363) — 2026-10-06
+
+- **A ceiling of zero is now an answer, not an unknown.** `effective_capacity()`
+  filtered ceilings by truthiness, so a RAM ceiling of exactly 0 was dropped and
+  the alarm measured against the 80M zone instead: roughly 44% used, **up**,
+  when the host could hold no keys at all. That is the false-healthy direction
+  the alarm was built to rule out.
+- A non-positive ceiling now reads `OVER FLOOR ... so no room; check
+  RAM_BUDGET_BYTES` instead of dividing by it. It is only reachable through a
+  `RAM_BUDGET_BYTES` of zero, a negative number, or less than one key's size:
+  an operator typo, so no live reading was ever affected.
+- **A budget of 0 is now "no room" too.** The first version of this fix kept a
+  ceiling of 0, but `ram_capacity_keys()` still turned a budget of 0, the
+  likeliest typo, into "unknown" before that code ever saw it, so it still read
+  healthy. The pre-merge adversarial review caught it. A new end-to-end test
+  follows `RAM_BUDGET_BYTES=0` from the env file to a DOWN push, because the
+  unit tests had skipped the step where the bug lived.
+- Found by the UAT 17 exploratory agent on 2026-09-21, and filed at UAT 17
+  consolidation on 2026-10-06.
+
+### Fixed — the cache-index alarm can no longer crash on a bad message (#362) — 2026-10-06
+
+- **`kuma.push()` now keeps its "Never raises" promise for every input.**
+  `len(msg)` and `url.strip()` both ran outside the `try`, so a `None` message or
+  a non-string URL raised. No caller passes either today. But inside `alert()`
+  the exception would reach the fanotify loop and kill the guard.
+- A `None` or non-string message now sends as text, because a heartbeat with an
+  odd message is still a heartbeat. A message that cannot be rendered at all
+  reports undelivered. A mutation test confirms that test fails if rendering
+  moves back outside the `try`.
+- Found by the UAT 17 exploratory agent on 2026-09-21, and filed at UAT 17
+  consolidation on 2026-10-06.
+
+### Fixed — a corrupted history can no longer make the cache-index alarm read healthy (#355) — 2026-09-22
+
+- **SEV-1.** `float("nan")` succeeds, so `read_history()`, which caught only
+  `ValueError`, admitted a corrupted row of `/log/key_budget.csv` as a
+  measurement. Every IEEE 754 comparison against NaN is False, so it fell past
+  every guard in `project_days_to()` and `verdict()` and the alarm reported
+  **up**. The only outward sign was the garbled message `nand to floor`. A false
+  all-clear in the alarm built because the 2026-07-31 mass deletion was an
+  absent signal read as a quiet one.
+- Guarded in both places, because either alone leaves a gap.
+  `read_history()` now skips non-finite fields as it already skipped malformed
+  ones. `project_days_to()` returns `None` for any non-finite input or result,
+  making NaN the fourth "unknowable" case beside too few points, flat and
+  shrinking.
+- Added `tests/tools/test_key_budget_probe.py`, the probe's first tests. The plan
+  had argued it needed none because its decisions lived in `key_budget.py`.
+  But input validation is a decision, and it lived in the untested file.
+- Found by the UAT 17 exploratory agent. Merged in PR #356; deployed to the NAS
+  2026-09-23. This entry was missed at the time and added 2026-10-06.
+
 ### Data Model — migration 0018 retires a status no code can produce or clear — 2026-09-21
 
 - **19 owned games carried `status='failed'` permanently (#316).** No module

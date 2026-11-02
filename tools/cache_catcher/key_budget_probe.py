@@ -12,6 +12,7 @@ minutes during design. Mean object size is therefore a separate weekly sample.
 
 from __future__ import annotations
 
+import math
 import os
 import random
 import time
@@ -123,6 +124,19 @@ def nginx_index_size_mb():
 
 
 def read_history(path=HISTORY):
+    """Read (epoch, objects) pairs, skipping anything that is not usable data.
+
+    #355: `float()` accepts "nan", "inf" and "-inf" WITHOUT raising, so catching
+    only ValueError let a corrupted row through as though it were a measurement.
+    NaN then reached project_days_to(), where every IEEE 754 comparison against
+    it is False, so it fell past every guard and the alarm reported "up" from
+    corrupt input -- a false all-clear in the one system built because the
+    2026-07-31 incident was an absent signal read as a quiet one.
+
+    A row that cannot be trusted is skipped exactly as a malformed row already
+    was. Skipping is safe here because too little history yields "trend unknown",
+    which is the honest answer; keeping the row yielded a confident wrong one.
+    """
     rows = []
     try:
         with open(path) as fh:
@@ -130,9 +144,12 @@ def read_history(path=HISTORY):
                 parts = line.strip().split(",")
                 if len(parts) >= 2:
                     try:
-                        rows.append((float(parts[0]), float(parts[1])))
+                        ts, objects = float(parts[0]), float(parts[1])
                     except ValueError:
                         continue
+                    if not (math.isfinite(ts) and math.isfinite(objects)):
+                        continue
+                    rows.append((ts, objects))
     except OSError:
         pass
     return rows

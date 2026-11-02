@@ -1411,21 +1411,23 @@ failure-ratio threshold **without** changing `jobs.state` (#294).
   - `src/orchestrator/jobs/summary.py` — `JobSummary`
   - Env: `ORCH_KUMA_PUSH_LIBRARY_SYNC`, `_SWEEP`, `_SCHEDULED_PREFILL`,
     `_FETCH_MANIFESTS` (secrets — the URL is the whole credential; unset disables that
-    heartbeat), `ORCH_FETCH_MANIFESTS_MAX_FAILURE_RATIO` (default 0.75)
+    heartbeat), `ORCH_FETCH_MANIFESTS_MAX_FAILURE_RATIO` (default 0.07 since 2026-10-08;
+    0.10 from 2026-10-07 and 0.75 before)
 
 **Test Coverage:** 28 in `tests/jobs/test_worker_heartbeats.py` (monitor selection as a
 pure function, including every kind × every manual source; wiring for up, down-with-error,
 silence on a manual trigger, and a push that raises leaving the job succeeded), 8 in
 `tests/clients/test_heartbeat.py` (driven through `httpx.MockTransport`, asserting the
-real outgoing request), 12 in `tests/jobs/test_fetch_manifests_summary.py`.
+real outgoing request), 19 in `tests/jobs/test_fetch_manifests_summary.py`.
 
 **Known Limitations:**
   - Monitoring is fire-and-forget: a push rejected by Kuma (e.g. a paused monitor,
     which returns HTTP 404) is not distinguished from success. Deliberate — the
     monitor going DOWN for want of a heartbeat is the correct signal either way.
-  - The `fetch_manifests` threshold default of 0.75 was chosen to sit above the
-    observed steady state (0.59 on 2026-08-25) rather than from a target, and should
-    be tuned once the numbers have been visible for a while.
+  - Superseded by #361 (2026-10-07): the default is now 0.10, set by Karl and to be
+    re-checked against the first live one-login run. The original default of 0.75
+    was chosen to sit above DepotDownloader's observed steady state (0.59 on
+    2026-08-25), whose failures were the rate limits #361 removed.
 
 ---
 
@@ -1714,7 +1716,7 @@ semgrep/gitleaks/ruff/mypy clean.
 ## Feature 28: keys_zone Alarm (#346-adjacent)
 
 **Phase Built:** 2 (Construction)
-**Status:** Complete — pending live verification (2026-09-18)
+**Status:** Complete — live-verified 2026-09-19 (merged as PR #347). Both schedules fired unattended on real slots, and monitor 220's eviction DOWN path was exercised deliberately while 218 and 219 stayed green.
 
 **Summary:** The cache index now has an alarm. The 2026-07-31 mass deletion was
 nginx's cache-manager evicting live game data from a ~94%-full `keys_zone`, and
@@ -1805,7 +1807,7 @@ gitleaks clean.
 ## Feature 29: Retire the Unreachable 'failed' Status (#316, #317)
 
 **Phase Built:** 2 (Construction)
-**Status:** Complete — pending deploy and live verification (2026-09-21)
+**Status:** Complete — deployed and live-verified 2026-09-23. Migration 0018 applied on LXC 1105 at 20:46:49 UTC: `failed` went from 19 to 0 and `blocked` from 0 to 19. Re-checked 2026-10-16: still 0 `failed`, 19 `blocked`.
 
 **Summary:** 19 owned games were permanently stuck at `status='failed'`, a state
 no code can produce and no code can clear. Migration 0018 retires them to
@@ -1867,3 +1869,135 @@ build-breaking writer guard still passes.
   - No down-migration (out of scope for MVP per ADR-0008). Recovery is a single
     `UPDATE` driven by the `measurement_transitions` rows this migration writes,
     which record the prior value for every affected row.
+
+---
+
+## Feature 30: One-Login Steam Manifest Helper (#361)
+
+**Phase Built:** 2 (Construction)
+**Status:** Complete — pending deploy and live verification (2026-10-07)
+
+**Summary:** The weekly `fetch_manifests` job ran one DepotDownloader process per
+app, so 1,211 Steam logins a run held the account in a rate limit for hours and
+refused the SteamPrefill run that shares it. A new C# helper on SteamKit2 logs in
+once, fetches every app's manifests in that session, and reports one JSON line per
+app. Python calls it once, keeps choosing games and writing `.shas`, and now
+counts apps the helper never reports as failed (`manifest_fetch.app_unreported`).
+A run that reports none fails the job; partial failures turn it red past
+`fetch_manifests_max_failure_ratio` (7% since 2026-10-08; 10% on 2026-10-07; it was 0.75).
+DepotDownloader is removed from the image.
+
+**Key Interfaces:**
+  - `tools/steam_manifest_helper/SteamManifestHelper/` (`fetch` and `login`
+    subcommands; exit codes 0, 1, 2, 3, 4, 64)
+  - `src/orchestrator/platform/steam/manifest_fetcher.py`: `fetch_all()` and
+    `FetchResult(fetched, skipped, failed, apps)` unchanged
+  - Setting `steam_manifest_helper_binary` (replaces `depotdownloader_binary`);
+    `ORCH_STEAM_USERNAME` names the account; new `manifest_fetch_timeout_sec`
+    (`ORCH_MANIFEST_FETCH_TIMEOUT_SEC`, default 7200 s) bounds one helper run
+  - Session file `/depotdownloader-config/steam-manifest-helper/session.json`
+    (0600, in a 0700 directory)
+  - `Dockerfile` stage `helper`; CI image limit 275 MiB
+
+**Locked decisions:**
+  - **Fresh code on SteamKit2, not DepotDownloader's code.** DepotDownloader is
+    GPL-2.0; the helper stays MIT and ships SteamKit2 (LGPL-2.1) as a separate,
+    replaceable assembly (self-contained, not single-file, not trimmed).
+  - **One logon per run, never a loop.** A dropped connection or Steam log-off
+    waits 60 s and reconnects once, retrying the interrupted app; a second loss
+    marks the rest `not_attempted` and exits 4.
+  - **Thin helper.** Python keeps enumeration, manifest parsing and `.shas`
+    writing, so the agent API is unchanged. `.shas` are archived only for `ok`
+    apps; a failed depot makes the whole app `error` so it is retried next week.
+  - **Replace, do not switch.** Both tools cannot fit CI's image limit, so
+    rollback is by the `dpa-pre-361` image tag. Karl raised the limit from 250 to
+    275 MiB (2026-10-07); the image is about 254 MiB.
+  - **Token import, then `login` to renew.** The helper imports the token
+    DepotDownloader saved; `login` (TTY, password, Steam app approval) is the only
+    renewal path afterwards.
+  - **The token is never printed, logged, put on argv or passed to Python.**
+    A failure from SteamKit2 or .NET is reported by exception type and HTTP status
+    code only, never by its message; the CLI's catch-all prints the type name and
+    a fixed text (pinned by `CliTests` and `SteamKitGatewayTests`). The helper's
+    own error texts (paths, app and depot ids, `EResult` names) are printed as
+    written.
+  - **Python counts every requested app.** A requested app with no result line is
+    counted as failed (`manifest_fetch.app_unreported`), and so are an app id
+    that does not fit a uint32 (dropped before the helper sees it,
+    `manifest_fetch.app_id_out_of_range`) and a `not_attempted` line after a
+    clean exit. A manifest that parses to no SHA is a zero-chunk depot (49 such
+    `.shas` exist on the live archive): it counts as skipped, with a
+    `manifest_fetch.empty_manifest` warning, and the app's other manifests are
+    still archived. If every manifest in a run parses empty, the run logs
+    `manifest_fetch.all_manifests_empty` and raises, as parser or format drift. A
+    run that reports none fails the job; partial failures turn the Kuma heartbeat
+    red past `fetch_manifests_max_failure_ratio`, **7%** since 2026-10-08 (Karl;
+    it was 0.75, tuned to DepotDownloader's rate-limited ~0.59 steady state, then
+    10% on 2026-10-07). The first live run (job 46856) measured 4.9% (59/1211),
+    and Karl set 7% above that on 2026-10-08.
+  - **The connect is retried, the logon never is.** The gateway tries the CM
+    connection up to 3 times (5 s, then 15 s apart) before its single `LogOn`. A
+    connect that never succeeds, or a logon Steam never answers, is reported as
+    "could not reach Steam: ..." (exit 2), or on the reconnect as "reconnect
+    failed: could not connect to Steam: ..." (exit 4), not as a login refusal.
+  - **Every summary carries `logons`**, the number of connect-and-logon calls (1,
+    or 2 after the reconnect; 0 when the session import failed). Python logs it in
+    `manifest_fetch.done` and `manifest_fetch.helper_failed`, beside
+    `helper_outcome` (the summary's session status, renamed because the live
+    logger redacts any key containing "session").
+  - **A timeout keeps what was finished.** The `ok` apps the helper reported
+    before it was killed are archived, then `manifest_fetch.helper_timed_out`
+    (with the fetched and skipped counts) is logged and the run raises.
+  - **No apps, no login.** An empty selection logs `manifest_fetch.no_apps` and
+    returns without starting the helper.
+  - Construction rulings (session file 0600 from creation, 6 CDN servers per
+    manifest, `AccessDenied` alone means "not owned", and others) are listed in
+    the spec.
+
+  - **Dropped depot-key requests are re-sent (#369, 2026-10-16).** Steam silently
+    drops about 1% of `ClientGetDepotDecryptionKey` requests (20 of 1,988 got no
+    answer in 55 s; answered ones took 224 ms at most), and one dropped request
+    used to fail its whole app. `GetDepotKeyAsync` now sends up to 3 times
+    (`RequestRetry`), retrying only a dropped or failed request (`SteamRequestException`); an explicit
+    `EResult` refusal is an answer and is never re-sent, and a lost session still
+    belongs to the single reconnect.
+  - **Cron weekdays must be names (UAT 18 B3).** `fetch_manifests_cron` defaults to
+    `0 5 * * tue` (Tuesday 05:00 UTC, Monday 23:00 MDT; behaviour unchanged).
+    APScheduler 3.x counts 0 as Monday, so the old `1` fired on Tuesday while
+    reading as Monday. All three cron settings now reject a day-of-week field
+    containing any digit (`1`, `0-4`, `*/2`, `mon,3`).
+
+**Test Coverage:** 65 xUnit tests for the helper (session store, depot selection,
+CDN auth, CLI, fetch runner against a fake gateway, the connect-retry and
+request-retry policies, and
+the gateway's pure helpers: `Describe`, the depot-key mapping, `StatusOf`,
+`IsSlowFailure`), run during the image build, which fails on a failing or empty
+run. Python: the fetcher tests drive a scripted stand-in helper (one call per
+run, exit 2/3/4, timeout kill with partial results kept, hostile manifest names,
+unrequested and missing app lines, empty selection, empty manifests, out-of-range
+ids, `helper_outcome` through the live logging chain). Static guards:
+`tests/test_steam_helper_source_guards.py` (session file 0600 from creation; the
+depot-key request is retried with `MapDepotKey` outside the retry) and
+`tests/test_dockerfile.py` (every `dotnet restore` locked). Full suite **2104
+passed, 3 deselected** after the #369 fixes (it was 2059 after the final-review fix wave). gitleaks clean. semgrep:
+the repo's `.semgrep/` rules are Python only (0 findings over 118 `.py` files); the C# helper was scanned separately with
+`p/csharp`, 1 finding (`unsafe-path-combine` on the operator-supplied
+`--session-dir`), adjudicated a false positive in the security audit.
+
+**Related:** #361, #213, #228. ADR 0019. Spec
+`docs/superpowers/specs/2026-10-06-steam-manifest-helper-design.md`; plan
+`docs/superpowers/plans/2026-10-07-steam-manifest-helper.md`; security audit
+`docs/security-audits/steam-manifest-helper-security-audit.md`.
+
+**Known Limitations:**
+  - **Deployed 2026-10-08 (merge 87662e0).** First live run, job 46856: logons=1,
+    fetched=257, skipped=3000, failed=59 of 1211 (4.9%), not_attempted=0. Parity
+    spot-check: 150/150 identical against DepotDownloader-written .shas. #361
+    is CLOSED (it auto-closed 2026-10-08; the evidence comment was posted
+    2026-10-16). The weekly fetch failures it left are tracked in #369, fixed by the
+    depot-key retry above.
+  - The token sits in plain JSON on the persistent mount, as DepotDownloader's
+    did; `login` needs a TTY.
+  - `THIRD_PARTY_NOTICES.md` does not reach the image (`.dockerignore` drops root
+    `*.md`) and gives no SteamKit2 source location; two licence texts were fetched
+    from main or master. To be resolved before the first release tag.

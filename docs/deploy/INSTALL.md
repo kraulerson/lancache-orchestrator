@@ -101,6 +101,9 @@ docker volume create orchestrator-db
 docker volume create cache-catcher-log
 ```
 
+`depotdownloader-config` also holds the manifest helper's Steam session; the
+one-time login is in §6.
+
 ### 4.3 `lancache-monolithic`
 
 Image is pinned **by digest**, not tag:
@@ -204,6 +207,21 @@ docker exec orchestrator-agent getent hosts lancache.steamcontent.com      # exp
 ```
 
 All three have failed in production. Run all three.
+
+**Steam login for manifest fetching (one time).** The weekly manifest fetch logs
+in through `SteamManifestHelper` with a saved Steam session, kept in the
+`depotdownloader-config` volume (mounted at `/depotdownloader-config`). An install
+that already has a DepotDownloader login in that volume needs nothing: the
+helper imports it on its first run. On a fresh install, or when a run fails with
+"Steam rejected the saved login", log in once, with the agent running and
+`ORCH_STEAM_USERNAME` set as listed above. `--username` must equal
+`ORCH_STEAM_USERNAME`, or every run exits 3 with "holds a login for a different
+account". You'll type the password, then approve the login in the Steam app:
+
+```sh
+docker exec -it -u 0 orchestrator-agent /steam-manifest-helper/SteamManifestHelper \
+    login --username <steam-user> --session-dir /depotdownloader-config/steam-manifest-helper
+```
 
 ## 7. LXC 1105 — the control plane
 

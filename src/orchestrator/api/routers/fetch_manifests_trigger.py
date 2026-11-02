@@ -1,4 +1,4 @@
-"""POST /api/v1/fetch-manifests — enqueue a DepotDownloader manifest-only fetch.
+"""POST /api/v1/fetch-manifests — enqueue a manifest-only fetch (SteamManifestHelper).
 
 Closes the validation-coverage gap: the agent self-enumerates the cached app set
 and fetches manifests (no chunk bytes) so the validator can cover apps that

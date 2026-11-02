@@ -71,7 +71,7 @@ class SchedulerManager:
         scheduled_prefill_cron: str = "45 3,9,15,21 * * *",
         auto_classify_block_enabled: bool = True,
         fetch_manifests_enabled: bool = True,
-        fetch_manifests_cron: str = "0 5 * * 1",
+        fetch_manifests_cron: str = "0 5 * * tue",
         agent_client: AgentClient | None = None,
     ) -> None:
         self._pool = pool

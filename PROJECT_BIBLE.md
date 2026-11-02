@@ -99,23 +99,45 @@ No break-even calculation, no per-user costs, no hosting ceiling at scale — th
 
 ## 3. Architecture Decision Record
 
-<!-- Last Updated: 2026-09-19 -->
+<!-- Last Updated: 2026-10-16 -->
 
-### 3.1 Selected architecture — Option A (single-container monolith)
+### 3.1 Selected architecture — control plane plus data-plane agent (rewritten 2026-10-16)
 
-Accepted in `docs/ADR documentation/0001-orchestrator-architecture.md` on 2026-04-20. Full text of ADR-0001 referenced there; summary:
+> **The single-process monolith that ADR-0001 chose no longer exists.** ADR-0001
+> (2026-04-20) put everything in one `uvicorn` process, including Steam through a
+> gevent-patched `steam-next` thread. Re-architecture ①–④ (PRs #174–#199) moved the
+> work that touches the cache into a data-plane agent beside lancache, and deleted
+> the in-process Steam worker (ADR-0013, superseded 2026-06-22). Nothing in `src/`
+> imports `steam-next` or `gevent` today. This section describes what runs now;
+> ADR-0001 is kept for history.
 
-**Single `uvicorn` process** running FastAPI + APScheduler + all adapters + validator, organized into **three cleanly separated work zones** per Brief §3.6:
+**Control plane** (LXC 1105). One async-native `uvicorn` process runs FastAPI, APScheduler, the jobs worker and the `aiosqlite` pool (§5.6). It talks to the agent and to Uptime Kuma over `httpx`. **Jobs run one at a time** on a single worker (`jobs/worker.py`), so a long job delays the next scheduled one instead of running beside it.
 
-1. **Main asyncio event loop** — FastAPI handlers, `httpx.AsyncClient` chunk fan-out (`aiter_raw` + 32-way `asyncio.Semaphore`), `aiosqlite` queries, APScheduler triggers. Async-native only.
-2. **Dedicated gevent-patched worker thread** — `steam-next` `SteamClient` lives in a single long-lived thread. Gevent monkey-patching is restricted to that thread. Main loop reaches it only via `loop.run_in_executor(steam_thread_pool, fn)`.
-3. **Default `ThreadPoolExecutor`** — disk-stat bursts + MD5 cache-key computation (F7 validator, F13 sweep) batched in 256-file chunks via `run_in_executor(None, ...)`.
+**Data-plane agent** (NAS, beside lancache; `python -m orchestrator.agent`). It reads the lancache filesystem directly. Its routers are `health`, `pull`, `stat`, `steam`, `epic` and `manual_downloads`, covering:
+- chunk validation, disk-stat and purge;
+- the prefill drivers;
+- Steam library enumeration, auth status and selection maintenance;
+- the Steam manifest fetch;
+- manual-download listings.
 
-**Rejected alternatives:**
-- **Option B (subprocess-isolated downloader)** — retained as the pre-documented fallback if Spike F fails. A superseding ADR-0005 will record the Spike F outcome.
-- **Option C (multi-container split)** — rejected outright; violates Intake §6.4 hard constraint.
+The control plane reaches it only over HTTP (`ORCH_AGENT_BASE_URL`), never through the filesystem. §3.5 explains the split.
 
-**Spike F is the gate** between Option A and Option B. Passes: p99 `/api/v1/health` < 100 ms under 32 concurrent chunk downloads sustaining ≥ 300 Mbps aggregate for 10 minutes on real DXP4800 hardware.
+**No Steam login runs in the API process.** The two components that hold a Steam session both run on the NAS (§7.2):
+- **SteamPrefill** is a host binary. The host cron runs it for the scheduled library, and the agent runs the same binary, bind-mounted at `/SteamPrefill`, for per-game prefill jobs.
+- **The manifest helper** (`/steam-manifest-helper/SteamManifestHelper`) is a C# program on SteamKit2 shipped in the image. The agent runs it for the weekly `fetch_manifests` job, and it logs in once per run, plus at most one reconnect (ADR-0019, #361). It replaced one DepotDownloader process per app, which meant 1,211 logins a run.
+
+**Steam code that needs no session does run in the control plane:**
+- library sync, which enumerates through the agent and names games from the public store `appdetails` API (`platform/steam/store.py`);
+- the selection classifier;
+- a `SteamPrefillDriver`, used for auth status only when the agent is off.
+
+**Epic** parses manifests in pure Python, with no vendored `legendary` (ADR-0014).
+
+**History.** At Phase 1:
+- **Option B** (a subprocess-isolated downloader) was the fallback if Spike F failed.
+- **Option C** (a multi-container split) was rejected, citing Intake §6.4.
+
+The re-architecture later adopted a two-host split anyway, for the operational reasons in §3.5. Spike F's single-process latency gate does not apply to the current design.
 
 ### 3.2 Sub-ADRs (Phase 2)
 
@@ -126,22 +148,25 @@ Issued during Phase 2 construction:
 - **ADR-0010** — Settings module design (BL3, ID4) + BL4 addendum (DB pool fields).
 - **ADR-0011** — DB pool architecture (BL4) — hybrid 1-writer-N-reader topology, defense-in-depth write serialization, comprehensive API surface.
 - **ADR-0012** — FastAPI skeleton architecture (BL5) — hybrid module layout, pure-ASGI middleware stack (CorrelationId / BodySizeCap / BearerAuth / CORS), lifespan-managed pool, fail-fast 503 health policy.
+- **ADR-0013** — steam-next subprocess isolation (BL10). **Superseded 2026-06-22** (re-arch ③c): the Steam worker was deleted.
+- **ADR-0014** — Epic prefill parses manifests in pure Python; no vendored `legendary` (F6).
+- **ADR-0015** — Operator-driven cache purge (F18, #243).
+- **ADR-0016** — Ownership as an explicit input. **Proposed**; its invariant stands, and its mechanism is resolved elsewhere.
+- **ADR-0017** — Rejected by adversarial review; there is no file. ADR-0018 records why.
+- **ADR-0018** — Standalone ownership and launcher-auth service, including Steam credential custody. **Proposed**, not built.
+- **ADR-0019** — One-login Steam manifest helper on SteamKit2 (#361). It replaces one DepotDownloader process per app.
 
-Pending / scheduled:
+**Scheduled at Phase 1 and never written.** Each decision ended one of three ways:
+- **Moot after the re-architecture:** ADR-0002 (pinning `steam-next`), ADR-0005 (Spike F) and ADR-0007 (lancache via the compose service name).
+- **Answered elsewhere:** ADR-0006 by ADR-0014, and ADR-0004 in part by ADR-0008.
+- **Never written as an ADR:** ADR-0003. The choice of in-memory `MemoryJobStore` is explained in PRODUCT_MANIFESTO.md and in FEATURES.md (F12, D2), and the code is `scheduler/manager.py`.
 
-- **ADR-0002** — steam-next SHA pin + 15-day fork-trigger policy (OQ4).
-- **ADR-0003** — `MemoryJobStore` over `SQLAlchemyJobStore`.
-- **ADR-0004** — Raw SQL + numbered migrations, no ORM (DQ2–DQ8 consolidated). *(Partially captured in ADR-0008.)*
-- **ADR-0005** — Spike F result → A vs B final commitment.
-- **ADR-0006** — Vendored `legendary` subset vs PyPI.
-- **ADR-0007** — Lancache reached via compose service name (`http://lancache:80`).
-
-### 3.3 Stack (exact dependencies to pin in Phase 2)
+### 3.3 Stack (pinned; rows updated 2026-10-16)
 
 | Layer | Choice | Pinned via |
 |---|---|---|
-| Language | Python 3.12 | Base image `python:3.12-slim` |
-| Web framework | FastAPI (latest stable at Phase 2 init; verify via Context7) | `requirements.txt` with hash |
+| Language | Python 3.12 | Base image `python:3.12-slim`, by digest |
+| Web framework | FastAPI | `requirements.txt` with hash |
 | ASGI server | `uvicorn[standard]` (uvloop + httptools) | `requirements.txt` with hash |
 | HTTP client | `httpx[http2]` | `requirements.txt` with hash |
 | DB driver | `aiosqlite` | `requirements.txt` with hash |
@@ -149,12 +174,18 @@ Pending / scheduled:
 | Logging | `structlog` | `requirements.txt` with hash |
 | Config | `pydantic` v2 + `pydantic-settings` | `requirements.txt` with hash |
 | CLI | `click` | `requirements.txt` with hash |
-| Steam protocol | `fabieu/steam-next` (git SHA) | pip install `git+https://github.com/fabieu/steam-next@<SHA>` |
-| Epic protocol | Vendored subset of `legendary-gl/legendary` | `vendor/legendary/` in repo with SHA recorded in `VENDORED.md` |
+| Steam manifests | C# (.NET 10) helper on SteamKit2 (LGPL-2.1), `tools/steam_manifest_helper/` | NuGet exact versions with committed lock files; built in the Dockerfile's `helper` stage from a digest-pinned `dotnet/sdk:10.0` |
+| Steam downloading | SteamPrefill, a host binary on the NAS | Outside this image. Run by the host cron, and by the agent through a bind mount at `/SteamPrefill` |
+| Epic protocol | Pure-Python manifest parsing (ADR-0014) | No vendored code |
 
-### 3.4 Process topology
+### 3.4 Process topology — rewritten 2026-10-16
 
-Single container. Single process. Three work zones inside that process (above). No sidecars, no broker, no worker pool. No Celery/Redis. Container image target < 250 MB.
+Two containers on two hosts (§3.5). Both run builds of one image, `orchestrator:dpa`, built on the LXC and copied to the NAS. A deploy to one host only leaves the two on different builds.
+
+- **Control plane** — one `uvicorn` process (`orchestrator.api.main:app`) running FastAPI, APScheduler, the jobs worker and the SQLite pool.
+- **Data-plane agent** — one process (`python -m orchestrator.agent`, port 8780). It starts child processes: SteamPrefill for Steam prefill jobs, and the manifest helper during `fetch_manifests`.
+
+No broker, no Celery/Redis. The image measures 254 MB in CI's image-size check, against its 275 MiB amd64 limit. That limit was raised from 250 MiB on 2026-10-07 when the .NET helper was added. The LXC's containerd store reports a larger figure for the same image; compare CI's number.
 
 ### 3.5 Deployment topology — SUPERSEDED, rewritten 2026-09-19
 
@@ -194,10 +225,17 @@ the data plane stayed on the NAS. The orchestrator reaches the agent over HTTP
 - **`cache-catcher` is the exception:** it serves no traffic and runs no jobs, so
   restarting it needs no window.
 
-Security posture for the control-plane container (non-root, `read_only`,
-`cap_drop: [ALL]`, `no-new-privileges`, `orchestrator_token` as a secret file)
-carries over from the original design and is unchanged. The agent is the
-deliberate exception on `user:`, for the reason above.
+**Control-plane container hardening is NOT what the original design specified.**
+Corrected 2026-10-16 against `docker inspect orchestrator` on LXC 1105. The
+original design called for non-root, `read_only`, `cap_drop: [ALL]`,
+`no-new-privileges`, and `orchestrator_token` as a secret file. Of those, only
+**non-root** is live: the image's `USER orchestrator`. `/root/deploy-orchestrator-lxc.sh`
+runs the container with a writable root filesystem (`ReadonlyRootfs=false`), no
+dropped capabilities (`CapDrop=[]`) and no security options (`SecurityOpt=[]`).
+The bearer token arrives as the `ORCH_TOKEN` env var from `/root/orch-lxc.env`,
+not as a secret file. A previous version of this section said the posture was
+"unchanged"; that was never verified. Hardening the deploy script is tracked in
+#374. The agent runs as root by design, for the reason above.
 
 ---
 
@@ -239,25 +277,25 @@ Full matrix in `docs/phase-1/threat-model.md` §5 cross-references every TM to i
 
 ## 5. Data Model
 
-<!-- Last Updated: 2026-09-07 -->
+<!-- Last Updated: 2026-10-16 -->
 
 Full artifact: `docs/phase-1/data-model.md`. Canonical SQL lives at `src/orchestrator/db/migrations/0001_initial.sql` (packaged as Python package-data per ADR-0008, loaded via `importlib.resources`).
 
 ### 5.1 Entity inventory
 
-Eight entity tables + one meta table:
+Eleven entity tables + one meta table (migrations 0001–0018):
 
 - `platforms` — enum-like with 2 rows (seeded by 0001).
-- `games` — one row per `(platform, app_id)`. Since migration 0015 the row carries **cache truth** (`status`, `status_measured_at`, `last_measure_attempt_at`) and **job outcome** (`last_job_outcome`, `last_job_outcome_at`) as separate, disjoint sets of columns — see §5.7.
+- `games` — one row per `(platform, app_id)`. Since migration 0015 the row carries **cache truth** (`status`, `status_measured_at`, `last_measure_attempt_at`) and **job outcome** (`last_job_outcome`, `last_job_outcome_at`) as separate, disjoint sets of columns — see §5.7. Migration 0018 (#316) retired the unreachable `failed` value. The 19 owned games stuck on it became `blocked`, after a live check on 2026-09-20 confirmed they cannot be downloaded. It changes data only, no schema: `failed` stays legal in the `CHECK` constraint, which SQLite cannot alter in place.
 - `manifests` — one row per `(game_id, version)`, `raw BLOB` compressed.
 - `block_list` — independent; no FK to games (allows pre-blocking unknown app_ids).
 - `validation_history` — one row per F7 run.
-- `jobs` — one row per enqueued operation (prefill / validate / library_sync / auth_refresh / sweep).
+- `jobs` — one row per enqueued operation. There are 8 kinds: `prefill`, `validate`, `library_sync`, `manifest_fetch`, `fetch_manifests`, `sweep`, `auth_refresh` and `purge`. The CHECK constraint was last widened by migration 0014.
 - `cache_observations` — populated only when Post-MVP access-log tail ships (DQ2 — schema ships in 0001).
 - `measurement_transitions` — one row per cache-truth write, observed or commanded (migration 0015; `commanded` added by 0016): `game_id`, `prior`, `new_status`, `downward`, `commanded`, `occurred_at`. The circuit breaker counts only `commanded = 0` rows — see §5.7. Durable rather than in-memory because the breaker that reads it must survive a restart, and a restart is exactly what produced the 2026-09-01 corruption.
-- `sweep_pass` — the validation sweep's pass boundary (migration 0017): `pass_number`, `pass_started_at`, pinned to a single row by `CHECK (id = 1)`. A full pass costs ~12.5 h against a 6 h job cap, so it necessarily spans several runs; gating candidates on `pass_started_at` is what makes an empty candidate set a *proof of coverage* rather than a coincidence — see §5.7. Single-row by construction because "the current pass" must never be ambiguous.
-- `prefill_exclusions` — one row per game excluded from FUTURE scheduled prefill (migration 0012), carrying the source of the exclusion so an operator's manual choice and the #225 auto-classifier's are distinguishable. Independent of `block_list`, which blocks a game outright; an exclusion only stops the scheduler picking it up.
-- `steam_app_info` — cached Steam app metadata including the category flags the #225 auto-classifier reads to exclude soundtracks, tools, servers and demos (migration 0013). A cache of an external API, not cache truth: it is safe to delete and refetch.
+- `sweep_pass` — the validation sweep's pass boundary (migration 0017): `pass_number`, `pass_started_at`, pinned to a single row by `CHECK (id = 1)`. A full pass costs more than one 6 h-capped run, so it necessarily spans several runs; gating candidates on `pass_started_at` is what makes an empty candidate set a *proof of coverage* rather than a coincidence — see §5.7. Single-row by construction because "the current pass" must never be ambiguous.
+- `prefill_exclusions` — one row per game excluded from FUTURE scheduled prefill. Migration 0011 created it with a `source` column, which records where each exclusion came from, so an operator's manual choice and the #225 auto-classifier's are distinguishable. Migration 0012 added the `gameshelf` source. Independent of `block_list`, which blocks a game outright; an exclusion only stops the scheduler picking it up.
+- `steam_app_info` — cached Steam app metadata. Migration 0008 created it, and 0013 added the category flags the #225 auto-classifier reads to exclude soundtracks, tools, servers and demos. A cache of an external API, not cache truth: it is safe to delete and refetch.
 - `schema_migrations` — migration runner meta; created by runner if missing.
 
 ### 5.2 Key constraints
@@ -305,7 +343,7 @@ Design artifact: `docs/superpowers/specs/2026-09-04-cache-validation-integrity-d
 `games.status` used to carry two unrelated meanings — what a measurement found on disk, and how the last job ended. On 2026-09-01 an interrupted prefill batch stamped 1769 games with a dead job's outcome, and Epic's scheduled prefill (which reads status) would have re-downloaded 655 already-cached titles. The two meanings now live in disjoint columns, and the split is enforced rather than merely documented.
 
 - **One writer.** `games.status` and `games.status_measured_at` are written by exactly one function: `orchestrator.jobs.measurement.record_measurement()`. Every other module — the validate handler, both prefill handlers, the jobs worker, the boot reaper, purge, library_sync — records how a job ended through `record_job_outcome()`, which writes `last_job_outcome` / `last_job_outcome_at` (and mirrors the text into the legacy `last_error` column until that column is retired) and has no access to the truth columns. **The rule is enforced by a build-breaking source scan** (`tests/test_measurement_writer_guard.py`), which fails CI if any other module under `src/orchestrator` contains a statement assigning `status` or `status_measured_at` on `games`. A source scan rather than a runtime test, because the regression it prevents is a new `UPDATE games SET status=…` typed into a handler that no existing test would execute.
-- **The four columns.** `status_measured_at` moves only on a successful measurement; `last_measure_attempt_at` moves on **every** attempt, success or failure; `last_job_outcome` / `last_job_outcome_at` record the last job's fate and are never consulted for a download decision. The `status` vocabulary itself is unchanged (renaming it would have forced a snapshot/drop/recreate of the whole table, since SQLite cannot alter a `CHECK` constraint in place). `downloading` and `failed` are no longer written by anything — in-flight state is the `jobs` row (`state='running'`).
+- **The four columns.** `status_measured_at` moves only on a successful measurement; `last_measure_attempt_at` moves on **every** attempt, success or failure; `last_job_outcome` / `last_job_outcome_at` record the last job's fate and are never consulted for a download decision. The `status` vocabulary itself is unchanged (renaming it would have forced a snapshot/drop/recreate of the whole table, since SQLite cannot alter a `CHECK` constraint in place). `downloading` and `failed` are no longer written by anything — in-flight state is the `jobs` row (`state='running'`). Since migration 0018, no row holds `failed` either (§5.1).
 - **Measurement before download.** Epic's scheduled prefill (`scheduler/jobs.py::enqueue_scheduled_prefill`) selects `status IN ('validation_failed','not_downloaded') AND status_measured_at IS NOT NULL`. Previously `status <> 'up_to_date'`, i.e. "not proven cached" meant "download it". Nothing is downloaded without a measurement that actually looked and found the game absent or incomplete; `unknown` triggers measurement, never traffic. (Steam downloading stays driven by the host SteamPrefill cron and is out of this scope.)
 - **Ordering is the resume cursor.** The F13 sweep selects owned games `ORDER BY last_measure_attempt_at ASC NULLS FIRST, id ASC` and carries **no status filter at all**. A persisted cursor would go stale on every insert or delete and need its own repair path; ordering needs no persisted state, because an attempted game sorts to the back and an interrupted sweep therefore resumes by construction. Removing the status filter removes a whole bug class — no status value can ever be excluded from measurement again. Supported by `idx_games_measure_attempt`.
 - **Circuit breaker.** `record_measurement()` ranks the four cache-truth states (`up_to_date` 3, `validation_failed` 2, `not_downloaded` 1, `unknown` 0; every other value carries no rank and takes no part) and refuses to write once `ORCH_MEASUREMENT_BREAKER_THRESHOLD` games have dropped a rank inside `ORCH_MEASUREMENT_BREAKER_WINDOW_MINUTES`, raising `CircuitBreakerTripped` and pushing DOWN to `ORCH_KUMA_PUSH_MEASUREMENT_BREAKER` once per window. Since #313 the once-per-window clock is stamped **after** the push and only on a delivery the monitor accepted; an undelivered push (connection failure, or an HTTP error such as the 404 a mistyped token returns) is retried after a 60 s backoff instead of silencing the incident for the full window. Upward moves are ignored at any volume, so a recovery sweep over repaired `unknown` rows stays silent. The sweep stops on a trip and logs `sweep.aborted` rather than `sweep.completed`, and (since #311) does **not** advance the sweep pass — an aborted run cannot be mistaken for coverage. **`commanded` is the one exception to the veto:** `record_measurement(..., commanded=True)` — passed only by purge, whose files are already unlinked by the time it records — is exempt from the breaker, because a purge is cache truth this system *caused* rather than an observation whose trustworthiness is in question, and refusing it would leave a green badge over an empty cache (security audit finding 1, SEV-2). It is **not** an exception to the transition log: since #310 the row is written and marked `commanded = 1`, and the breaker's window count (and its supporting partial index, rebuilt by migration 0016) reads only unmarked rows. So a purge storm still cannot trip the alarm, and it is no longer invisible in the record of cache truth — which is where the reader looking for "what happened to the library" goes first.
@@ -329,48 +367,52 @@ Recorded per Builder's Guide §1.4.5 requirement.
 
 ## 7. Auth & Identity Strategy
 
-<!-- Last Updated: 2026-04-20 -->
+<!-- Last Updated: 2026-10-16 -->
 
 ### 7.1 Two auth boundaries
 
 The orchestrator authenticates across two unrelated boundaries:
 
-1. **Platform auth** (Steam + Epic) — the orchestrator ACT AS the operator to their Steam and Epic accounts to enumerate libraries and download content via Lancache.
+1. **Platform auth** — the operator's Steam and Epic accounts are used to enumerate libraries and download content via Lancache. **Only Epic authenticates through the orchestrator.** Steam logins are held outside the API process (§7.2).
 2. **API auth** (consumers → orchestrator) — CLI, status page, and Game_shelf authenticate TO the orchestrator with a static bearer token.
 
 ### 7.2 Platform auth (per F1, F2)
 
-**Steam (Steam CM):**
-- Interactive login via CLI (`orchestrator-cli auth steam`): username + password + Steam Guard code.
-- 2FA type disambiguation (JQ1 conditional) — if `steam-next` exposes the challenge type, CLI prompt discriminates mobile-authenticator vs email-code.
-- Refresh token persisted at `/var/lib/orchestrator/steam_session.json` mode 0600.
-- Silent reconnect at every container start; no re-login required while the token is valid.
-- Steam sends a "new device login" email on first auth — CLI warns operator; README documents.
+**Steam — no orchestrator login (rewritten 2026-10-16).** The `orchestrator-cli auth steam` command and the `steam-next` session file described here originally were deleted with the in-process Steam worker in re-arch ③ (ADR-0013, superseded). Two components hold Steam sessions today, both on the NAS:
+- **SteamPrefill** (host binary, host cron) keeps its own persistent login for downloading.
+- **The manifest helper** (`/steam-manifest-helper/SteamManifestHelper`, ADR-0019) imported the session token DepotDownloader had already saved, so it needed no phone approval. It uses that session until Steam rejects it. Its exit codes:
+  - **Exit 2, token rejected:** the message names the helper's `login` subcommand.
+  - **Exit 3, session missing or unreadable:** same advice. This covers no or invalid `session.json`, the wrong account, or no DepotDownloader login to import.
+  - **Exit 2, other refusals or Steam unreachable:** no login advice, because the token was never judged.
+
+  To renew, the operator runs `login` once with a TTY and approves it in the Steam app. Nothing renews the session silently.
+
+The planned single custodian for all Steam credentials is ADR-0018 §5.11. It is **Proposed, not built**.
 
 **Epic (Epic OAuth):**
 - Interactive auth-code exchange via CLI (`orchestrator-cli auth epic`): user pastes code from `https://legendary.gl/epiclogin`.
-- Access + refresh tokens persisted at `/var/lib/orchestrator/epic_session.json` mode 0600.
+- Only the refresh token is persisted, at `/var/lib/orchestrator/epic_session.json`, mode 0600, opened with `O_NOFOLLOW` (`platform/epic/oauth.py::save_refresh_token`).
 - Silent refresh with 10-minute pre-expiry buffer; no ongoing user action required.
 
 **Credential handling rules** (threat-model TM-004, TM-012):
 - Credentials enter via CLI stdin only — never logged, never written to DB, never in env vars.
-- Refresh tokens logged as `token_sha256_prefix=<first 8 hex of SHA256>`, never raw.
+- Tokens are never logged, raw or hashed. The `token_sha256_prefix` field planned at Phase 1 does not exist in the code.
 - On auth failure, no session file is written (prevents corrupted-state carryover).
-- Session files world-readable check at startup logs WARN if mode drift detected.
+- Not implemented: nothing checks session-file modes at startup. The Phase 1 world-readable WARN does not exist.
 
 ### 7.3 API auth (per F9)
 
-- Single static bearer token loaded from Docker secret `/run/secrets/orchestrator_token`.
+- Single static bearer token. Settings accept it as the secrets-file name `orchestrator_token` or as the env var `ORCH_TOKEN`. **Live, it is the `ORCH_TOKEN` env var**: from `/root/orch-lxc.env` on the control plane, and on the NAS from `agent.env`, the `env_file` of `orchestrator-agent` in `/home/karl/lancache-host/docker-compose.yml` (corrected 2026-10-16; see §3.5).
 - Stripped of whitespace, minimum 32 characters.
 - Timing-safe comparison via `hmac.compare_digest` (threat-model TM-001).
-- **Missing secret at startup → container refuses to start** (CRITICAL + exit 1).
-- `POST /api/v1/platforms/{name}/auth` requires `request.client.host == '127.0.0.1'` in addition to the bearer (OQ2 / TM-023 mitigation).
+- **Missing token at startup → the process refuses to start.** Building the app raises `ValueError: orchestrator_token validation failed: Field required`, and the process exits 1. No CRITICAL line is logged.
+- Paths matching `/api/v1/platforms/{name}/auth` require a loopback client (`127.0.0.1`, `::1`) in addition to the bearer (OQ2 / TM-023 mitigation). Today the only such route is `/api/v1/platforms/epic/auth`. The OpenAPI schema and docs pages are loopback-only too (`api/_constants.py::LOOPBACK_ONLY_PATTERNS`).
 
 **Rotation procedure** (documented in Phase 4 HANDOFF.md):
 1. Generate new token (`openssl rand -hex 32`).
-2. Update Docker secret on DXP4800 (`docker secret create` or file-based).
+2. Update `ORCH_TOKEN` in `/root/orch-lxc.env` on LXC 1105 and in `agent.env` on the NAS. The control plane sends its own token as the bearer to the agent (`api/main.py`, `AgentClient(token=...)`).
 3. Update `ORCHESTRATOR_TOKEN` env on Game_shelf LXC.
-4. Restart both services.
+4. Recreate the services in an empty-queue window. A recreate reaps a running sweep (§3.5).
 5. Stale tokens return 401 until restart completes.
 
 ### 7.4 Explicit non-goals
@@ -523,36 +565,78 @@ regardless.
 
 ## 9. Interface Specifications (CLI + REST + Status Page + Game_shelf contract)
 
-<!-- Last Updated: 2026-04-27 -->
+<!-- Last Updated: 2026-10-16 -->
 
 Full artifact: `docs/phase-1/interface-spec.md`. Summary here. **BL5 implements the REST API skeleton** (F9 partial); see ADR-0012 for design.
 
 ### 9.1 CLI (F11)
 
-Click-based. Commands: `auth steam|epic|status`, `library sync`, `game <p/a> [show|validate|prefill|block|unblock]`, `jobs [list|--active|<id>]`, `db migrate|rollback|vacuum`, `config show`.
+Click-based; entry point `orchestrator-cli`. Most groups talk to the API at `--url` (default `http://127.0.0.1:8765`). The exceptions are `db` (local admin with no API endpoint, by design) and `config show` (reads local settings). Commands, as `orchestrator-cli --help` lists them on 2026-10-16:
 
-Exit codes: 0 success, 1 user error, 2 environment error, 3 auth error, 4 upstream error, 130 SIGINT.
+| Group | Subcommands |
+|---|---|
+| `auth` | `epic`, `status` (there is no `auth steam`; see §7.2) |
+| `cache` | `fetch-manifests`, `validate-all` |
+| `config` | `show` |
+| `db` | `migrate`, `vacuum` (no `rollback`; down-migrations are out of scope, §5.4) |
+| `game` | `list`, `show`, `validate`, `prefill` (`--force`), `purge`, `block`, `unblock`, each taking a numeric `GAME_ID` except `list` |
+| `jobs` | (no subcommands) filtered by `--kind`, `--state`, `--limit` |
+| `library` | `sync` |
+| `selection` | `allow`, `classify`, `exclude`, `exclusions`, `unset` |
+| `status` | (no subcommands) overall health and platform auth |
 
-All interactive subcommands define four states (Empty/Loading/Error/Success). Non-interactive subcommands use `[OK]` / `[ERROR]` text-prefix output.
+`game list` filters by `--platform`, `--status` and `--title`, a `contains` match, and pages with `--limit`/`--offset`.
+
+Exit codes (`cli/client.py` plus Click):
+- **0:** success.
+- **1:** an error the API returned (e.g. 404), or an unexpected response.
+- **2:** API unreachable, and also Click's own usage errors (unknown option, a non-integer `GAME_ID`).
+- **3:** auth failure.
+
+The Phase 1 codes 4 (upstream error) and 130 (SIGINT) are not implemented.
+
+All interactive subcommands define four states (Empty/Loading/Error/Success). Output lines carry a glyph beside a text label (`cli/output.py`): `✓` for success, `⚠` for a warning, and `✗` for an error, written to stderr. Status cells read like `✓ UP_TO_DATE`.
 
 Colorblind-safe: text prefixes are primary signal; color is additive.
 
 ### 9.2 REST API (F9)
 
-FastAPI on `:8765`, mounted at `/api/v1/*`. Bearer-auth (timing-safe) on every endpoint except `/api/v1/health`. `POST /api/v1/platforms/{name}/auth` additionally requires 127.0.0.1 origin.
+FastAPI on `:8765`, mounted at `/api/v1/*`. Bearer-auth (timing-safe) is required on every route except those in `api/_constants.py::AUTH_EXEMPT_PATHS`:
+- `/api/v1/health`;
+- the status-page shell at `/`, whose data fetches are themselves bearer-gated;
+- the schema and docs pages (`openapi.json`, `docs`, `redoc`), which are loopback-only instead.
 
-12 endpoints enumerated in `docs/phase-1/interface-spec.md` §2.4 with four-state behavior per endpoint. Mutation responses use the normalized envelope `{"ok", "job_id", "message"}` (DQ6).
+`/api/v1/platforms/{name}/auth` additionally requires a loopback client (§7.3).
 
-Request body size cap 32 KiB; Pydantic `extra='forbid'` on every model; unknown fields → 422.
+**25 routes as of 2026-10-16**, counted from the router modules: 24 under `/api/v1` plus the status page at `/`. The Phase 1 figure was 12, and the list in `docs/phase-1/interface-spec.md` §2.4 is the original spec, not the current surface. The running app's OpenAPI document (`/api/v1/openapi.json`, loopback-only) is the canonical list. The groups:
+- health, platforms
+- games: list, show, validate, prefill, purge
+- block-list
+- jobs
+- manifests and `fetch-manifests`
+- `sweep`
+- Steam and Epic `library/sync`
+- Epic `auth`
+- `selection/candidates`
+- `prefill-exclusions`
+- `manual-downloads/{launcher}`
 
-OpenAPI 3.1 auto-generated at `/api/v1/openapi.json`; Swagger UI at `/api/v1/docs` (bearer-authenticated).
+**Mutation responses carry no envelope.** The Phase 1 DQ6 envelope `{"ok", "job_id", "message"}` was never built; it exists only in `docs/phase-1/interface-spec.md`. The real shapes:
+- **Job triggers** (validate, prefill, purge, library sync) return 202 `{"job_id": N}`. `fetch-manifests` adds `queued`, and `sweep` adds `full` and `queued`.
+- **Block-list:** POST returns the entry (201 when new, 200 when it already existed), and DELETE returns `{"removed": n}`.
+- **Prefill-exclusions** return the row or `{"deleted": n}`. The Game_shelf bulk PUT returns `{"platform", "added", "removed", "total"}`.
+- **Epic auth** returns `{"account_id", "display_name"}`.
+
+Request body size cap 32 KiB; Pydantic `extra='forbid'` on every model. Unknown fields → **400**, because `api/main.py` converts FastAPI's default 422 to 400.
+
+OpenAPI 3.1 at `/api/v1/openapi.json`, Swagger UI at `/api/v1/docs` and ReDoc at `/api/v1/redoc`. All three are loopback-only and exempt from the bearer.
 
 Latency SLOs (Intake §2.3):
 - `/api/v1/health`: p99 < 50 ms idle, < 100 ms under Spike F load.
 - `/api/v1/games` (full list): p99 < 500 ms at 2,200 games.
 - `/api/v1/platforms`: p99 < 50 ms.
-- `/api/v1/games/{p}/{a}`: p99 < 100 ms.
-- `/api/v1/jobs`, `/api/v1/stats`: p99 < 200 ms.
+- `/api/v1/games/{game_id}`: p99 < 100 ms.
+- `/api/v1/jobs`: p99 < 200 ms. (The Phase 1 `/api/v1/stats` endpoint does not exist in the current code.)
 
 ### 9.3 Status page (F10)
 
@@ -560,15 +644,19 @@ Single static HTML < 20 KB gzipped at `GET /`. Bearer token entered via `session
 
 5 panels: Health, Platforms, Active Jobs, Stats, Recent Errors. Each has four states. Every status indicator uses color + icon + text label (Intake §9 colorblind-safe hard constraint).
 
-Polling: `/health`, `/platforms`, `/jobs?active` every 2 s; `/stats`, recent errors every 10 s. Back off to 10 s on 5xx until success.
+Polling, per `api/routers/status.py`:
+- **Every 2 s** (`POLL_FAST_MS`): `/health`, `/platforms`, `/jobs?state=queued&limit=10` and `/jobs?state=running&limit=10`.
+- **Every 10 s** (`POLL_SLOW_MS`): Stats, built from `/games?limit=1` and `/manifests?limit=1`, and recent errors from `/jobs?state=failed&limit=5`.
+
+There is no `/stats` endpoint. Back off to 10 s on 5xx until success.
 
 ### 9.4 Game_shelf contract (F14 consumer; Game_shelf repo owns implementation)
 
 Orchestrator commits to:
 - `/api/v1/*` endpoint stability within major version.
-- Mutation envelope stability.
+- Mutation response shapes (§9.2) stay stable within the major version. There is no envelope.
 - Version + status always present on `/api/v1/health`.
-- CORS default-deny, allowlist via `CORS_ORIGINS` env.
+- CORS default-deny, allowlist via the `ORCH_CORS_ORIGINS` env var.
 - Bearer token rotation documented; no schema change on Game_shelf side.
 
 Game_shelf commits to:
