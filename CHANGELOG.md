@@ -19,6 +19,21 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Documentation — the live validation sweep runs one day a week — 2026-11-08
+
+- **Documentation: `docs/deploy/live-configuration.md`** records the new live
+  setting `ORCH_VALIDATION_SWEEP_CRON=0 3,9,15,21 * * wed` in
+  `/root/orch-lxc.env` (LXC 1105).
+  - **Why:** at four runs a day, the sweep kept the NAS cache array busy about
+    21 h of every 24, and passes 45 and 46 found nothing.
+  - **The cost:** a lost game is now typically noticed 7–8 days later (up to
+    about 2 weeks for games checked late on a Wednesday), not about 1 day.
+- **Infrastructure: Kuma 180's interval went from 43200 to 691200 s** to match
+  the new schedule.
+- The same doc corrects the pass length (about 25 h across 4–5 runs; it was
+  ~12.5 h when #311 landed).
+- No code changed. The default in `settings.py` stays four runs a day.
+
 ### Security — certifi trusted emSign roots with compromised intermediate keys (PYSEC-2026-4320) — 2026-10-25
 
 The CI dependency audit began failing on `main`'s pins with two newly disclosed advisories. It surfaced on PR #377, whose diff touches no requirements file.
