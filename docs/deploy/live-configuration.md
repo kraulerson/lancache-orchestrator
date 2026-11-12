@@ -73,6 +73,7 @@ print or copy the secret values anywhere — `ORCH_TOKEN` and the five
 | `ORCH_SCHEDULED_PREFILL_ENABLED` | `true` | Epic scheduled prefill. Was `false` through the post-#305 convergence period; re-enabled once the recovery sweeps completed |
 | `ORCH_SWEEP_BATCH_SIZE` | `2` | see below |
 | `ORCH_SWEEP_DEADLINE_MARGIN_SEC` | *(absent — default `1800`)* | see below |
+| `ORCH_VALIDATION_SWEEP_CRON` | `0 3,9,15,21 * * wed` | one sweep day a week since 2026-11-08; see below |
 | `ORCH_KUMA_PUSH_LIBRARY_SYNC` | *(secret URL)* | job heartbeat → Kuma 179 |
 | `ORCH_KUMA_PUSH_SWEEP` | *(secret URL)* | → Kuma 180 |
 | `ORCH_KUMA_PUSH_SCHEDULED_PREFILL` | *(secret URL)* | → Kuma 181 |
@@ -122,13 +123,46 @@ the next run. Small games keep starting right up to the margin.
 **`ORCH_JOB_MAX_RUNTIME_SEC` — absent; default 21300 s (5 h 55 min, #380).** It
 used to equal the 6 h sweep interval. A cap-hit then landed on the next sweep's
 trigger instant, whose dedup check still saw the old job running and **skipped
-that slot**, so one overrun cost two runs. Keep it at least a minute under the
-interval; `tests/core/test_settings.py` enforces that for the default.
+that slot**, so one overrun cost two runs. The live weekly schedule still has
+its four Wednesday runs 6 h apart, so this applies there too. Keep it at least a
+minute under the interval; `tests/core/test_settings.py` enforces that for the
+default.
+
+**`ORCH_VALIDATION_SWEEP_CRON=0 3,9,15,21 * * wed` — one sweep day a week
+(2026-11-08).**
+- **Why it changed.** At the default four runs a day, the sweep kept the cache
+  array busy about 21 h of every 24. The NAS measured about 1,100 small reads a
+  second on `md125`, all from the agent's validate calls.
+  - A full pass of 3,256 games (about 8.1 TiB) took about 25 h across 4–5 runs.
+    Passes 45 and 46 ran back to back, and each found 0 failures and 0
+    evictions.
+- **The schedule.** The four runs now happen on Wednesdays (UTC), which is
+  Tuesday 20:00 to Wednesday about 19:30 MST.
+  - That is about 22 h of sweeping a week, slightly less than one pass.
+  - The pass resumes the next week, so on average a full pass completes about
+    every 8 days. Passes only finish on Wednesdays, so completions are 7 days
+    apart, with a 14-day gap about every 8 weeks.
+  - A game the cache lost is therefore typically noticed 7–8 days later. A game
+    checked in the last ~3 h of a Wednesday's runs (about 14% of the library)
+    can wait about 2 weeks for its next check. Until then, the game downloads
+    from the upstream CDN at normal speed.
+- **Name the weekday.** APScheduler counts day-of-week digits from Monday = 0,
+  so `* * 3` would mean Thursday. Current code refuses digits at boot (UAT 18
+  B3).
+- **To restore four runs a day,** delete the line rather than setting it to the
+  default value, and set Kuma 180's interval back to `43200`.
 
 **What the sweep monitor (Kuma 180) now means.** Since #311 a sweep pushes `up`
 on *every* scheduled run: `pass N partial: 1089/3212 games, 3.5 TiB of 8.1 TiB`
-while a pass is still in flight, and `pass N complete: ...` when it finishes — a
-pass spans several runs against the 5 h 55 min cap. So:
+while a pass is still in flight, and `pass N complete: ...` when it finishes.
+A pass spans 4–5 runs (about 25 h against the 5 h 55 min cap since #380; it was
+~12.5 h when #311 landed).
+
+Kuma 180's heartbeat interval is **691200 s (8 days)** to match the weekly
+schedule. It was `43200` (12 h), and at that interval the monitor would sit red
+six days a week. The last push of a sweep day lands about Thursday 02:30 UTC.
+If the next Wednesday is missed entirely, the monitor turns red about Friday
+02:30 UTC (Thursday ~19:30 MST). So:
 
 - **green** → the schedule is running. It does **not** mean the library was
   covered; read the message for that.
@@ -587,6 +621,7 @@ bypassing the cache.
 | LXC | `ORCH_SWEEP_BATCH_SIZE=2` | concurrency above the agent's 2-worker pool only queues, and burns the per-call timeout budget while queued |
 | LXC | `/etc/cron.d/orch-breaker-heartbeat` | a push monitor with no `up` is permanently red; with it, red means a real trip **or** ~48 h of a dead LXC/cron |
 | LXC | `ORCH_VALIDATION_SWEEP_ENABLED` absent | the sweep stays on at its default; an explicit `false` left behind silently stops all measurement |
+| LXC | `ORCH_VALIDATION_SWEEP_CRON` weekly, weekday named, Kuma 180 at `691200` | the cache array is read ~21 h a day; a digit weekday runs on the wrong day or refuses boot; a 12 h Kuma interval is red six days a week |
 | LXC | `ORCH_ALLOWED_SOURCE_IPS` | the API is bound `0.0.0.0`; this is the only thing restricting it (fail-closed at boot) |
 | LXC | `dpa-pre-<ref>` tag before every build | no named rollback; `docker load` leaves the old image dangling, recoverable by digest only |
 | LXC | `backup-pre-<ref>-<ts>.db` before a migration | no point-in-time DB to return to if a migration is wrong |
