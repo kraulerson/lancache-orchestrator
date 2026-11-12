@@ -19,6 +19,56 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — newly purchased Epic games are cached again (#388) — 2026-11-12
+
+New Epic purchases sat at `status='unknown'` for good: 12 owned games on
+2026-11-12, after 421 validations between them, and no Epic prefill job in 30
+days. It was a deadlock:
+- An Epic manifest is stored only by a prefill.
+- Validating a game without one returned `error/no_manifest`, which writes no
+  cache truth.
+- Scheduled prefill takes only games *measured* absent (#305).
+
+- **Fixed: `validator/disk_stat.py::_validate_epic_game`.**
+  - A game never prefilled (`last_prefilled_at IS NULL`) with no manifest now
+    validates as `missing` (reason `never_prefilled`). It becomes
+    `not_downloaded` with `status_measured_at` set, so scheduled prefill takes it.
+  - **Only for games scheduled prefill can take:** the same block-list and
+    `exclude` filters as `scheduler/jobs.py`. Otherwise it stays `no_manifest`.
+    Without that, 27 live rows would flip, not 8: the 15 retired to `blocked` by
+    migration 0018 (undoing it, and counted twice on Game_shelf's "Not cached"
+    tile) and 4 excluded games given a label nothing can correct.
+  - A prefilled game with no manifest is still an error. That means something
+    broke and must not trigger a download.
+  - `unknown → not_downloaded` is upward, so the circuit breaker ignores it.
+  - **Live effect:** of the 12 stuck games, the 8 that are eligible are queued
+    for prefill once measured. They are 3 Train Sim World 7 routes, Mechabellum,
+    Cardpocalypse, System Shock 2 25th, and the two FINAL FANTASY VII titles. A
+    game the Epic launcher already pulled through lancache may be served from
+    cache; that depends on the CDN identifier matching, and is unverified.
+- **Tests:**
+  - `tests/jobs/test_epic_never_prefilled.py` covers the chain end to end
+    (validate, then measurement, then scheduled prefill), plus the block-listed,
+    excluded and `allow`-override cases.
+  - `tests/validator/test_disk_stat.py` has two cases.
+  - Mutants caught: dropping the `last_prefilled_at` condition, and dropping the
+    `mode = 'exclude'` filter.
+- **Added: auto-block after 10 consecutive manifest 4xx (review finding 1).**
+  - **Why:** once measured `not_downloaded`, a game Epic will not serve would be
+    retried by every scheduled prefill, 4 times a day, forever. The Ouroboros
+    King did this 34 times in 9 days in July, until block-listed by hand.
+  - **What:** `jobs/handlers/prefill.py` now adds the game to `block_list`
+    (source `api`, reason naming #388) when this failure and the game's previous
+    9 prefill jobs are all manifest API or manifest download HTTP 4xx.
+  - **What doesn't count:** 401 (auth refresh) and 429 (rate limit) are
+    transient. A success or any other error breaks the streak.
+  - **Undo:** `orchestrator-cli game unblock <id>`.
+  - **Tests:** `tests/jobs/test_epic_auto_block.py` (6 tests). Mutants caught: a
+    threshold of 9, and 429 counted.
+- **Residual risk, recorded on #388 (review finding 3):** a bulk DB event that
+  leaves many manifestless, never-prefilled Epic rows would let them be
+  prefilled without a disk measurement.
+
 ### Fixed — a sweep no longer starts a game it cannot finish before the cap, and a cap-hit no longer costs the next sweep (#380) — 2026-11-01
 
 Sweep 47123 (2026-10-31 03:00 UTC) failed with `job exceeded max runtime of

@@ -419,9 +419,30 @@ async def test_validate_epic_no_cdn_base_is_error(pool):
     assert result.manifest_version == "1.0"  # intentional: returns real version, not ""
 
 
-async def test_validate_epic_no_manifest_is_error(pool):
-    """Epic game with no manifests row → error='no_manifest'; agent NOT called."""
+async def test_validate_epic_never_prefilled_no_manifest_is_missing(pool):
+    """#388: an Epic manifest is stored only by a prefill, so a game that was
+    never prefilled has none. That is evidence of absence, not a failure:
+    reporting it as an error left new purchases 'unknown' forever, and
+    scheduled prefill only takes games measured absent."""
+    game_id = await _seed_game(pool, platform="epic", app_id="99003")
+    agent = _FakeAgentEV({})
+    deps = Deps(pool=pool, agent_client=agent)
+
+    result = await validate_game(pool, deps, game_id, _settings())
+
+    assert result.outcome == "missing"
+    assert result.error == "never_prefilled"
+    assert (result.chunks_total, result.chunks_cached, result.chunks_missing) == (0, 0, 0)
+    assert agent.calls == []
+
+
+async def test_validate_epic_prefilled_but_no_manifest_is_error(pool):
+    """A game that WAS prefilled must have a manifest. Its absence means
+    something broke, which must not be read as 'absent' and trigger a download."""
     game_id = await _seed_game(pool, platform="epic", app_id="99002")
+    await pool.execute_write(
+        "UPDATE games SET last_prefilled_at = CURRENT_TIMESTAMP WHERE id = ?", (game_id,)
+    )
     # No manifest seeded intentionally.
     agent = _FakeAgentEV({})
     deps = Deps(pool=pool, agent_client=agent)
