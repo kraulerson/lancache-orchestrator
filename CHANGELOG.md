@@ -69,6 +69,76 @@ days. It was a deadlock:
   leaves many manifestless, never-prefilled Epic rows would let them be
   prefilled without a disk measurement.
 
+### Fixed — a sweep no longer starts a game it cannot finish before the cap, and a cap-hit no longer costs the next sweep (#380) — 2026-11-01
+
+Sweep 47123 (2026-10-31 03:00 UTC) failed with `job exceeded max runtime of
+21600.0s (cancelled)`. The #311 deadline stops games *starting* 30 min before the
+cap, but ARK (369,317 chunks) started 5m52s before that line. Its validation
+outlasted the 35m52s that remained. Single validations had grown to ~70 min
+(Atomic Heart 69.5, ARK 65.5, Diablo IV 63.5). The cap also equalled the 6 h
+sweep interval, so the cancel landed on the next trigger. Its dedup check still
+saw 47123 running and skipped the 09:00 sweep.
+
+- **Fixed: a size gate in `jobs/handlers/sweep.py`.**
+  - A game starts only if 1.25 × its expected validation fits before the hard
+    cap, with a 120 s buffer.
+  - The expectation is the **largest** of three figures:
+    - its **worst** non-error run in the last 30 days. Its last run is not
+      enough: ARK ranged 7.6–65.5 min across 23 runs;
+    - its chunk count × 10.3 ms, the p95 per-chunk time of cached runs. This
+      covers a quick run made while the game was absent from the cache;
+    - its size ÷ 61 MB/s, the slowest 5% of large-game runs since 2026-10-01.
+      Only 100 of 2,566 Steam rows carry a size.
+  - Error runs (`chunks_total = 0`) are excluded. They measured nothing and can
+    take a second, which would otherwise override the size (as in #308).
+  - A deferred game is logged `sweep.game_deferred` and left unstamped, so the
+    next run takes it first.
+  - A scheduled sweep that defers games reports `pass N partial` and succeeds. A
+    `full` (validate-all) run still reports `full sweep: N games`.
+  - The estimate is capped at `budget − max(margin, 240 s)`. A game costed above
+    a whole run therefore still starts at the beginning of one, even with a
+    small margin.
+  - The hard line is measured from the handler's first statement, so the
+    validator self-test (an agent RPC) and the candidate reads count, as they do
+    for the worker's timer.
+- **Changed: `job_max_runtime_sec` default 21600 → 21300** (5 h 55 min).
+  - A sweep picked up at its trigger now ends before the next :00 trigger. A
+    sweep picked up late, for example behind Tuesday's fetch_manifests, can
+    still reach the next trigger, because the cap counts from pickup.
+  - It applies to every job kind; no other kind is known to approach 6 h.
+  - The sweep's own deadline moves 5 min earlier with it.
+- **Tests:**
+  - `tests/jobs/test_sweep_size_gate.py` (11 tests) uses a driven clock and the
+    same budget and margin, so only the size gate decides. It covers:
+    - history alone;
+    - the 30-day window;
+    - error rows;
+    - the chunk floor;
+    - a small margin;
+    - the line counting from the handler's start;
+    - the estimate cap;
+    - no budget.
+  - `tests/core/test_settings.py` checks the default cap ends at least a minute
+    before the next sweep, using the interval derived from the default cron.
+  - Mutants each caught by at least one test: no estimate cap, no budget guard,
+    an empty history query, the window inverted to +30 days, and the window
+    widened to 365 days.
+  - The candidate-SQL spy in `tests/jobs/test_sweep_handler.py` now records only
+    reads of `games`.
+- **Review:** one adversarial review raised 5 findings, all reproduced and fixed
+  here:
+  - error rows overriding the size;
+  - the buffer allowing a permanent no-op with a small margin;
+  - the history half untested;
+  - the line measured after the self-test;
+  - stale docs.
+- **Documentation:**
+  - `docs/deploy/live-configuration.md`, the `settings.py` margin comment and
+    `README.md` no longer advise raising the margin for large titles, and give
+    the new cap.
+  - The stale 6 h figures in `agent_client.py` and the sweep comments are
+    corrected.
+
 ### Documentation — the live validation sweep runs one day a week — 2026-11-08
 
 - **Documentation: `docs/deploy/live-configuration.md`** records the new live
