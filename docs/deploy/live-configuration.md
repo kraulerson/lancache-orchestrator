@@ -97,18 +97,38 @@ size ever changes, change this to match it — they are one number in two files.
 
 **`ORCH_SWEEP_DEADLINE_MARGIN_SEC` — absent, and should usually stay absent
 (#311).** A sweep stops starting new games this long before `job_max_runtime_sec`
-(6 h) would cancel it, then reports a partial pass and **succeeds**. The check
-happens *between* games, so the margin has to cover the longest single validate
-or the job gets hard-cancelled anyway: ARK ModKit (244 GB, 359,671 chunks) is
-~22 min at current throughput, hence the 1800 s default. Raise it if a larger
-title lands. A value at or above `job_max_runtime_sec` is **refused at boot** —
-it would make every sweep a no-op that still reported healthy, which is worse
-than the DOWN it replaced.
+(5 h 55 min since #380) would cancel it, then reports a partial pass and
+**succeeds**. A value at or above `job_max_runtime_sec` is **refused at boot**. It
+would make every sweep a no-op that still reported healthy, which is worse than
+the DOWN it replaced.
+
+**The margin does not have to cover the longest game any more (#380).** The check
+gates only the *start* of a game, so the old advice was "raise the margin if a
+larger title lands". By 2026-10 single validations reached ~70 min (Atomic Heart
+69.5, ARK 65.5) against a 30 min margin. On 2026-10-31 ARK started 6 min before
+the line and the job was hard-cancelled. A **size gate** now also refuses to start
+a game whose expected validation, × 1.25, does not fit before the cap. The
+expectation is the largest of three figures:
+- its worst non-error run in the last 30 days;
+- its chunk count at 10.3 ms per chunk;
+- its size at 61 MB/s.
+
+Error runs are ignored, because they measured nothing. Most Steam rows have no
+size, so for those the history and chunk count carry the estimate.
+
+A refused game is logged `sweep.game_deferred`, left unstamped, and taken first by
+the next run. Small games keep starting right up to the margin.
+
+**`ORCH_JOB_MAX_RUNTIME_SEC` — absent; default 21300 s (5 h 55 min, #380).** It
+used to equal the 6 h sweep interval. A cap-hit then landed on the next sweep's
+trigger instant, whose dedup check still saw the old job running and **skipped
+that slot**, so one overrun cost two runs. Keep it at least a minute under the
+interval; `tests/core/test_settings.py` enforces that for the default.
 
 **What the sweep monitor (Kuma 180) now means.** Since #311 a sweep pushes `up`
 on *every* scheduled run: `pass N partial: 1089/3212 games, 3.5 TiB of 8.1 TiB`
 while a pass is still in flight, and `pass N complete: ...` when it finishes — a
-pass spans roughly two to three runs at ~12.5 h per pass against the 6 h cap. So:
+pass spans several runs against the 5 h 55 min cap. So:
 
 - **green** → the schedule is running. It does **not** mean the library was
   covered; read the message for that.

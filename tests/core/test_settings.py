@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import ipaddress
+import itertools
 import json
 from pathlib import Path
 
@@ -874,6 +875,25 @@ def test_sweep_deadline_margin_at_or_above_the_job_budget_is_rejected():
             job_max_runtime_sec=1800.0,
             sweep_deadline_margin_sec=1800.0,
         )
+
+
+def test_default_job_budget_ends_before_the_next_scheduled_sweep():
+    """#380: a sweep that hits the hard cap must be gone before the next trigger.
+
+    With the cap equal to the sweep interval, the cancel landed on the same
+    instant as the next scheduled sweep, whose dedup check still saw the old job
+    running and skipped the slot (2026-10-31 09:00:00). One overrun cost two runs.
+    """
+    s = Settings(orchestrator_token="a" * 32)
+    minute, hours = s.validation_sweep_cron.split()[:2]
+    assert minute == "0"
+    starts = sorted(int(h) for h in hours.split(","))
+    gaps = [b - a for a, b in itertools.pairwise(starts)] + [starts[0] + 24 - starts[-1]]
+    interval = min(gaps) * 3600
+    assert s.job_max_runtime_sec <= interval - 60, (
+        f"job_max_runtime_sec {s.job_max_runtime_sec} must end at least a minute "
+        f"before the next sweep ({interval} s apart)"
+    )
 
 
 def test_sweep_deadline_margin_is_unconstrained_when_the_budget_is_disabled():

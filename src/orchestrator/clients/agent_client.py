@@ -55,7 +55,7 @@ VALIDATE_TIMEOUT_ASSUMED_CHUNKS_PER_SEC = 40.0
 # wedged agent still surfaces as a failure rather than hanging forever.
 #
 # UPPER BOUND, and it is not negotiable: this must stay <= Settings.
-# job_max_runtime_sec (21600s). The worker wraps every handler in
+# job_max_runtime_sec (21300s since #380). The worker wraps every handler in
 # asyncio.wait_for, so a ceiling above the job budget is a fiction — the job is
 # cancelled first, and CancelledError is a BaseException that bypasses the
 # sweep's per-game `except Exception`, aborting validates with NO
