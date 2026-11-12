@@ -299,6 +299,15 @@ async def _validate_epic_game(
         (game_id,),
     )
     if manifest is None:
+        # #388: a manifest is stored only by a prefill, so a game never
+        # prefilled has none — and that IS a measurement: it is not cached by
+        # us. Reporting it as an error wrote no cache truth, left the game
+        # 'unknown' forever, and scheduled prefill (measured absence only) never
+        # took it. A prefilled game with no manifest stays an error: something
+        # broke, and that must not read as "absent" and trigger a download.
+        game = await pool.read_one("SELECT last_prefilled_at FROM games WHERE id=?", (game_id,))
+        if game is not None and game["last_prefilled_at"] is None:
+            return ValidationResult(0, 0, 0, "missing", "", "never_prefilled")
         return ValidationResult(0, 0, 0, "error", "", "no_manifest")
     if not manifest["cdn_base"]:
         return ValidationResult(0, 0, 0, "error", manifest["version"], "no_cdn_base")

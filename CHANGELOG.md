@@ -19,6 +19,31 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — newly purchased Epic games are cached again (#388) — 2026-11-12
+
+New Epic purchases sat at `status='unknown'` for good: 12 owned games on
+2026-11-12, after 421 validations between them, and no Epic prefill job in 30
+days. It was a deadlock:
+- An Epic manifest is stored only by a prefill.
+- Validating a game without one returned `error/no_manifest`, which writes no
+  cache truth.
+- Scheduled prefill takes only games *measured* absent (#305).
+
+- **Fixed: `validator/disk_stat.py::_validate_epic_game`.**
+  - A game never prefilled (`last_prefilled_at IS NULL`) with no manifest now
+    validates as `missing` (reason `never_prefilled`). It becomes
+    `not_downloaded` with `status_measured_at` set, so scheduled prefill takes it.
+  - A prefilled game with no manifest is still an error. That means something
+    broke and must not trigger a download.
+  - `unknown → not_downloaded` is upward, so the circuit breaker ignores it.
+  - A game already pulled through lancache by the Epic launcher costs no WAN
+    traffic to prefill.
+- **Tests:** `tests/jobs/test_epic_never_prefilled.py` (end to end: validate,
+  then measurement, then scheduled prefill) and two cases in
+  `tests/validator/test_disk_stat.py`. The mutant that drops the
+  `last_prefilled_at` condition is caught by both "prefilled stays an error"
+  tests.
+
 ### Documentation — the live validation sweep runs one day a week — 2026-11-08
 
 - **Documentation: `docs/deploy/live-configuration.md`** records the new live
