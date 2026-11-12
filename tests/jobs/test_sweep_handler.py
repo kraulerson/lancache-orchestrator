@@ -256,11 +256,15 @@ async def test_sweep_registered():
 
 
 def _capture_pool(pool, captured):
-    """Wrap pool.read_all to record the candidate SQL the sweep selects with."""
+    """Wrap pool.read_all to record the candidate SQL the sweep selects with.
+
+    Only reads of `games` are recorded: since #380 the sweep also reads
+    validation_history for the size gate, after selecting its candidates."""
     real = pool.read_all
 
     async def _spy(sql, *args):
-        captured["sql"] = sql
+        if " FROM games " in sql:
+            captured["sql"] = sql
         return await real(sql, *args)
 
     pool.read_all = _spy

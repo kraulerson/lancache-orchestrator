@@ -76,6 +76,42 @@ _CANDIDATE_SQL_FULL = (
     "ORDER BY last_measure_attempt_at ASC NULLS FIRST, id ASC"
 )
 
+# #380 — the size gate. The #311 deadline only stops games STARTING after
+# `budget - margin`; a game started just before it was unbounded, and single-game
+# validations now take up to ~70 min against a 30 min margin. On 2026-10-31 ARK
+# started 5m52s before the line, overran the hard cap, failed the job, and cost
+# the next scheduled sweep too.
+#
+# A game starts only if its expected validation fits before the hard cap. The
+# expectation is the largest of three figures, because each can be missing or
+# misleadingly small:
+#   * its WORST run in the window, not its last — the same game varies up to 8x
+#     run to run (ARK 7.6-65.5 min across 23 runs) with contention from the other
+#     batch slot;
+#   * its chunk count at the p95 per-chunk time of cached runs (10.3 ms, runs of
+#     20k+ chunks, 30 days to 2026-11-01) — a quick run while the game was absent
+#     from the cache still carries the manifest's chunk count;
+#   * its size at the slowest 5% of large-game throughput (61 MB/s) — the only
+#     figure for a never-validated game, but set for Epic only: 2466 of 2566
+#     Steam rows have no size_bytes.
+# Error rows are excluded (chunks_total = 0): an error measured nothing and can
+# take a second, which would otherwise stand in for the game's real size (the
+# same lesson as #308 in disk_stat.py). Deferring costs little — the game stays
+# unstamped and the next run takes it first — so err long.
+_SIZE_GATE_SAFETY = 1.25
+_SIZE_GATE_FALLBACK_BYTES_PER_SEC = 61_000_000
+_SIZE_GATE_SEC_PER_CHUNK = 0.0103
+_SIZE_GATE_CAP_BUFFER_SEC = 120.0
+_SIZE_GATE_HISTORY = "-30 days"
+_WORST_RECENT_SQL = (
+    "SELECT game_id, "
+    "MAX((julianday(finished_at) - julianday(started_at)) * 86400.0) AS secs, "
+    "MAX(chunks_total) AS chunks "
+    "FROM validation_history "
+    "WHERE finished_at IS NOT NULL AND chunks_total > 0 AND started_at >= datetime('now', ?) "
+    "GROUP BY game_id"
+)
+
 
 def _bytes(n: int) -> str:
     """Cache size for a one-line monitor message.
@@ -100,6 +136,9 @@ async def sweep_handler(job: dict[str, Any], deps: Deps) -> JobSummary | None:
     reports partial progress and succeeds anyway. Only a tripped breaker fails
     the job now, so `failed` on a sweep once again means genuinely broken.
     """
+    # #380: first, because the worker's runtime timer is already running; the
+    # validator self-test (an agent RPC) and the candidate reads all count.
+    started = monotonic()
     job_id = job.get("id")
     settings = get_settings()
 
@@ -132,7 +171,21 @@ async def sweep_handler(job: dict[str, Any], deps: Deps) -> JobSummary | None:
     # perfectly, and it cancelled mid-validate, which is how orphaned attempt
     # writes land after the job is already recorded (#314).
     budget = settings.job_max_runtime_sec
-    deadline = monotonic() + budget - settings.sweep_deadline_margin_sec if budget > 0 else None
+    deadline = started + budget - settings.sweep_deadline_margin_sec if budget > 0 else None
+    # #380: the line a started game must finish before, and the largest estimate
+    # the gate will act on — capped so a game costed above a whole run still
+    # starts at the beginning of one instead of being deferred forever.
+    hard_deadline = started + budget - _SIZE_GATE_CAP_BUFFER_SEC if budget > 0 else None
+    # The cap leaves at least one buffer of slack below the hard line, so time
+    # already spent in this handler cannot push a capped game past it at the
+    # start of every run (a margin under the buffer used to do exactly that).
+    estimate_cap = budget - max(settings.sweep_deadline_margin_sec, 2 * _SIZE_GATE_CAP_BUFFER_SEC)
+    worst: dict[int, float] = {}
+    if hard_deadline is not None:
+        for r in await deps.pool.read_all(_WORST_RECENT_SQL, (_SIZE_GATE_HISTORY,)):
+            worst[int(r["game_id"])] = max(
+                float(r["secs"] or 0.0), int(r["chunks"] or 0) * _SIZE_GATE_SEC_PER_CHUNK
+            )
 
     _log.info(
         "sweep.started",
@@ -190,13 +243,28 @@ async def sweep_handler(job: dict[str, Any], deps: Deps) -> JobSummary | None:
                 async with lock:
                     deadline_hit = True
                 return
+            # #380: and don't start a game that cannot finish before the cap.
+            if hard_deadline is not None:
+                expected = max(worst.get(game_id, 0.0), size / _SIZE_GATE_FALLBACK_BYTES_PER_SEC)
+                needed = min(_SIZE_GATE_SAFETY * expected, estimate_cap)
+                if monotonic() + needed > hard_deadline:
+                    async with lock:
+                        deadline_hit = True
+                    _log.info(
+                        "sweep.game_deferred",
+                        job_id=job_id,
+                        game_id=game_id,
+                        needed_sec=round(needed),
+                        remaining_sec=round(hard_deadline - monotonic()),
+                    )
+                    return
             async with lock:
                 attempted += 1
                 attempted_bytes += size
             try:
                 result = await validate_one_game(deps.pool, deps, game_id, settings)
             except asyncio.CancelledError:
-                # The 6h runtime budget expired, or the job was cancelled. Record
+                # The runtime budget expired, or the job was cancelled. Record
                 # the ATTEMPT so the game rotates to the back, write no cache
                 # truth, then re-raise so the job actually ends. This is the
                 # 2026-09-01 replay: a cancelled sweep must corrupt nothing.

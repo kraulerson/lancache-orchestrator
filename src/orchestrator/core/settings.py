@@ -249,7 +249,7 @@ class Settings(BaseSettings):
     # hours. 5-field cron (min hour dom mon dow), UTC.
     #
     # That non-overlap guarantee NO LONGER HOLDS and this schedule cannot restore
-    # it. A sweep once drained in ~39 min; it now runs until the 6h job cap, and
+    # it. A sweep once drained in ~39 min; it now runs until the job cap, and
     # a full pass takes ~12.5h across several runs (#311). The :45 Epic prefill
     # therefore starts squarely inside a running sweep, and validating an Epic
     # game while its prefill is still writing reports a false partial. Tracked as
@@ -315,10 +315,11 @@ class Settings(BaseSettings):
     # are then wrong by the batch factor under a sweep (PR #303 review).
     sweep_batch_size: int = Field(default=2, ge=1)
     # #311: how long before `job_max_runtime_sec` a sweep stops starting new
-    # games and returns a partial pass. The check happens BETWEEN games, so the
-    # margin has to cover the longest single validate or the job is hard-
-    # cancelled anyway: ARK ModKit (244 GB, 359,671 chunks) is ~22 min at the
-    # ~650 GiB/h the NAS sustains, hence 30. Raise it if a larger title lands.
+    # games and returns a partial pass. It no longer has to cover the longest
+    # single validate: since #380 a size gate in the sweep handler also refuses
+    # to start any game whose expected validation would not finish before the
+    # cap, so this only bounds the small games. The gate keeps its own 240 s of
+    # slack, so a small margin cannot make it defer every game.
     sweep_deadline_margin_sec: float = Field(default=1800.0, ge=0.0)
     # The disk throughput validate budgets assume. A SETTING, not a constant:
     # it is a property of the hardware, and the 2026-09-01 incident was a
@@ -397,7 +398,10 @@ class Settings(BaseSettings):
     # (self-heals without a process restart). Generous by default — a prefill of
     # a large game through lancache is long but resumes from cache on retry, so a
     # rare false timeout is not catastrophic. `0` disables the budget.
-    job_max_runtime_sec: float = Field(default=21600.0, ge=0.0)
+    # 5 min short of 6 h (#380): equal to the sweep interval, a cap-hit landed on
+    # the next sweep's trigger instant, whose dedup check still saw the old job
+    # running and skipped the slot — one overrun cost two runs.
+    job_max_runtime_sec: float = Field(default=21300.0, ge=0.0)
 
     @field_validator("cors_origins")
     @classmethod
