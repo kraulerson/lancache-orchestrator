@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
@@ -30,6 +31,48 @@ if TYPE_CHECKING:
     from orchestrator.platform.steam.prefill_driver import SteamPrefillDriver
 
 _log = structlog.get_logger(__name__)
+
+# #388: a game Epic will not serve fails every scheduled prefill, four times a
+# day, forever. After this many consecutive manifest 4xx failures it is
+# block-listed (Karl, 2026-11-12). 401 forces an auth refresh and 429 is rate
+# limiting — both transient, so neither counts.
+_AUTO_BLOCK_AFTER = 10
+_MANIFEST_HTTP = re.compile(r"epic manifest (?:API|download) failed: HTTP (\d{3})")
+_TRANSIENT_4XX = {401, 429}
+
+
+def _counts_toward_block(message: str | None) -> bool:
+    m = _MANIFEST_HTTP.search(message or "")
+    if m is None:
+        return False
+    code = int(m.group(1))
+    return 400 <= code < 500 and code not in _TRANSIENT_4XX
+
+
+async def _auto_block_if_unservable(
+    pool: Any, job_id: Any, game_id: int, app_id: str, message: str
+) -> None:
+    """Block the game if this failure and the game's previous prefill jobs make
+    `_AUTO_BLOCK_AFTER` consecutive manifest 4xx. A success or any other error
+    breaks the streak; cancelled jobs neither count nor break it."""
+    if not _counts_toward_block(message):
+        return
+    rows = await pool.read_all(
+        "SELECT error FROM jobs WHERE kind = 'prefill' AND game_id = ? AND id < ? "
+        "AND state IN ('succeeded', 'failed') ORDER BY id DESC LIMIT ?",
+        (game_id, job_id, _AUTO_BLOCK_AFTER - 1),
+    )
+    if len(rows) < _AUTO_BLOCK_AFTER - 1 or not all(_counts_toward_block(r["error"]) for r in rows):
+        return
+    await pool.execute_write(
+        "INSERT INTO block_list (platform, app_id, reason, source) VALUES ('epic', ?, ?, 'api') "
+        "ON CONFLICT DO NOTHING",
+        (
+            app_id,
+            f"auto: Epic manifest HTTP 4xx on {_AUTO_BLOCK_AFTER} consecutive prefills (#388)",
+        ),
+    )
+    _log.warning("prefill.epic.auto_blocked", job_id=job_id, game_id=game_id, app_id=app_id)
 
 
 def _summarize_failures(failures: list[tuple[str, str]], *, top: int = 5) -> dict[str, int]:
@@ -126,6 +169,14 @@ async def _epic_prefill(job: dict[str, Any], deps: Deps) -> None:
         if not outcome.recorded:
             with contextlib.suppress(Exception):
                 await record_job_outcome(deps.pool, game_id, f"prefill: {type(e).__name__}: {e}")
+        # A failure to block must not mask the prefill's own exception; it is
+        # logged, and the next failure tries again.
+        try:
+            await _auto_block_if_unservable(deps.pool, job_id, game_id, str(game["app_id"]), str(e))
+        except Exception as block_err:
+            _log.warning(
+                "prefill.epic.auto_block_failed", game_id=game_id, error=str(block_err)[:200]
+            )
         raise
 
 
