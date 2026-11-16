@@ -19,6 +19,64 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — a large Steam game is no longer impossible to measure on its first validate (#390) — 2026-11-13
+
+The Talos Principle 2 and Street Fighter 6 stayed `unknown` through a weekly
+sweep and two hand-run validates, all with `AgentError: agent unreachable:
+ReadTimeout`. The validate read budget is `300 s + chunks / 40 per s`, using the
+game's last `chunks_total > 0` from `validation_history`.
+- A never-validated game has no such row, so it got the bare 300 s.
+- A large game times out, and the timeout fires before any history row is
+  written.
+- So the game never gained a size, and the budget never grew. This is the same
+  self-locking shape as #308.
+
+- **Added: agent `GET /v1/steam/chunk-count/{app_id}`.** It returns how many
+  chunks a validate of the app would stat. It uses the same `_steam_chunk_paths()`
+  enumeration as `/v1/steam/validate`, so shared-redist depots are skipped the
+  same way, and it returns 0 without a manifest. It sits behind the agent's
+  existing bearer and source-IP middleware.
+- **Fixed: `validator/disk_stat.py`.** Every Steam validate asks the agent for
+  that count, through `AgentClient.steam_chunk_count`. It sizes the timeout from
+  `max(history, count)`.
+  - **Why every validate, not only the first (review finding 1, Karl's ruling):**
+    a stored `chunks_total` counts only depots with files present, while
+    validate stats them all.
+  - **Toxic Commando PTS** recorded 14 chunks for an old build against 61,125
+    now statted. It has been stuck since 2026-10-13 by the same trap.
+  - **Mafia** recorded 11,140 against 88,331, about 7 s from the cliff.
+  - A failed count call surfaces as an agent error rather than falling back to a
+    size that is the trap.
+- **Hardened: the count call** (review finding 2).
+  - It has an explicit 300 s read timeout instead of the 30 s default; counting
+    ARK took 18 s under load.
+  - The agent runs the enumeration with `asyncio.to_thread`, so it no longer
+    stalls the agent's event loop.
+  - `app_id` must be ≥ 0, so a negative id returns 422.
+- **Fixed: #380's sweep start gate** (review finding 3, Karl's ruling). A
+  never-measured Steam game with no history and no size (2,481 of 2,581 Steam
+  rows have none) was costed at 0 s, while its validate may now run 300 s +
+  chunks/40. It is now costed by the agent's count × 10.3 ms. If the count
+  fails, it is logged and the game is admitted, and its validate surfaces the
+  error.
+- **Deploy order (review finding 4):** **agent first, then control plane.** Roll
+  back the other way. A control plane with #390 against an agent without it gets
+  404 on every Steam validate.
+- **Tests:**
+  - agent endpoint: the count equals validate's `chunks_total` for one depot, and
+    exceeds it when a depot is statted then excluded; 0 without a manifest; 401
+    without the bearer; 422 for a negative id; runs off the event loop;
+  - client: one GET, with a read timeout of at least 300 s;
+  - `disk_stat`:
+    - the first validate is sized by the count;
+    - a stale small history is overruled by the count;
+    - a larger history is kept;
+    - a count failure surfaces;
+  - sweep: a never-measured Steam game is costed by the count;
+  - mutant (history wins over a larger count): caught;
+  - five existing test fakes gained a `steam_chunk_count` returning 0, which is
+    behavior-neutral.
+
 ### Fixed — newly purchased Epic games are cached again (#388) — 2026-11-12
 
 New Epic purchases sat at `status='unknown'` for good: 12 owned games on

@@ -50,6 +50,9 @@ class _StubAgent:
     async def epic_purge(self, *, app_id: int, version: str, cdn_base: str, raw_manifest_b64: str):
         return self._purge
 
+    async def steam_chunk_count(self, app_id: int) -> int:
+        return 0  # #390: no manifest in the fake, so the budget is as before
+
     async def steam_validate(self, app_id: int, chunk_count=None):
         self.validate_calls += 1
         if self._validate is None:

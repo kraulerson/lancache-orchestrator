@@ -372,8 +372,8 @@ async def validate_game(
     # flat base budget and its audit wrongly certified that as "unaffected". On
     # post-rebuild hardware the base covers only ~12-16k chunks, so every large
     # steam game timed out, wrote NO validation_history row, and could never
-    # self-correct. The previous run's chunks_total is the size we DO hold; a
-    # never-validated game has none and correctly falls back to the base.
+    # self-correct. The previous run's chunks_total is the size we DO hold; since
+    # #390 it is one of two inputs (see below), never the only one.
     # chunks_total > 0 because an errored run writes a row with 0 (validate_one_game
     # inserts unconditionally). Taking the newest row regardless of outcome let one
     # transient error erase the size permanently: ARK dropped 9292s -> 300s, timed
@@ -386,6 +386,14 @@ async def validate_game(
         (game_id,),
     )
     last_total = size_row["chunks_total"] if size_row is not None else None
-    chunk_count = int(last_total) if last_total else None
+    # #390: history alone under-sizes the budget. A never-validated game has
+    # none, and a stored chunks_total counts only depots with files present while
+    # validate stats them all (Toxic Commando: 14 recorded vs 61,125 statted;
+    # Mafia: 11,140 vs 88,331). Too small, it times out before writing a row and
+    # never recovers. So always ask the agent, which enumerates exactly what
+    # validate will stat, and take the larger. A failed count surfaces like any
+    # agent error rather than falling back to the size that is the trap.
+    agent_count = await deps.agent_client.steam_chunk_count(app_id_int)
+    chunk_count = max(int(last_total or 0), agent_count) or None
     res = await deps.agent_client.steam_validate(app_id_int, chunk_count=chunk_count)
     return _shape(res)

@@ -6,6 +6,7 @@ import base64
 
 import pytest
 
+from orchestrator.clients.agent_client import AgentError
 from orchestrator.core.settings import Settings
 from orchestrator.jobs.worker import Deps
 from orchestrator.validator.disk_stat import (
@@ -234,10 +235,13 @@ async def test_validate_chunks_any_symlink_skipped(tmp_path):
 class _FakeAgentSV:
     """Records steam_validate(app_id) calls and returns a fixed validate dict."""
 
-    def __init__(self, response):
+    def __init__(self, response, *, agent_chunks: int = 0, count_error: Exception | None = None):
         self._response = response
         self.calls: list[int] = []
         self.chunk_counts: list[int | None] = []
+        self._agent_chunks = agent_chunks
+        self._count_error = count_error
+        self.count_calls: list[int] = []
 
     # chunk_count is accepted EXPLICITLY, not swallowed by **kwargs. The
     # signature change that broke this fake is the fake doing its job: a spy
@@ -246,6 +250,12 @@ class _FakeAgentSV:
         self.calls.append(app_id)
         self.chunk_counts.append(chunk_count)
         return self._response
+
+    async def steam_chunk_count(self, app_id: int) -> int:
+        self.count_calls.append(app_id)
+        if self._count_error is not None:
+            raise self._count_error
+        return self._agent_chunks
 
 
 def _settings() -> Settings:
@@ -288,6 +298,72 @@ async def test_validate_delegates_to_agent_and_maps_result(pool):
     assert result.outcome == "partial"
     assert result.manifest_version == "1018131:x"
     assert result.error is None
+
+
+_CACHED = {
+    "chunks_total": 3,
+    "chunks_cached": 3,
+    "chunks_missing": 0,
+    "outcome": "cached",
+    "versions": "1:x",
+    "error": None,
+}
+
+
+async def test_first_validate_is_sized_by_the_agents_chunk_count(pool):
+    """#390: a never-validated game had only the 300 s base budget, timed out
+    before any history row was written, and so could never be measured
+    (Talos Principle 2, Street Fighter 6). The agent's count sizes it instead."""
+    game_id = await _seed_game(pool, app_id="1364780")
+    agent = _FakeAgentSV(_CACHED, agent_chunks=150_000)
+
+    await validate_game(pool, Deps(pool=pool, agent_client=agent), game_id, _settings())
+
+    assert agent.count_calls == [1364780]
+    assert agent.chunk_counts == [150_000]
+
+
+async def _history(pool, game_id: int, chunks_total: int) -> None:
+    await pool.execute_write(
+        "INSERT INTO validation_history (game_id, manifest_version, started_at, finished_at, "
+        "method, chunks_total, chunks_cached, chunks_missing, outcome) VALUES "
+        "(?, '1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'disk_stat', ?, ?, 0, 'cached')",
+        (game_id, chunks_total, chunks_total),
+    )
+
+
+async def test_a_stale_small_history_is_overruled_by_the_agents_count(pool):
+    """Review finding 1: Toxic Commando PTS recorded 14 chunks for an old build;
+    the agent now stats 61,125. Sized from history it timed out every time since
+    2026-10-13 and, writing no row, could never recover."""
+    game_id = await _seed_game(pool, app_id="4576320")
+    await _history(pool, game_id, 14)
+    agent = _FakeAgentSV(_CACHED, agent_chunks=61_125)
+
+    await validate_game(pool, Deps(pool=pool, agent_client=agent), game_id, _settings())
+
+    assert agent.count_calls == [4576320]
+    assert agent.chunk_counts == [61_125]
+
+
+async def test_a_larger_history_is_kept_when_the_agent_counts_fewer(pool):
+    game_id = await _seed_game(pool, app_id="1364781")
+    await _history(pool, game_id, 4242)
+    agent = _FakeAgentSV(_CACHED, agent_chunks=100)
+
+    await validate_game(pool, Deps(pool=pool, agent_client=agent), game_id, _settings())
+
+    assert agent.chunk_counts == [4242]
+
+
+async def test_a_failed_count_surfaces_instead_of_falling_back(pool):
+    """No silent fallback to the 300 s base: that base is the trap itself."""
+    game_id = await _seed_game(pool, app_id="1364782")
+    agent = _FakeAgentSV(_CACHED, count_error=AgentError("agent unreachable: ReadTimeout"))
+
+    with pytest.raises(AgentError):
+        await validate_game(pool, Deps(pool=pool, agent_client=agent), game_id, _settings())
+    assert agent.calls == []
 
 
 async def test_validate_no_agent_client_is_error(pool):

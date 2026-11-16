@@ -272,6 +272,17 @@ class AgentClient:
         result: dict[str, Any] = resp.json()
         return result
 
+    async def steam_chunk_count(self, app_id: int) -> int:
+        """#390: the agent's count of chunks a validate of this app would stat.
+        Long read timeout: counting ARK took 18 s under load, and the default 30 s
+        would recreate the trap one call earlier — nothing falls back."""
+        resp = await self._request(
+            "GET",
+            f"/v1/steam/chunk-count/{app_id}",
+            timeout=httpx.Timeout(300.0, connect=10.0),
+        )
+        return int(resp.json()["chunks"])
+
     async def steam_validate(
         self, app_id: int, *, chunk_count: int | None = None
     ) -> dict[str, Any]:

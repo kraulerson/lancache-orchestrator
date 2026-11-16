@@ -59,6 +59,9 @@ class _StubPurgeAgent:
             raise self._raise
         return self._epic
 
+    async def steam_chunk_count(self, app_id: int) -> int:
+        return 0  # #390: no manifest in the fake, so the base budget as before
+
     async def steam_validate(self, app_id: int, chunk_count=None):
         return self._validate
 
