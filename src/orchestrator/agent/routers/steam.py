@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import Path as ApiPath
 from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.agent._paths import under_cache_root
@@ -436,6 +437,25 @@ def _steam_chunk_paths(
             depots=sorted(skipped_redist),
         )
     return depot_paths, versions, parsed_ok, True
+
+
+@router.get("/v1/steam/chunk-count/{app_id}")
+async def steam_chunk_count(
+    app_id: Annotated[int, ApiPath(ge=0)], request: Request
+) -> dict[str, int]:
+    """#390: how many chunks a validate of this app would STAT — the same
+    enumeration validate uses, so it can size validate's timeout. Validate's
+    chunks_total counts only depots with files present, so a stored total can be
+    far smaller than the work (Mafia: 11,140 recorded vs 88,331 statted), and a
+    never-validated game has none at all; either way it timed out before writing
+    a row and could never recover. 0 when no manifest is present.
+
+    Off the event loop: the enumeration hashes a cache path per chunk (ARK, 369k
+    chunks, took 18 s on the N100) and would stall every other agent request."""
+    settings = request.app.state.settings
+    prefilled = _prefilled_gids(request, app_id)
+    depot_paths, _, _, _ = await asyncio.to_thread(_steam_chunk_paths, settings, app_id, prefilled)
+    return {"chunks": sum(len(paths) for paths in depot_paths.values())}
 
 
 @router.post("/v1/steam/validate")

@@ -61,7 +61,7 @@ _log = structlog.get_logger(__name__)
 # cost of `<` is a game going unmeasured for an extra 12.5h. Wrong in the safe
 # direction.
 _CANDIDATE_SQL = (
-    "SELECT id, status, size_bytes FROM games "
+    "SELECT id, platform, app_id, status, size_bytes FROM games "
     "WHERE owned = 1 "
     "AND (last_measure_attempt_at IS NULL OR last_measure_attempt_at <= ?) "
     "ORDER BY last_measure_attempt_at ASC NULLS FIRST, id ASC"
@@ -72,7 +72,7 @@ _CANDIDATE_SQL = (
 # override. A run that ignores the pass cannot stand in as proof of pass
 # coverage, so it neither filters on the marker nor advances it.
 _CANDIDATE_SQL_FULL = (
-    "SELECT id, status, size_bytes FROM games "
+    "SELECT id, platform, app_id, status, size_bytes FROM games "
     "ORDER BY last_measure_attempt_at ASC NULLS FIRST, id ASC"
 )
 
@@ -230,7 +230,7 @@ async def sweep_handler(job: dict[str, Any], deps: Deps) -> JobSummary | None:
                 reason=str(e)[:200],
             )
 
-    async def _one(game_id: int, prior: str, size: int) -> None:
+    async def _one(game_id: int, platform: str, app_id: str, prior: str, size: int) -> None:
         nonlocal errors, evicted, recovered, tripped, deadline_hit, attempted, attempted_bytes
         async with sem:
             # Short-circuit once the breaker has tripped: no validation, and no
@@ -246,6 +246,22 @@ async def sweep_handler(job: dict[str, Any], deps: Deps) -> JobSummary | None:
             # #380: and don't start a game that cannot finish before the cap.
             if hard_deadline is not None:
                 expected = max(worst.get(game_id, 0.0), size / _SIZE_GATE_FALLBACK_BYTES_PER_SEC)
+                if expected == 0.0 and platform == "steam" and deps.agent_client is not None:
+                    # #390: a never-measured Steam game has no history and (like
+                    # 2,481 of 2,581 Steam rows) no size, so it costed 0 s here
+                    # while its validate may now run 300 s + chunks/40. The
+                    # agent's count is the only figure. If it cannot be had, the
+                    # game is admitted and its validate surfaces the same error.
+                    try:
+                        chunks = await deps.agent_client.steam_chunk_count(int(app_id))
+                        expected = chunks * _SIZE_GATE_SEC_PER_CHUNK
+                    except Exception as e:
+                        _log.warning(
+                            "sweep.chunk_count_failed",
+                            job_id=job_id,
+                            game_id=game_id,
+                            error=f"{type(e).__name__}: {e}"[:200],
+                        )
                 needed = min(_SIZE_GATE_SAFETY * expected, estimate_cap)
                 if monotonic() + needed > hard_deadline:
                     async with lock:
@@ -322,7 +338,16 @@ async def sweep_handler(job: dict[str, Any], deps: Deps) -> JobSummary | None:
                     recovered += 1
 
     await asyncio.gather(
-        *(_one(int(r["id"]), str(r["status"]), int(r["size_bytes"] or 0)) for r in rows)
+        *(
+            _one(
+                int(r["id"]),
+                str(r["platform"]),
+                str(r["app_id"]),
+                str(r["status"]),
+                int(r["size_bytes"] or 0),
+            )
+            for r in rows
+        )
     )
 
     if tripped is not None:

@@ -88,6 +88,7 @@ async def _run(
     budget: float = _BUDGET,
     margin: float = _MARGIN,
     self_test_seconds: float = 0.0,
+    agent: object | None = None,
 ) -> tuple[list[int], object]:
     """Run one sweep at batch size 1. The validator self-test takes
     `self_test_seconds`; the first game validated then advances the clock by
@@ -120,7 +121,8 @@ async def _run(
 
     monkeypatch.setattr(sweep_mod, "validate_one_game", fake_validate_one)
     summary = await sweep_handler(
-        {"id": 1, "kind": "sweep", "payload": None}, Deps(pool=pool, agent_client=object())
+        {"id": 1, "kind": "sweep", "payload": None},
+        Deps(pool=pool, agent_client=agent if agent is not None else object()),
     )
     return validated, summary
 
@@ -245,6 +247,36 @@ async def test_the_hard_line_counts_from_the_start_of_the_handler(pool, monkeypa
 
     assert late not in validated, "the line must be measured from the handler's start"
     assert validated == [first]
+
+
+class _CountingAgent:
+    def __init__(self, chunks: int) -> None:
+        self.chunks = chunks
+        self.calls: list[int] = []
+
+    async def steam_chunk_count(self, app_id: int) -> int:
+        self.calls.append(app_id)
+        return self.chunks
+
+
+async def test_a_never_measured_steam_game_is_costed_by_the_agents_count(pool, monkeypatch):
+    """Review finding 3 (#390): a never-measured Steam game has no history and,
+    like 2,481 of 2,581 Steam rows, no size — so the gate costed it at 0 s and
+    admitted it right up to the margin, while its validate may now run for
+    300 s + chunks/40. The agent's count is the only figure there is."""
+    first = await _game(pool, "first", 1_000_000_000, 100)
+    await pool.execute_write(
+        "INSERT INTO games (platform, app_id, title, owned, status) "
+        "VALUES ('steam', '900001', 'never measured', 1, 'unknown')"
+    )
+    row = await pool.read_one("SELECT id FROM games WHERE app_id = '900001'")
+    agent = _CountingAgent(400_000)  # x 10.3 ms = 4120 s: cannot fit in 3000 s
+
+    validated, _ = await _run(pool, monkeypatch, agent=agent)
+
+    assert int(row["id"]) not in validated, "it must be costed, not admitted at 0 s"
+    assert validated == [first]
+    assert agent.calls == [900001]
 
 
 async def test_no_budget_means_no_gate(pool, monkeypatch):
