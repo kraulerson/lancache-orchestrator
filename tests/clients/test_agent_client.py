@@ -268,6 +268,32 @@ async def test_default_poll_interval_raised_to_3s():
     assert c._poll == 3.0
 
 
+async def test_steam_chunk_count_single_get():
+    """#390: one GET returning the agent's count for the app."""
+
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.path == "/v1/steam/chunk-count/1018130"
+        return httpx.Response(200, json={"chunks": 369317})
+
+    client = _client(handler)
+    assert await client.steam_chunk_count(1018130) == 369317
+
+
+async def test_steam_chunk_count_uses_a_long_read_timeout():
+    """Review finding 2: the default 30 s read would time out counting a huge
+    game (ARK took 18 s with an Epic pull running), and nothing falls back."""
+    seen: dict = {}
+
+    def handler(request):
+        seen.update(request.extensions["timeout"])
+        return httpx.Response(200, json={"chunks": 1})
+
+    client = _client(handler)
+    await client.steam_chunk_count(346110)
+    assert seen["read"] >= 300.0
+
+
 async def test_steam_validate_unreachable_raises():
     def handler(request):
         raise httpx.ConnectError("refused")

@@ -19,6 +19,199 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Fixed — a large Steam game is no longer impossible to measure on its first validate (#390) — 2026-11-13
+
+The Talos Principle 2 and Street Fighter 6 stayed `unknown` through a weekly
+sweep and two hand-run validates, all with `AgentError: agent unreachable:
+ReadTimeout`. The validate read budget is `300 s + chunks / 40 per s`, using the
+game's last `chunks_total > 0` from `validation_history`.
+- A never-validated game has no such row, so it got the bare 300 s.
+- A large game times out, and the timeout fires before any history row is
+  written.
+- So the game never gained a size, and the budget never grew. This is the same
+  self-locking shape as #308.
+
+- **Added: agent `GET /v1/steam/chunk-count/{app_id}`.** It returns how many
+  chunks a validate of the app would stat. It uses the same `_steam_chunk_paths()`
+  enumeration as `/v1/steam/validate`, so shared-redist depots are skipped the
+  same way, and it returns 0 without a manifest. It sits behind the agent's
+  existing bearer and source-IP middleware.
+- **Fixed: `validator/disk_stat.py`.** Every Steam validate asks the agent for
+  that count, through `AgentClient.steam_chunk_count`. It sizes the timeout from
+  `max(history, count)`.
+  - **Why every validate, not only the first (review finding 1, Karl's ruling):**
+    a stored `chunks_total` counts only depots with files present, while
+    validate stats them all.
+  - **Toxic Commando PTS** recorded 14 chunks for an old build against 61,125
+    now statted. It has been stuck since 2026-10-13 by the same trap.
+  - **Mafia** recorded 11,140 against 88,331, about 7 s from the cliff.
+  - A failed count call surfaces as an agent error rather than falling back to a
+    size that is the trap.
+- **Hardened: the count call** (review finding 2).
+  - It has an explicit 300 s read timeout instead of the 30 s default; counting
+    ARK took 18 s under load.
+  - The agent runs the enumeration with `asyncio.to_thread`, so it no longer
+    stalls the agent's event loop.
+  - `app_id` must be ≥ 0, so a negative id returns 422.
+- **Fixed: #380's sweep start gate** (review finding 3, Karl's ruling). A
+  never-measured Steam game with no history and no size (2,481 of 2,581 Steam
+  rows have none) was costed at 0 s, while its validate may now run 300 s +
+  chunks/40. It is now costed by the agent's count × 10.3 ms. If the count
+  fails, it is logged and the game is admitted, and its validate surfaces the
+  error.
+- **Deploy order (review finding 4):** **agent first, then control plane.** Roll
+  back the other way. A control plane with #390 against an agent without it gets
+  404 on every Steam validate.
+- **Tests:**
+  - agent endpoint: the count equals validate's `chunks_total` for one depot, and
+    exceeds it when a depot is statted then excluded; 0 without a manifest; 401
+    without the bearer; 422 for a negative id; runs off the event loop;
+  - client: one GET, with a read timeout of at least 300 s;
+  - `disk_stat`:
+    - the first validate is sized by the count;
+    - a stale small history is overruled by the count;
+    - a larger history is kept;
+    - a count failure surfaces;
+  - sweep: a never-measured Steam game is costed by the count;
+  - mutant (history wins over a larger count): caught;
+  - five existing test fakes gained a `steam_chunk_count` returning 0, which is
+    behavior-neutral.
+
+### Fixed — newly purchased Epic games are cached again (#388) — 2026-11-12
+
+New Epic purchases sat at `status='unknown'` for good: 12 owned games on
+2026-11-12, after 421 validations between them, and no Epic prefill job in 30
+days. It was a deadlock:
+- An Epic manifest is stored only by a prefill.
+- Validating a game without one returned `error/no_manifest`, which writes no
+  cache truth.
+- Scheduled prefill takes only games *measured* absent (#305).
+
+- **Fixed: `validator/disk_stat.py::_validate_epic_game`.**
+  - A game never prefilled (`last_prefilled_at IS NULL`) with no manifest now
+    validates as `missing` (reason `never_prefilled`). It becomes
+    `not_downloaded` with `status_measured_at` set, so scheduled prefill takes it.
+  - **Only for games scheduled prefill can take:** the same block-list and
+    `exclude` filters as `scheduler/jobs.py`. Otherwise it stays `no_manifest`.
+    Without that, 27 live rows would flip, not 8: the 15 retired to `blocked` by
+    migration 0018 (undoing it, and counted twice on Game_shelf's "Not cached"
+    tile) and 4 excluded games given a label nothing can correct.
+  - A prefilled game with no manifest is still an error. That means something
+    broke and must not trigger a download.
+  - `unknown → not_downloaded` is upward, so the circuit breaker ignores it.
+  - **Live effect:** of the 12 stuck games, the 8 that are eligible are queued
+    for prefill once measured. They are 3 Train Sim World 7 routes, Mechabellum,
+    Cardpocalypse, System Shock 2 25th, and the two FINAL FANTASY VII titles. A
+    game the Epic launcher already pulled through lancache may be served from
+    cache; that depends on the CDN identifier matching, and is unverified.
+- **Tests:**
+  - `tests/jobs/test_epic_never_prefilled.py` covers the chain end to end
+    (validate, then measurement, then scheduled prefill), plus the block-listed,
+    excluded and `allow`-override cases.
+  - `tests/validator/test_disk_stat.py` has two cases.
+  - Mutants caught: dropping the `last_prefilled_at` condition, and dropping the
+    `mode = 'exclude'` filter.
+- **Added: auto-block after 10 consecutive manifest 4xx (review finding 1).**
+  - **Why:** once measured `not_downloaded`, a game Epic will not serve would be
+    retried by every scheduled prefill, 4 times a day, forever. The Ouroboros
+    King did this 34 times in 9 days in July, until block-listed by hand.
+  - **What:** `jobs/handlers/prefill.py` now adds the game to `block_list`
+    (source `api`, reason naming #388) when this failure and the game's previous
+    9 prefill jobs are all manifest API or manifest download HTTP 4xx.
+  - **What doesn't count:** 401 (auth refresh) and 429 (rate limit) are
+    transient. A success or any other error breaks the streak.
+  - **Undo:** `orchestrator-cli game unblock <id>`.
+  - **Tests:** `tests/jobs/test_epic_auto_block.py` (6 tests). Mutants caught: a
+    threshold of 9, and 429 counted.
+- **Residual risk, recorded on #388 (review finding 3):** a bulk DB event that
+  leaves many manifestless, never-prefilled Epic rows would let them be
+  prefilled without a disk measurement.
+
+### Fixed — a sweep no longer starts a game it cannot finish before the cap, and a cap-hit no longer costs the next sweep (#380) — 2026-11-01
+
+Sweep 47123 (2026-10-31 03:00 UTC) failed with `job exceeded max runtime of
+21600.0s (cancelled)`. The #311 deadline stops games *starting* 30 min before the
+cap, but ARK (369,317 chunks) started 5m52s before that line. Its validation
+outlasted the 35m52s that remained. Single validations had grown to ~70 min
+(Atomic Heart 69.5, ARK 65.5, Diablo IV 63.5). The cap also equalled the 6 h
+sweep interval, so the cancel landed on the next trigger. Its dedup check still
+saw 47123 running and skipped the 09:00 sweep.
+
+- **Fixed: a size gate in `jobs/handlers/sweep.py`.**
+  - A game starts only if 1.25 × its expected validation fits before the hard
+    cap, with a 120 s buffer.
+  - The expectation is the **largest** of three figures:
+    - its **worst** non-error run in the last 30 days. Its last run is not
+      enough: ARK ranged 7.6–65.5 min across 23 runs;
+    - its chunk count × 10.3 ms, the p95 per-chunk time of cached runs. This
+      covers a quick run made while the game was absent from the cache;
+    - its size ÷ 61 MB/s, the slowest 5% of large-game runs since 2026-10-01.
+      Only 100 of 2,566 Steam rows carry a size.
+  - Error runs (`chunks_total = 0`) are excluded. They measured nothing and can
+    take a second, which would otherwise override the size (as in #308).
+  - A deferred game is logged `sweep.game_deferred` and left unstamped, so the
+    next run takes it first.
+  - A scheduled sweep that defers games reports `pass N partial` and succeeds. A
+    `full` (validate-all) run still reports `full sweep: N games`.
+  - The estimate is capped at `budget − max(margin, 240 s)`. A game costed above
+    a whole run therefore still starts at the beginning of one, even with a
+    small margin.
+  - The hard line is measured from the handler's first statement, so the
+    validator self-test (an agent RPC) and the candidate reads count, as they do
+    for the worker's timer.
+- **Changed: `job_max_runtime_sec` default 21600 → 21300** (5 h 55 min).
+  - A sweep picked up at its trigger now ends before the next :00 trigger. A
+    sweep picked up late, for example behind Tuesday's fetch_manifests, can
+    still reach the next trigger, because the cap counts from pickup.
+  - It applies to every job kind; no other kind is known to approach 6 h.
+  - The sweep's own deadline moves 5 min earlier with it.
+- **Tests:**
+  - `tests/jobs/test_sweep_size_gate.py` (11 tests) uses a driven clock and the
+    same budget and margin, so only the size gate decides. It covers:
+    - history alone;
+    - the 30-day window;
+    - error rows;
+    - the chunk floor;
+    - a small margin;
+    - the line counting from the handler's start;
+    - the estimate cap;
+    - no budget.
+  - `tests/core/test_settings.py` checks the default cap ends at least a minute
+    before the next sweep, using the interval derived from the default cron.
+  - Mutants each caught by at least one test: no estimate cap, no budget guard,
+    an empty history query, the window inverted to +30 days, and the window
+    widened to 365 days.
+  - The candidate-SQL spy in `tests/jobs/test_sweep_handler.py` now records only
+    reads of `games`.
+- **Review:** one adversarial review raised 5 findings, all reproduced and fixed
+  here:
+  - error rows overriding the size;
+  - the buffer allowing a permanent no-op with a small margin;
+  - the history half untested;
+  - the line measured after the self-test;
+  - stale docs.
+- **Documentation:**
+  - `docs/deploy/live-configuration.md`, the `settings.py` margin comment and
+    `README.md` no longer advise raising the margin for large titles, and give
+    the new cap.
+  - The stale 6 h figures in `agent_client.py` and the sweep comments are
+    corrected.
+
+### Documentation — the live validation sweep runs one day a week — 2026-11-08
+
+- **Documentation: `docs/deploy/live-configuration.md`** records the new live
+  setting `ORCH_VALIDATION_SWEEP_CRON=0 3,9,15,21 * * wed` in
+  `/root/orch-lxc.env` (LXC 1105).
+  - **Why:** at four runs a day, the sweep kept the NAS cache array busy about
+    21 h of every 24, and passes 45 and 46 found nothing.
+  - **The cost:** a lost game is now typically noticed 7–8 days later (up to
+    about 2 weeks for games checked late on a Wednesday), not about 1 day.
+- **Infrastructure: Kuma 180's interval went from 43200 to 691200 s** to match
+  the new schedule.
+- The same doc corrects the pass length (about 25 h across 4–5 runs; it was
+  ~12.5 h when #311 landed).
+- No code changed. The default in `settings.py` stays four runs a day.
+
 ### Security — certifi trusted emSign roots with compromised intermediate keys (PYSEC-2026-4320) — 2026-10-25
 
 The CI dependency audit began failing on `main`'s pins with two newly disclosed advisories. It surfaced on PR #377, whose diff touches no requirements file.

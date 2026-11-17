@@ -33,8 +33,14 @@ SETTINGS = Settings(orchestrator_token="x" * 32)
 
 
 class _RecordingAgent:
-    def __init__(self) -> None:
+    def __init__(self, *, agent_chunks: int = 0) -> None:
         self.calls: list[dict] = []
+        self.count_calls: list[int] = []
+        self._agent_chunks = agent_chunks
+
+    async def steam_chunk_count(self, app_id):
+        self.count_calls.append(app_id)
+        return self._agent_chunks
 
     async def steam_validate(self, app_id, **kwargs):
         self.calls.append({"app_id": app_id, **kwargs})
@@ -94,14 +100,16 @@ async def test_the_newest_history_row_wins(pool) -> None:
     assert agent.calls[0].get("chunk_count") == 90_000
 
 
-async def test_a_never_validated_game_falls_back_to_the_base_budget(pool) -> None:
-    """First-ever validation has no history row. That must degrade quietly to the
-    base budget rather than raise — a new purchase must still be validatable."""
+async def test_a_never_validated_game_without_a_manifest_keeps_the_base_budget(pool) -> None:
+    """First-ever validation has no history row, so the agent is asked (#390).
+    An agent that finds no manifest counts 0, which still means the base budget —
+    a new purchase must still be validatable."""
     game_id = await _seed_game(pool, "440", "Team Fortress 2")
-    agent = _RecordingAgent()
+    agent = _RecordingAgent(agent_chunks=0)
 
     await validate_game(pool, Deps(pool=pool, agent_client=agent), game_id, SETTINGS)
 
+    assert agent.count_calls == [440]
     assert agent.calls, "the agent was never called"
     assert agent.calls[0].get("chunk_count") is None
 

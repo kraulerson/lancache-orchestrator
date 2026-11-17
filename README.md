@@ -86,7 +86,7 @@ The bearer token (`orchestrator_token`) is the only required field. Every other 
 | `ORCH_VALIDATION_SWEEP_ENABLED` | bool | `true` | Weekly F13 validation sweep (eviction-drift detection) |
 | `ORCH_VALIDATION_SWEEP_CRON` | 5-field cron (UTC) | `0 3,9,15,21 * * *` | Sweep schedule (default every 6 h at 03/09/15/21 UTC). Name any weekday (`mon`..`sun`); digits in the day-of-week field are rejected at boot (APScheduler counts 0 as Monday) |
 | `ORCH_SWEEP_BATCH_SIZE` | int (≥1) | `10` | Games validated per batch during a sweep |
-| `ORCH_JOB_MAX_RUNTIME_SEC` | float (≥0) | `21600` (6 h) | Per-job wall-clock budget; a wedged handler is cancelled + the job failed (self-heal). `0` disables |
+| `ORCH_JOB_MAX_RUNTIME_SEC` | float (≥0) | `21300` (5 h 55 min, #380) | Per-job wall-clock budget; a wedged handler is cancelled + the job failed (self-heal). `0` disables |
 | `ORCH_STEAM_LICENSE_WAIT_SEC` | float | `60` | How long the worker waits for the Steam license list before signalling a retryable timeout |
 
 **DB pool memory baseline:** `(pool_readers + 1) × db_cache_size_kib + db_mmap_size_bytes`. Default config = `9 × 16 MiB + 256 MiB ≈ 400 MiB` resident. On memory-constrained hardware (e.g. DXP4800 NAS at 4 GB total), halve `ORCH_POOL_READERS` and `ORCH_DB_CACHE_SIZE_KIB` together — yields a `5 × 8 MiB + 256 MiB ≈ 296 MiB` profile. See [`FEATURES.md` — Feature 4](FEATURES.md) and [ADR-0011](docs/ADR%20documentation/0011-db-pool-architecture.md).

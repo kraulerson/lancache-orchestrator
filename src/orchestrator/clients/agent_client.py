@@ -55,7 +55,7 @@ VALIDATE_TIMEOUT_ASSUMED_CHUNKS_PER_SEC = 40.0
 # wedged agent still surfaces as a failure rather than hanging forever.
 #
 # UPPER BOUND, and it is not negotiable: this must stay <= Settings.
-# job_max_runtime_sec (21600s). The worker wraps every handler in
+# job_max_runtime_sec (21300s since #380). The worker wraps every handler in
 # asyncio.wait_for, so a ceiling above the job budget is a fiction — the job is
 # cancelled first, and CancelledError is a BaseException that bypasses the
 # sweep's per-game `except Exception`, aborting validates with NO
@@ -271,6 +271,17 @@ class AgentClient:
         )
         result: dict[str, Any] = resp.json()
         return result
+
+    async def steam_chunk_count(self, app_id: int) -> int:
+        """#390: the agent's count of chunks a validate of this app would stat.
+        Long read timeout: counting ARK took 18 s under load, and the default 30 s
+        would recreate the trap one call earlier — nothing falls back."""
+        resp = await self._request(
+            "GET",
+            f"/v1/steam/chunk-count/{app_id}",
+            timeout=httpx.Timeout(300.0, connect=10.0),
+        )
+        return int(resp.json()["chunks"])
 
     async def steam_validate(
         self, app_id: int, *, chunk_count: int | None = None
