@@ -63,7 +63,7 @@ def test_venv_console_script_shebangs_rewritten_to_runtime_path():
 _HELPER_CSPROJ = "SteamManifestHelper/SteamManifestHelper.csproj"
 _HELPER_SDK = (
     "mcr.microsoft.com/dotnet/sdk:10.0"
-    "@sha256:de4fe90a98845d75910b9769662465c84de1a934665c431279d1382b2bddc02b"
+    "@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e"
 )
 
 
