@@ -299,6 +299,26 @@ async def _validate_epic_game(
         (game_id,),
     )
     if manifest is None:
+        # #388: a manifest is stored only by a prefill, so a game never
+        # prefilled has none — and that IS a measurement: it is not cached by
+        # us. Reporting it as an error wrote no cache truth, left the game
+        # 'unknown' forever, and scheduled prefill (measured absence only) never
+        # took it. A prefilled game with no manifest stays an error: something
+        # broke, and that must not read as "absent" and trigger a download.
+        # Only for games scheduled prefill can take (the same block-list and
+        # exclusion filters as scheduler/jobs.py): a blocked or excluded game
+        # would gain a measurement nobody took and a label nothing can correct
+        # (undoing migration 0018 for the 15 retired 'blocked' rows).
+        eligible = await pool.read_one(
+            "SELECT 1 FROM games g WHERE g.id=? AND g.last_prefilled_at IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM block_list b "
+            "  WHERE b.platform = g.platform AND b.app_id = g.app_id) "
+            "AND NOT EXISTS (SELECT 1 FROM prefill_exclusions e "
+            "  WHERE e.platform = g.platform AND e.app_id = g.app_id AND e.mode = 'exclude')",
+            (game_id,),
+        )
+        if eligible is not None:
+            return ValidationResult(0, 0, 0, "missing", "", "never_prefilled")
         return ValidationResult(0, 0, 0, "error", "", "no_manifest")
     if not manifest["cdn_base"]:
         return ValidationResult(0, 0, 0, "error", manifest["version"], "no_cdn_base")
@@ -352,8 +372,8 @@ async def validate_game(
     # flat base budget and its audit wrongly certified that as "unaffected". On
     # post-rebuild hardware the base covers only ~12-16k chunks, so every large
     # steam game timed out, wrote NO validation_history row, and could never
-    # self-correct. The previous run's chunks_total is the size we DO hold; a
-    # never-validated game has none and correctly falls back to the base.
+    # self-correct. The previous run's chunks_total is the size we DO hold; since
+    # #390 it is one of two inputs (see below), never the only one.
     # chunks_total > 0 because an errored run writes a row with 0 (validate_one_game
     # inserts unconditionally). Taking the newest row regardless of outcome let one
     # transient error erase the size permanently: ARK dropped 9292s -> 300s, timed
@@ -366,6 +386,14 @@ async def validate_game(
         (game_id,),
     )
     last_total = size_row["chunks_total"] if size_row is not None else None
-    chunk_count = int(last_total) if last_total else None
+    # #390: history alone under-sizes the budget. A never-validated game has
+    # none, and a stored chunks_total counts only depots with files present while
+    # validate stats them all (Toxic Commando: 14 recorded vs 61,125 statted;
+    # Mafia: 11,140 vs 88,331). Too small, it times out before writing a row and
+    # never recovers. So always ask the agent, which enumerates exactly what
+    # validate will stat, and take the larger. A failed count surfaces like any
+    # agent error rather than falling back to the size that is the trap.
+    agent_count = await deps.agent_client.steam_chunk_count(app_id_int)
+    chunk_count = max(int(last_total or 0), agent_count) or None
     res = await deps.agent_client.steam_validate(app_id_int, chunk_count=chunk_count)
     return _shape(res)

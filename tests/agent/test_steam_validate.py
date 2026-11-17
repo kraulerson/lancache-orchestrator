@@ -439,3 +439,94 @@ def test_validate_mode000_depot_counted_cached(tmp_path):
     assert body["chunks_total"] == 10  # depot KEPT (files present), not excluded
     assert body["chunks_cached"] == 10  # transient mode-000 -> counted cached
     assert body["outcome"] == "cached"
+
+
+# --- #390: chunk count for a never-validated game's first validate --------------
+
+
+def test_chunk_count_matches_what_validate_would_check(tmp_path):
+    """The count sizes the first validate's timeout, so it must be the number
+    validate actually stats — the same enumeration, not an estimate."""
+    client = _build(tmp_path, cache_all=False)
+    count = client.get(f"/v1/steam/chunk-count/{APP}")
+    validate = client.post("/v1/steam/validate", json={"app_id": APP})
+    assert count.status_code == 200
+    assert count.json() == {"chunks": validate.json()["chunks_total"]}
+    assert count.json()["chunks"] == 60
+
+
+def test_chunk_count_is_zero_without_a_manifest(tmp_path):
+    client = _build(tmp_path, cache_all=False)
+    r = client.get("/v1/steam/chunk-count/999999")
+    assert r.status_code == 200
+    assert r.json() == {"chunks": 0}
+
+
+def test_chunk_count_requires_the_bearer(tmp_path):
+    client = _build(tmp_path, cache_all=False)
+    client.headers.pop("Authorization")
+    assert client.get(f"/v1/steam/chunk-count/{APP}").status_code == 401
+
+
+def test_chunk_count_includes_depots_validate_stats_but_excludes(tmp_path):
+    """Review finding 1/5: validate STATS every enumerated depot but counts only
+    those with files present in chunks_total. The time a validate takes follows
+    the stats, so the count must be the larger number (Mafia: 11,140 recorded vs
+    88,331 statted). A one-depot fixture would make the two agree by accident."""
+    mcache = tmp_path / "spcache"
+    (mcache / "v1").mkdir(parents=True)
+    (mcache / "v1" / f"{APP}_{APP}_{DEPOT}_{GID}.bin").write_bytes(FIXTURE.read_bytes())
+    depot2, gid2 = 483840, 999
+    (mcache / "v1" / f"{APP}_{depot2}_{depot2}_{gid2}.bin").write_bytes(FIXTURE.read_bytes())
+    cfg = tmp_path / "Config"
+    cfg.mkdir()
+    (cfg / "successfullyDownloadedDepots.json").write_text(json.dumps({str(APP): [GID]}))
+    cache_root = tmp_path / "lancache"
+    levels, ident, slice_sz = "2:2", "steam", 10_485_760
+    slice_range = slice_range_zero(slice_sz)
+    for sha in parse_chunk_shas(FIXTURE.read_bytes()):  # only depot 1 on disk
+        h = cache_key(ident, steam_chunk_uri(DEPOT, sha), slice_range)
+        p = cache_path(cache_root, h, levels)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"data")
+    settings = Settings(
+        orchestrator_token=TOKEN,
+        lancache_nginx_cache_path=cache_root,
+        cache_levels=levels,
+        steam_cache_identifier=ident,
+        cache_slice_size_bytes=slice_sz,
+        steam_manifest_cache_dir=mcache,
+        steam_prefill_config_dir=cfg,
+    )
+    client = TestClient(create_agent_app(settings=settings))
+    client.headers.update({"Authorization": f"Bearer {TOKEN}"})
+
+    validated = client.post("/v1/steam/validate", json={"app_id": APP}).json()["chunks_total"]
+    counted = client.get(f"/v1/steam/chunk-count/{APP}").json()["chunks"]
+
+    assert validated == 60
+    assert counted == 120, "the count must include the depot validate stats then excludes"
+
+
+def test_chunk_count_rejects_a_negative_app_id(tmp_path):
+    client = _build(tmp_path, cache_all=False)
+    assert client.get("/v1/steam/chunk-count/-5").status_code == 422
+
+
+def test_chunk_count_enumerates_off_the_event_loop(tmp_path, monkeypatch):
+    """Review finding 2: the enumeration hashes a cache path per chunk (ARK,
+    369k chunks: 18 s on the N100). On the agent's single event loop that stalls
+    every other request, validate and pull included."""
+    import orchestrator.agent.routers.steam as steam_mod
+
+    calls: list[object] = []
+    real = steam_mod.asyncio.to_thread
+
+    async def spy(fn, *args, **kwargs):
+        calls.append(fn)
+        return await real(fn, *args, **kwargs)
+
+    monkeypatch.setattr(steam_mod.asyncio, "to_thread", spy)
+    client = _build(tmp_path, cache_all=False)
+    client.get(f"/v1/steam/chunk-count/{APP}")
+    assert steam_mod._steam_chunk_paths in calls
