@@ -27,6 +27,10 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+# `first_seen_at` is stamped on INSERT only and is deliberately absent from every
+# DO UPDATE SET: a re-sync must never refresh it, and a pre-0019 row keeps NULL
+# (never "new").
+#
 # Name-bearing upsert for the SteamPrefill-sourced enumeration (re-arch ③b):
 # the Steam store lookup gives us the real title, so a NEW app is inserted with
 # it and an EXISTING app has its title refreshed to the store name. Lifecycle
@@ -44,7 +48,8 @@ _log = structlog.get_logger(__name__)
 # candidate SQL now carries no status filter at all. Guessing a status from
 # "it appeared in an enumeration" is exactly the conflation being removed here.
 _NAMED_UPSERT_SQL = (
-    "INSERT INTO games (platform, app_id, title) VALUES ('steam', ?, ?) "
+    "INSERT INTO games (platform, app_id, title, first_seen_at) "
+    "VALUES ('steam', ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now')) "
     "ON CONFLICT(platform, app_id) DO UPDATE SET title = excluded.title, owned = 1"
 )
 
@@ -59,8 +64,9 @@ _APP_INFO_UPSERT_SQL = (
 )
 
 _UPSERT_SQL = (
-    "INSERT INTO games (platform, app_id, title, owned, metadata, current_version) "
-    "VALUES (?, ?, ?, 1, ?, ?) "
+    "INSERT INTO games (platform, app_id, title, owned, metadata, current_version, "
+    "first_seen_at) "
+    "VALUES (?, ?, ?, 1, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now')) "
     "ON CONFLICT(platform, app_id) DO UPDATE SET "
     "  title = excluded.title, "
     "  owned = 1, "

@@ -80,6 +80,27 @@ print or copy the secret values anywhere — `ORCH_TOKEN` and the five
 | `ORCH_KUMA_PUSH_FETCH_MANIFESTS` | *(secret URL)* | → Kuma 182 |
 | `ORCH_KUMA_PUSH_MEASUREMENT_BREAKER` | *(secret URL)* | → Kuma 216, and read by the cron heartbeat in §1.2 |
 | `ORCH_KUMA_PUSH_DISK` | *(secret URL)* | → Kuma **217**, read by the disk cron in §1.3 |
+| `ORCH_KUMA_PUSH_NEW_GAMES` | *(secret URL)* | `job:orch-new-games-check` liveness; see §3.1 and "New - Not Cached" below. Monitor id assigned when created |
+| `ORCH_KUMA_PUSH_NEW_GAMES_OVERDUE` | *(secret URL)* | `orch:new-games-overdue`; see §3.1 and below. Monitor id assigned when created |
+
+**New - Not Cached settings (Feature 31) — all absent from the file and at their
+defaults. The two push URLs above are NOT in the file yet: they are added to
+`/root/orch-lxc.env` at deploy, after the monitors are created.** An unset push URL disables that push.
+
+| Setting (env `ORCH_<NAME>`) | Default | Meaning |
+|---|---|---|
+| `NEW_GAME_WINDOW_DAYS` | `7` | a game is "new" this long after the orchestrator first sees it |
+| `NEW_GAME_UNKNOWN_ALERT_HOURS` | `48` | a new game still `unknown` this long after first seen is overdue |
+| `NEW_GAMES_CHECK_ENABLED` | `true` | the scheduled check |
+| `NEW_GAMES_CHECK_CRON` | `30 2,8,14,20 * * *` | UTC; about 1.5 h after each SteamPrefill host-cron start in winter |
+| `STEAM_DOWNLOAD_POLL_SEC` | `600` | seconds between polls of the agent's `downloaded-state`; `0` disables the poller |
+
+The poller needs `ORCH_AGENT_ENABLED=true` and `NEW_GAMES_CHECK_ENABLED=true`
+(it only queues checks, so it is off when checks are). Its first poll runs about
+10 min (one `STEAM_DOWNLOAD_POLL_SEC`) after the control plane starts. Its
+baseline is in memory, so that first poll only records it and triggers nothing; the
+cron covers that gap. Run a check by hand with `orchestrator-cli cache check-new`
+(it queues a check of new games; a manual run never pushes either monitor).
 
 **Deliberately absent:** `ORCH_VALIDATION_SWEEP_ENABLED`. It defaults to `true`,
 so the scheduled validation sweep is on. Do not "helpfully" add it set to
@@ -510,6 +531,30 @@ Uptime Kuma **v2.4.0**, systemd unit `uptime-kuma`, database
   Fed by the same 15-min thread, and immediately on an alert. It answers **only**
   "is cache loss happening now": DOWN on an `eviction` or `mode000` alert,
   latched DOWN for 1 h after the last one, UP otherwise.
+
+- **`job:orch-new-games-check`** and **`orch:new-games-overdue`** — push type,
+  group **119**, notification **3** (binding is not optional), heartbeat interval
+  about 7 h (the cron fires every 6 h). **To be created at deploy** (Feature 31, deploy step
+  with a change card); their push URLs go into `/root/orch-lxc.env` as
+  `ORCH_KUMA_PUSH_NEW_GAMES` and `ORCH_KUMA_PUSH_NEW_GAMES_OVERDUE`.
+  - `job:orch-new-games-check` answers **only** "is the scheduled check running".
+    The scheduler pushes it when a scheduled run finishes; trigger, API and CLI
+    runs never do, so they cannot mask a dead scheduler. When the cron fires while
+    a trigger or API check is already queued or running, that in-flight check is
+    promoted to a scheduler run and pushes on finishing, so a T1 check holding the
+    single slot does not starve the monitor. Silence means it stopped.
+  - `orch:new-games-overdue` answers **only** "is a new game stuck". DOWN, with the
+    titles and a reason (`not cached` or `unmeasured`), while any game is still not
+    cached after the 7-day window or still `unknown` 48 h after first seen; UP
+    otherwise. Pushed on every scheduler and trigger run, never on API or CLI runs.
+    It has no time-out: it clears only when each game is cached, blocked or
+    excluded (ADR-0021). Scheduler runs also re-measure every game overdue as
+    `not cached`, so once the download is fixed the next scheduled check (at most
+    6 h away) measures it and the monitor goes UP. To measure sooner, run
+    `orchestrator-cli game validate <id>`; the monitor then updates at the next
+    scheduled or trigger check. Kuma notifies only on a status change, so a second game
+    going overdue while it is already DOWN sends no new notification; the message
+    and the `new_games.overdue` log lines still list it.
 
 **Why `cache-guard` and `cache-eviction` are two monitors and not one:** a single
 monitor carrying both signals cannot distinguish "the guard is dead" from "the

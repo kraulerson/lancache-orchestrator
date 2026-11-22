@@ -19,6 +19,93 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — "New - Not Cached": a recently bought game is measured within hours and an uncached one raises an alert (Feature 31) — 2026-11-21
+
+A game bought on 2026-11-19 showed Unknown until the weekly Wednesday sweep reached
+it, even after SteamPrefill had downloaded it. Orchestrator side of the feature
+(Feature A); Game_shelf's label and filter are a separate repository and PR.
+Feature B (the full re-check after a cache eviction, design section 3b) is **not
+built**.
+- **Added: job kind `new_games_check`.** It first runs the Steam library sync
+  (a failure is logged and the check goes on), then measures each game in the check
+  set one at a time through `validate_one_game`, so cache status is still written
+  only by `record_measurement`. The check set is owned Steam and Epic games first
+  seen within `new_game_window_days` (7), with status `unknown`, `not_downloaded`
+  or `validation_failed`, that are not blocked and not excluded. A run the
+  scheduler started then also re-measures every game currently overdue as
+  `not cached` (skipping any the check set just measured), so fixing a download
+  clears the alert at the next scheduled check, at most 6 h later; trigger, API and
+  CLI runs do not.
+- **Added: the overdue set.** A new game is overdue when it is still not cached
+  after the 7-day window (`pending_update` counts as cached), or still `unknown`
+  `new_game_unknown_alert_hours` (48) after it was first seen. Games with no
+  `first_seen_at` are never overdue. It has no time-out; blocking or excluding the
+  game clears it (ADR-0021).
+- **Added: three ways to start a check.** A cron (`new_games_check_cron`,
+  `30 2,8,14,20 * * *` UTC); `SteamDownloadWatch`, which polls the agent's
+  `GET /v1/steam/downloaded-state` every `steam_download_poll_sec` (600; 0
+  disables it) and enqueues a check with `source='trigger'` when entries are
+  added (the first poll, about 10 min after start, only records the baseline; an
+  agent error or an empty answer keeps it, and so does a poll whose enqueue was
+  deduped or failed, so the next poll re-tries; the poller runs only when
+  `new_games_check_enabled` is on, and `steam_download_poll_sec` must be 0 or at
+  least 60); and `POST /api/v1/new-games-check`, which returns
+  202 `{job_id, queued}` with `source='api'`.
+- **Added: `orchestrator-cli cache check-new`.** Calls that endpoint and reports
+  queued, or already in flight.
+- **Added: `first_seen_at` and `is_new` on `GameResponse`.** `is_new` is true when
+  the game was first seen within the window and is neither blocked nor excluded.
+  The orchestrator owns the 7; Game_shelf does not duplicate it.
+
+### Data Model — migration 0019: `games.first_seen_at`, job kind `new_games_check`, job source `trigger` — 2026-11-21
+
+- `games.first_seen_at TEXT NULL` (UTC `YYYY-MM-DDTHH:MM:SSZ`). Library sync stamps
+  it on INSERT only, never on the conflict path. Rows that exist at migration time
+  keep NULL, so the existing library never turns "new" (ADR-0020); no backfill.
+- `jobs` is rebuilt (the 0014 recipe) so its CHECK lists `kind='new_games_check'`
+  and `source='trigger'`, and `idx_jobs_new_games_check_inflight` dedups a check
+  already queued or running. `JobResponse.kind` and `.source` and the CLI `_KINDS`
+  list are widened to match.
+- Rollback: restore the pre-migration DB backup; there are no down-migrations.
+
+### Changed — a new Epic purchase becomes eligible for scheduled Epic prefill within hours, not up to a week — 2026-11-21
+
+Scheduled Epic prefill downloads only measured games
+(`status_measured_at IS NOT NULL`), and until now only the weekly sweep measured a
+new Epic purchase. The new-games check measures it at the next 02:30, 08:30,
+14:30 or 20:30 UTC run, so it can be downloaded by the next scheduled prefill after
+that. This is intended (Karl, 2026-11-12: a purchase should be cached within about
+12 hours). The download code is unchanged.
+
+### Infrastructure — two new Uptime Kuma push monitors and their environment variables (deploy step) — 2026-11-21
+
+- `job:orch-new-games-check`, env `ORCH_KUMA_PUSH_NEW_GAMES`: liveness only. The
+  scheduler pushes it when a scheduled run finishes (the normal job heartbeat, so a
+  trigger or manual run cannot mask a dead scheduler). When the cron fires while a
+  trigger or API check holds the single in-flight slot, the cron promotes that row
+  to `source='scheduler'` and the worker re-reads `source` before the heartbeat, so
+  the run still counts as the scheduled one.
+- `orch:new-games-overdue`, env `ORCH_KUMA_PUSH_NEW_GAMES_OVERDUE`: DOWN while any
+  game is overdue, naming it, UP otherwise. Pushed on every scheduler and trigger
+  run, including one that fails on a tripped circuit breaker; CLI and API runs
+  never push it.
+- Both are push monitors in group 119, bound to notification 3, with a heartbeat
+  interval of about 7 h. They are separate so "the check stopped" is
+  distinguishable from "a game is overdue". Unset, a variable disables its push.
+- New settings: `new_game_window_days`, `new_game_unknown_alert_hours`,
+  `new_games_check_enabled`, `new_games_check_cron`, `steam_download_poll_sec`.
+  See `docs/deploy/live-configuration.md`.
+
+### Documentation — Feature 31, ADR-0020 and ADR-0021 — 2026-11-21
+
+FEATURES.md, PROJECT_BIBLE.md, `docs/deploy/live-configuration.md`, and two ADRs:
+first-seen time, not purchase date, defines "new"; the overdue alert never times
+out.
+- **Known gap (S1).** A Steam purchase SteamPrefill never starts has no
+  orchestrator row, so it never shows "New - Not Cached" and never alerts. Closing
+  it needs Game_shelf as an ownership source (ADR-0016, ADR-0018, both Proposed).
+  Tracked in #392.
+
 ### Fixed — a large Steam game is no longer impossible to measure on its first validate (#390) — 2026-11-13
 
 The Talos Principle 2 and Street Fighter 6 stayed `unknown` through a weekly

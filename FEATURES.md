@@ -2001,3 +2001,70 @@ the repo's `.semgrep/` rules are Python only (0 findings over 118 `.py` files); 
   - `THIRD_PARTY_NOTICES.md` does not reach the image (`.dockerignore` drops root
     `*.md`) and gives no SteamKit2 source location; two licence texts were fetched
     from main or master. To be resolved before the first release tag.
+
+
+---
+
+## Feature 31: New - Not Cached (Feature A: new-purchase measurement and overdue alert)
+
+**Phase Built:** 2 (Construction)
+**Status:** Complete - pending deploy and live verification (2026-11-21)
+
+**Summary:** A game bought recently showed Unknown until the weekly sweep reached
+it, and a new Epic purchase waited up to a week to be downloaded at all, because
+scheduled Epic prefill downloads only measured games. The orchestrator now records
+when it first sees a game (`games.first_seen_at`), measures games first seen in
+the last 7 days every 6 hours and right after SteamPrefill's downloaded record
+grows, exposes `is_new` so Game_shelf can show "New - Not Cached", and raises an
+Uptime Kuma alert for any new game still not cached after 7 days or still
+unmeasured after 48 h. Feature B (the full re-check after a cache eviction) is not
+built. Game_shelf's badge and filter are built in that repository.
+
+**Key Interfaces:**
+  - Migration 0019: `games.first_seen_at` (NULL for existing rows), `jobs.kind`
+    `new_games_check`, `jobs.source` `trigger`, `idx_jobs_new_games_check_inflight`
+  - `jobs/new_games.py` (`select_check_set`, `select_overdue`, `overdue_message`,
+    capped at 200 characters) and `jobs/handlers/new_games_check.py`
+  - `scheduler/steam_download_watch.py` (`SteamDownloadWatch.poll`); cron job
+    `new_games_check` in `scheduler/manager.py`
+  - `POST /api/v1/new-games-check` (202 `{job_id, queued}`);
+    `orchestrator-cli cache check-new`
+  - `GameResponse.first_seen_at` and `is_new`
+  - Settings `new_game_window_days` (7), `new_game_unknown_alert_hours` (48),
+    `new_games_check_enabled`, `new_games_check_cron` (`30 2,8,14,20 * * *` UTC),
+    `steam_download_poll_sec` (600; 0 disables), `kuma_push_new_games`,
+    `kuma_push_new_games_overdue`
+  - Kuma monitors `job:orch-new-games-check` (liveness, scheduler only) and
+    `orch:new-games-overdue` (scheduler and trigger runs)
+
+**Test Coverage:** migration 0019 and its dedup index; insert-only `first_seen_at`
+including the conflict path; every filter in the check set and overdue set;
+`overdue_message` truncation; the handler (sync failure continues, per-game error
+isolated, breaker trip fails the job but still pushes overdue, overdue push only for
+scheduler and trigger, scheduler runs re-measure overdue `not cached` games and
+others do not); the scheduler-only heartbeat, including a trigger check promoted
+by the cron while queued or running; the poller (baseline, added entry, error,
+empty answer, deduped or failed enqueue keeps the baseline); the poll-interval
+floor; the API trigger and `is_new`; the CLI command.
+
+**Related:** ADR-0020, ADR-0021. Spec
+`docs/superpowers/specs/2026-11-20-new-not-cached-design.md`; plan
+`docs/superpowers/plans/2026-11-21-new-not-cached-feature-a.md`.
+
+**Known Limitations:**
+  - **S1 gap.** A Steam purchase SteamPrefill never starts has no orchestrator row,
+    so it never shows "New - Not Cached" and never alerts. Closing it needs
+    Game_shelf as an ownership source (ADR-0016, ADR-0018, Proposed). Tracked in
+    #392.
+  - Kuma notifies only when status changes: a second game going overdue while the
+    overdue monitor is already DOWN sends no new notification. The message lists
+    it and an `new_games.overdue` log line is written per game per run.
+  - The overdue monitor has no time-out (ADR-0021): block or exclude a game to
+    clear it, or fix its download — scheduler runs re-measure overdue
+    `not cached` games, so the next scheduled check (at most 6 h) clears it, and
+    `orchestrator-cli game validate <id>` measures it at once (the monitor updates
+    at the next scheduled or trigger check).
+  - The poller's baseline is in memory, so the first poll after a restart (about
+    10 min after start) cannot trigger a check; the cron covers that.
+  - It changes Epic timing: new Epic purchases become eligible for scheduled
+    prefill within hours (intended).

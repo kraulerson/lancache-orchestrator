@@ -270,6 +270,21 @@ class Settings(BaseSettings):
     scheduled_prefill_enabled: bool = True
     scheduled_prefill_cron: str = "45 3,9,15,21 * * *"
 
+    # New - Not Cached: a game first seen within new_game_window_days is "new".
+    new_game_window_days: int = Field(default=7, ge=1, le=60)
+    # A new game still unmeasured ('unknown') after this many hours raises an alert.
+    new_game_unknown_alert_hours: int = Field(default=48, ge=6, le=24 * 60)
+    # new_games_check job: measures new games (scheduler runs also re-measure the
+    # overdue "not cached" ones). Wall-clock cron at :30 past 02/08/14/20 UTC. The
+    # NAS SteamPrefill host cron runs every 6 h in NAS local time: 01/07/13/19 UTC
+    # under MST, so this lands ~1.5 h after it (~2.5 h under MDT) and the Steam
+    # downloads it started have had time to land.
+    new_games_check_enabled: bool = True
+    new_games_check_cron: str = "30 2,8,14,20 * * *"
+    # Seconds between polls of SteamPrefill's downloaded record (the T1 trigger);
+    # 0 disables the poller, otherwise at least 60.
+    steam_download_poll_sec: int = Field(default=600, ge=0, le=86400)
+
     # Circuit breaker on mass cache-state loss (2026-09-04 design). A degraded
     # agent returns plausible-but-false measurements — on 2026-08-31 it read 65 of
     # 256 cache buckets and reported ~8% cached on every game, and each of those
@@ -293,6 +308,11 @@ class Settings(BaseSettings):
     kuma_push_fetch_manifests: str | None = None
     # Pushed DOWN (not by absence) when the measurement circuit breaker trips.
     kuma_push_measurement_breaker: str | None = None
+    # new_games_check heartbeat (liveness) and the DOWN-by-state push for an overdue
+    # new game: still not cached after new_game_window_days, or still unmeasured
+    # past new_game_unknown_alert_hours.
+    kuma_push_new_games: str | None = None
+    kuma_push_new_games_overdue: str | None = None
 
     # Above this share of apps failing, the fetch_manifests heartbeat goes DOWN
     # (#294). It does NOT fail the job: a partially-failing run is still a run that
@@ -491,6 +511,20 @@ class Settings(BaseSettings):
     def _validate_scheduled_prefill_cron(cls, v: str) -> str:
         """Fail-fast on a malformed cron by constructing the trigger now."""
         return _checked_cron("scheduled_prefill_cron", v)
+
+    @field_validator("new_games_check_cron", mode="after")
+    @classmethod
+    def _validate_new_games_check_cron(cls, v: str) -> str:
+        """Fail-fast on a malformed new_games_check cron by constructing the trigger now."""
+        return _checked_cron("new_games_check_cron", v)
+
+    @field_validator("steam_download_poll_sec", mode="after")
+    @classmethod
+    def _validate_steam_download_poll_sec(cls, v: int) -> int:
+        """0 disables the T1 poller; otherwise at least 60 s so it cannot hammer the agent."""
+        if 0 < v < 60:
+            raise ValueError(f"steam_download_poll_sec must be 0 (off) or >= 60, got {v}")
+        return v
 
     @field_validator("fetch_manifests_cron", mode="after")
     @classmethod

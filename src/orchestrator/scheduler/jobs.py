@@ -100,6 +100,48 @@ async def enqueue_validation_sweep(
         return 0
 
 
+async def enqueue_new_games_check(pool: Pool, *, source: str = "scheduler") -> int:
+    """Insert a ``new_games_check`` job if none is queued/running.
+
+    Mirrors ``enqueue_validation_sweep``: at most one in-flight check, DB-enforced
+    by ``idx_jobs_new_games_check_inflight`` (migration 0019) + ``ON CONFLICT DO
+    NOTHING``. Returns the rowcount (1 queued / 0 deduped-or-failed). Never raises.
+
+    A scheduler enqueue that dedups promotes the in-flight row to
+    ``source='scheduler'``: a T1 trigger check can hold the single slot when the
+    cron fires, and without the promotion the scheduler-only liveness heartbeat
+    would never push for that slot (the worker re-reads ``source`` before it pushes).
+    """
+    try:
+        inserted = await pool.execute_write(
+            "INSERT INTO jobs (kind, state, source) "
+            "VALUES ('new_games_check', 'queued', ?) ON CONFLICT DO NOTHING",
+            (source,),
+        )
+        if inserted:
+            _log.info("scheduler.new_games_check.queued", source=source)
+        else:
+            _log.info("scheduler.new_games_check.dedup_skip", source=source)
+            if source == "scheduler":
+                promoted = await pool.execute_write(
+                    "UPDATE jobs SET source='scheduler' WHERE kind='new_games_check' "
+                    "AND state IN ('queued','running') AND source <> 'scheduler'"
+                )
+                if promoted:
+                    _log.info("scheduler.new_games_check.promoted_to_scheduler", rows=promoted)
+        return inserted
+    except PoolError as e:
+        _log.error("scheduler.new_games_check.db_error", reason=str(e)[:200])
+        return 0
+    except Exception as e:
+        _log.error(
+            "scheduler.new_games_check.unexpected_error",
+            error=type(e).__name__,
+            reason=str(e)[:200],
+        )
+        return 0
+
+
 async def enqueue_fetch_manifests(pool: Pool, *, source: str = "scheduler") -> int:
     """Insert a ``fetch_manifests`` job if none is queued/running.
 

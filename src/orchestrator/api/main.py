@@ -36,6 +36,7 @@ from orchestrator.api.routers.health import router as health_router
 from orchestrator.api.routers.jobs import router as jobs_router
 from orchestrator.api.routers.manifests import router as manifests_router
 from orchestrator.api.routers.manual_downloads import router as manual_downloads_router
+from orchestrator.api.routers.new_games_trigger import router as new_games_trigger_router
 from orchestrator.api.routers.platforms import router as platforms_router
 from orchestrator.api.routers.prefill_exclusions import router as prefill_exclusions_router
 from orchestrator.api.routers.prefill_trigger import router as prefill_trigger_router
@@ -236,6 +237,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         auto_classify_block_enabled=settings.auto_classify_block_enabled,
         fetch_manifests_enabled=settings.fetch_manifests_enabled,
         fetch_manifests_cron=settings.fetch_manifests_cron,
+        new_games_check_enabled=settings.new_games_check_enabled,
+        new_games_check_cron=settings.new_games_check_cron,
+        steam_download_poll_sec=settings.steam_download_poll_sec,
         # Piece 1: lets auto_classify_block actuate the Steam selection prune on
         # the agent (only used when agent_enabled). None-safe when the agent is off.
         agent_client=agent_client if settings.agent_enabled else None,
@@ -447,6 +451,7 @@ def create_app() -> FastAPI:
     app.include_router(manual_downloads_router)
     app.include_router(validate_trigger_router)
     app.include_router(sweep_trigger_router)
+    app.include_router(new_games_trigger_router)
     app.include_router(fetch_manifests_trigger_router)
     app.include_router(prefill_trigger_router)
     app.include_router(purge_trigger_router)
