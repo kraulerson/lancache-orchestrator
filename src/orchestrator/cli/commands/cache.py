@@ -53,3 +53,21 @@ def cache_validate_all(ctx: click.Context) -> None:
             f"a sweep is already in flight (job_id={job_id}) and it is NOT a full "
             "backfill — re-run `cache validate-all` after it completes."
         )
+
+
+@cache.command("check-new")
+@click.pass_context
+@handles_api_errors
+def cache_check_new(ctx: click.Context) -> None:
+    """Queue a New - Not Cached check of recently added games.
+
+    Measures games first seen within the window that are not cached yet. A manual
+    run never re-measures overdue games and never pushes either Kuma monitor; the
+    scheduled check does both. At most one check runs at a time."""
+    client = make_client(ctx)
+    resp = client.post("/api/v1/new-games-check")
+    job_id = resp["job_id"]
+    if resp.get("queued"):
+        output.success(f"queued new-games check (job_id={job_id}).")
+    else:
+        output.warn(f"a new-games check is already in flight (job_id={job_id}).")

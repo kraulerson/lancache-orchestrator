@@ -201,3 +201,103 @@ class TestWorkerEmitsHeartbeats:
         assert after["state"] == "succeeded", (
             "the job succeeded; a heartbeat that could not be delivered must not change that"
         )
+
+
+def test_new_games_check_liveness_is_scheduler_only() -> None:
+    s = _settings(kuma_push_new_games="http://kuma.example/api/push/newgames")
+    assert monitor_url_for("new_games_check", "scheduler", s) == s.kuma_push_new_games
+    assert monitor_url_for("new_games_check", "trigger", s) is None
+    assert monitor_url_for("new_games_check", "api", s) is None
+
+
+NEW_GAMES_URL = "http://kuma.example/api/push/newgames"
+
+
+@pytest.mark.asyncio
+class TestPromotedSourceHeartbeats:
+    """I1: a T1 trigger check holds the single in-flight slot, so the cron enqueue
+    dedups. The cron promotes the in-flight row to source='scheduler' and the worker
+    re-reads source before the heartbeat, so liveness still pushes."""
+
+    async def _run(self, pool, monkeypatch, handler):
+        pushed: list[dict] = []
+
+        async def fake_push(url, *, status, msg="", transport=None):
+            pushed.append({"url": url, "status": status, "msg": msg})
+
+        monkeypatch.setattr("orchestrator.jobs.worker.heartbeat.push", fake_push)
+        monkeypatch.setattr(
+            "orchestrator.jobs.worker.get_settings",
+            lambda: _settings(kuma_push_new_games=NEW_GAMES_URL),
+        )
+        clear()
+        register("new_games_check", handler)
+        shutdown = asyncio.Event()
+
+        async def stopper():
+            for _ in range(200):
+                row = await pool.read_one("SELECT state FROM jobs ORDER BY id DESC LIMIT 1")
+                if row and row["state"] in ("succeeded", "failed"):
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            shutdown.set()
+
+        await asyncio.gather(
+            worker_loop(Deps(pool=pool), shutdown=shutdown, poll_interval_sec=0.02),
+            stopper(),
+        )
+        return pushed
+
+    async def test_queued_trigger_row_promoted_by_cron_pushes_liveness(
+        self, pool, monkeypatch
+    ) -> None:
+        from orchestrator.scheduler.jobs import enqueue_new_games_check
+
+        assert await enqueue_new_games_check(pool, source="trigger") == 1
+        assert await enqueue_new_games_check(pool) == 0  # cron fires: dedup + promote
+
+        async def ok(row, deps):
+            return None
+
+        pushed = await self._run(pool, monkeypatch, ok)
+        assert [p["url"] for p in pushed] == [NEW_GAMES_URL]
+        assert pushed[0]["status"] == "up"
+
+    async def test_running_trigger_row_promoted_mid_run_pushes_liveness(
+        self, pool, monkeypatch
+    ) -> None:
+        from orchestrator.scheduler.jobs import enqueue_new_games_check
+
+        assert await enqueue_new_games_check(pool, source="trigger") == 1
+
+        async def cron_fires_while_running(row, deps):
+            assert row["source"] == "trigger"  # claim-time value
+            assert await enqueue_new_games_check(deps.pool) == 0
+            return None
+
+        pushed = await self._run(pool, monkeypatch, cron_fires_while_running)
+        assert [p["url"] for p in pushed] == [NEW_GAMES_URL]
+
+    async def test_unpromoted_trigger_row_pushes_nothing(self, pool, monkeypatch) -> None:
+        from orchestrator.scheduler.jobs import enqueue_new_games_check
+
+        assert await enqueue_new_games_check(pool, source="trigger") == 1
+
+        async def ok(row, deps):
+            return None
+
+        pushed = await self._run(pool, monkeypatch, ok)
+        assert pushed == []
+
+
+@pytest.mark.asyncio
+async def test_current_source_falls_back_to_claim_time_value(pool) -> None:
+    from unittest.mock import AsyncMock
+
+    from orchestrator.db.pool import PoolError
+    from orchestrator.jobs.worker import current_job_source
+
+    assert await current_job_source(pool, {"id": 999, "source": "trigger"}) == "trigger"
+    pool.read_one = AsyncMock(side_effect=PoolError("db locked"))
+    assert await current_job_source(pool, {"id": 1, "source": "api"}) == "api"

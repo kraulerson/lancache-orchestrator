@@ -26,6 +26,7 @@ _KINDS = [
     "sweep",
     "auth_refresh",
     "purge",
+    "new_games_check",
 ]
 _STATES = ["queued", "running", "succeeded", "failed", "cancelled"]
 

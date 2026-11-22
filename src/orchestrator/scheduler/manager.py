@@ -26,9 +26,11 @@ from orchestrator.scheduler.jobs import (
     enqueue_auto_classify_block,
     enqueue_fetch_manifests,
     enqueue_library_sync,
+    enqueue_new_games_check,
     enqueue_scheduled_prefill,
     enqueue_validation_sweep,
 )
+from orchestrator.scheduler.steam_download_watch import SteamDownloadWatch
 
 if TYPE_CHECKING:
     from apscheduler.job import Job
@@ -48,6 +50,8 @@ VALIDATION_SWEEP_JOB_ID = "validation_sweep"
 SCHEDULED_PREFILL_JOB_ID = "scheduled_prefill"
 AUTO_CLASSIFY_BLOCK_JOB_ID = "auto_classify_block"
 FETCH_MANIFESTS_JOB_ID = "fetch_manifests"
+NEW_GAMES_CHECK_JOB_ID = "new_games_check"
+STEAM_DOWNLOAD_WATCH_JOB_ID = "steam_download_watch"
 
 
 class SchedulerManager:
@@ -72,6 +76,9 @@ class SchedulerManager:
         auto_classify_block_enabled: bool = True,
         fetch_manifests_enabled: bool = True,
         fetch_manifests_cron: str = "0 5 * * tue",
+        new_games_check_enabled: bool = True,
+        new_games_check_cron: str = "30 2,8,14,20 * * *",
+        steam_download_poll_sec: int = 600,
         agent_client: AgentClient | None = None,
     ) -> None:
         self._pool = pool
@@ -85,6 +92,9 @@ class SchedulerManager:
         self._auto_classify_block_enabled = auto_classify_block_enabled
         self._fetch_manifests_enabled = fetch_manifests_enabled
         self._fetch_manifests_cron = fetch_manifests_cron
+        self._new_games_check_enabled = new_games_check_enabled
+        self._new_games_check_cron = new_games_check_cron
+        self._steam_download_poll_sec = steam_download_poll_sec
         self._scheduler: AsyncIOScheduler | None = None
         # Serializes start()/shutdown() so the lifecycle stays atomic even if
         # they are ever called concurrently (e.g. a future restart endpoint).
@@ -204,6 +214,33 @@ class SchedulerManager:
                     args=(self._pool,),
                     id=FETCH_MANIFESTS_JOB_ID,
                     name="Enqueue fetch_manifests",
+                    replace_existing=True,
+                )
+
+            if self._new_games_check_enabled:
+                scheduler.add_job(
+                    enqueue_new_games_check,
+                    trigger=CronTrigger.from_crontab(self._new_games_check_cron, timezone="UTC"),
+                    args=(self._pool,),
+                    id=NEW_GAMES_CHECK_JOB_ID,
+                    name="Enqueue new_games_check",
+                    replace_existing=True,
+                )
+
+            if (
+                self._new_games_check_enabled
+                and self._agent_client is not None
+                and self._steam_download_poll_sec > 0
+            ):
+                # T1: a fresh watch per start() so the in-memory baseline resets
+                # with the scheduler; the first poll only records the baseline.
+                # It only enqueues new_games_check, so it is off when checks are.
+                watch = SteamDownloadWatch(self._pool, self._agent_client)
+                scheduler.add_job(
+                    watch.poll,
+                    trigger=IntervalTrigger(seconds=self._steam_download_poll_sec),
+                    id=STEAM_DOWNLOAD_WATCH_JOB_ID,
+                    name="Poll SteamPrefill downloaded record",
                     replace_existing=True,
                 )
 

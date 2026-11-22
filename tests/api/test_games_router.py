@@ -91,6 +91,8 @@ class TestGamesHappyPath:
                 "chunks_cached",
                 "chunks_total",
                 "status_measured_at",
+                "first_seen_at",
+                "is_new",
             }
 
 
@@ -645,6 +647,8 @@ class TestGamesMetadata:
                     "chunks_cached": None,
                     "chunks_total": None,
                     "status_measured_at": None,
+                    "first_seen_at": None,
+                    "excluded": 0,
                 }
             ]
 
@@ -687,6 +691,8 @@ class TestGamesMetadata:
                     "chunks_cached": None,
                     "chunks_total": None,
                     "status_measured_at": None,
+                    "first_seen_at": None,
+                    "excluded": 0,
                 },
                 {
                     "id": 2,
@@ -706,6 +712,8 @@ class TestGamesMetadata:
                     "chunks_cached": None,
                     "chunks_total": None,
                     "status_measured_at": None,
+                    "first_seen_at": None,
+                    "excluded": 0,
                 },
             ]
 

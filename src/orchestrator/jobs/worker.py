@@ -59,6 +59,7 @@ def monitor_url_for(kind: str, source: str, settings: Settings) -> str | None:
         "library_sync": settings.kuma_push_library_sync,
         "sweep": settings.kuma_push_sweep,
         "fetch_manifests": settings.kuma_push_fetch_manifests,
+        "new_games_check": settings.kuma_push_new_games,
     }.get(kind)
 
 
@@ -87,6 +88,29 @@ async def _emit_heartbeat(
         await heartbeat.push(url, status=status, msg=msg)
     except Exception as exc:
         _log.warning("jobs.heartbeat_failed", error=str(exc)[:JOB_ERROR_TRUNCATE])
+
+
+async def current_job_source(pool: Pool, row: dict[str, Any]) -> str:
+    """The job's ``source`` as the DB holds it NOW, else the claim-time value.
+
+    A scheduler enqueue that dedups against an in-flight row promotes that row to
+    ``source='scheduler'`` (see ``enqueue_new_games_check``), possibly after the
+    claim. Re-reading here keeps the scheduler-only heartbeat gate honest. Never
+    raises: any read failure, or a missing row, falls back to ``row['source']``.
+    """
+    claimed = str(row.get("source", ""))
+    try:
+        current = await pool.read_one("SELECT source FROM jobs WHERE id=?", (row.get("id"),))
+    except Exception as exc:
+        _log.warning("jobs.source_reread_failed", error=str(exc)[:JOB_ERROR_TRUNCATE])
+        return claimed
+    if current is None or current["source"] is None:
+        return claimed
+    return str(current["source"])
+
+
+async def _with_current_source(pool: Pool, row: dict[str, Any]) -> dict[str, Any]:
+    return {**row, "source": await current_job_source(pool, row)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,7 +289,9 @@ async def worker_loop(
                     kind_error=type(e).__name__,
                     elapsed_ms=int((time.monotonic() - t0) * 1000),
                 )
-                await _emit_heartbeat(row, ok=False, error=err)
+                await _emit_heartbeat(
+                    await _with_current_source(deps.pool, row), ok=False, error=err
+                )
                 continue
 
             try:
@@ -283,6 +309,8 @@ async def worker_loop(
                 job_id=job_id,
                 elapsed_ms=int((time.monotonic() - t0) * 1000),
             )
-            await _emit_heartbeat(row, ok=True, summary=summary)
+            await _emit_heartbeat(
+                await _with_current_source(deps.pool, row), ok=True, summary=summary
+            )
 
     _log.info("jobs.worker.stopped")

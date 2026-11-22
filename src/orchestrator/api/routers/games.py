@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
@@ -30,6 +31,7 @@ from orchestrator.api._query_helpers import (
 )
 from orchestrator.api.dependencies import get_pool_dep
 from orchestrator.api.routers._path_params import GameIdPath  # noqa: TC001  runtime-resolved
+from orchestrator.core.settings import get_settings
 from orchestrator.db.pool import PoolError
 
 if TYPE_CHECKING:
@@ -74,7 +76,7 @@ _GAMES_COLUMNS = (
     "id, platform, app_id, title, owned, size_bytes, "
     "current_version, cached_version, status, "
     "last_validated_at, last_prefilled_at, last_error, metadata, "
-    "status_measured_at"
+    "status_measured_at, first_seen_at"
 )
 
 # UAT-4 S3-e: cap metadata bytes before json.loads to defend against
@@ -93,6 +95,9 @@ _GAME_ROW_SELECT = (
     f"SELECT {_GAMES_COLUMNS}, "  # noqa: S608  only the static _GAMES_COLUMNS is interpolated
     "EXISTS(SELECT 1 FROM block_list b "
     "WHERE b.platform=games.platform AND b.app_id=games.app_id) AS blocked, "
+    "EXISTS(SELECT 1 FROM prefill_exclusions e "
+    "WHERE e.platform=games.platform AND e.app_id=games.app_id "
+    "AND e.mode='exclude') AS excluded, "
     "(SELECT vh.chunks_cached FROM validation_history vh "
     " WHERE vh.game_id=games.id ORDER BY vh.started_at DESC, vh.id DESC LIMIT 1) "
     "AS chunks_cached, "
@@ -139,6 +144,10 @@ class GameResponse(BaseModel):
     status_measured_at: str | None
     metadata: dict[str, Any] | None
     blocked: bool
+    # When library sync first saw the game (migration 0019); null for rows that
+    # pre-date the column. is_new drives Game_shelf's "New - Not Cached" label.
+    first_seen_at: str | None
+    is_new: bool
     # Latest validation_history counts (newest row by started_at) so the UI can
     # render a "Partial · N%" badge without a second round-trip. Both null when
     # the game has never been validated.
@@ -172,6 +181,31 @@ class GameDetailResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Row → response model (shared by list + detail)
 # ---------------------------------------------------------------------------
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _compute_is_new(row: Any) -> bool:
+    """True iff first seen within the window and neither blocked nor excluded.
+
+    `>= now - window` mirrors the SQL check set (a game exactly at the window
+    edge counts as within on both sides). A malformed stamp is logged and
+    yields False — the row still renders.
+    """
+    raw = row["first_seen_at"]
+    if raw is None or row["blocked"] or row["excluded"]:
+        return False
+    try:
+        seen = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        _log.warning("api.games.first_seen_at_malformed", game_id=row["id"], value=str(raw)[:64])
+        return False
+    window = timedelta(days=get_settings().new_game_window_days)
+    # Whole seconds, like SQL's strftime('now'), so the edge agrees with the check set.
+    now = _utcnow().replace(microsecond=0)
+    return seen >= now - window
 
 
 def _row_to_game_response(row: Any) -> GameResponse | None:
@@ -241,6 +275,8 @@ def _row_to_game_response(row: Any) -> GameResponse | None:
             last_error=last_error,
             metadata=metadata,
             blocked=bool(row["blocked"]),
+            first_seen_at=row["first_seen_at"],
+            is_new=_compute_is_new(row),
             chunks_cached=row["chunks_cached"],
             chunks_total=row["chunks_total"],
         )

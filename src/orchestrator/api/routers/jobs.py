@@ -90,12 +90,13 @@ class JobResponse(BaseModel):
         "manifest_fetch",
         "fetch_manifests",
         "purge",
+        "new_games_check",
     ]
     game_id: int | None
     platform: Literal["steam", "epic"] | None
     state: Literal["queued", "running", "succeeded", "failed", "cancelled"]
     progress: float | None
-    source: Literal["scheduler", "cli", "gameshelf", "api"]
+    source: Literal["scheduler", "cli", "gameshelf", "api", "trigger"]
     started_at: str | None
     finished_at: str | None
     error: str | None
