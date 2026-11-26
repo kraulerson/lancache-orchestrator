@@ -2068,3 +2068,26 @@ floor; the API trigger and `is_new`; the CLI command.
     10 min after start) cannot trigger a check; the cron covers that.
   - It changes Epic timing: new Epic purchases become eligible for scheduled
     prefill within hours (intended).
+
+## Feature 32: Eviction Re-check (Feature B of New - Not Cached)
+
+- **Status:** Complete. Pending deploy and live UAT.
+- **What:** an uncommanded cache eviction makes the orchestrator re-measure the whole library. It does not wait for the weekly Wednesday sweep.
+- **Design:** `docs/superpowers/specs/2026-11-20-new-not-cached-design.md` §3b (Karl's P2 and N1).
+- **Plan:** `docs/superpowers/plans/2026-11-23-eviction-recheck-feature-b.md`.
+
+**How it works:**
+- cache-catcher's guard appends one JSON line to `/events/eviction-events.jsonl` for each eviction alert it actually sends (`tools/cache_catcher/eviction_events.py`). The write is best-effort and never blocks the email or the Kuma push.
+- The agent serves those events at `GET /v1/cache/eviction-events?since=`, reading a read-only mount of the `cache-catcher-events` volume.
+- The control plane's `EvictionWatch` polls every `eviction_poll_sec` (300 s).
+  - A new event restarts the sweep pass (`restart_pass`, migration 0020: `sweep_pass.forced` and `last_eviction_ts`) with its boundary at the earlier of the event time and now, plus 20 min, so games measured while the deletion burst continues are re-measured too. It then queues a sweep.
+  - Until the pass completes, the watch queues the next sweep whenever none is queued or running. Other queued jobs run in between.
+  - Exactly once: `last_eviction_ts` survives restarts.
+  - A Wednesday cron sweep that finds a forced sweep in flight promotes it to `scheduler`, so monitor 180 still sees the schedule run.
+  - The watch does not chain while the latest sweep failed within the measurement breaker's window, so a mass eviction that trips the breaker is not re-failed every 5 min.
+  - A missing `/cache-events` mount makes the agent return 503 (logged on the control plane as `eviction_watch.agent_error`), and cache-catcher logs `EVENTS ... MISSING` at startup. A missing mount never looks like "no evictions".
+
+**Limits:**
+- `mode000` alerts and commanded purges never trigger a re-check.
+- The forced pass is not on the scheduler-only sweep monitor (180). Kuma 220 alerts on the eviction itself.
+- After an eviction, a full pass takes about 25 h across 4–5 sweeps.

@@ -21,6 +21,14 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+# Feature B (final-review I1): an eviction event's ts marks the START of a burst.
+# cache-catcher then suppresses further alerts for its COOLDOWN (900 s, see
+# tools/cache_catcher/fanotify_guard.py) while deletes may continue, and a game is
+# stamped attempted only after its disk-stat ends. So the forced pass's boundary is
+# pushed past the burst: COOLDOWN + EVICT_WINDOW (60 s) + alert/poll latency. The
+# cost is that ~20 min of measurements are repeated once per eviction.
+EVICTION_BOUNDARY_MARGIN_SEC = 1200
+
 
 @dataclass(frozen=True, slots=True)
 class SweepPass:
@@ -31,18 +39,69 @@ class SweepPass:
         started_at: the SQLite ``CURRENT_TIMESTAMP`` text at which this pass
             began. A game is a candidate for this pass while its
             ``last_measure_attempt_at`` is NULL or at-or-before this stamp.
+        forced: True while a pass restarted by a cache eviction is in flight
+            (migration 0020). The eviction watch keeps a sweep queued until
+            ``complete_pass`` clears it.
+        last_eviction_ts: the newest eviction event acted on (ISO-8601 UTC, as
+            cache-catcher writes it), or None if none ever was. Survives pass
+            completion so a restart never acts on the same eviction twice.
     """
 
     number: int
     started_at: str
+    forced: bool = False
+    last_eviction_ts: str | None = None
 
 
 async def read_pass(pool: Pool) -> SweepPass:
     """The pass in flight. Migration 0017 seeds the row, so this always finds one."""
-    row = await pool.read_one("SELECT pass_number, pass_started_at FROM sweep_pass WHERE id=1")
+    row = await pool.read_one(
+        "SELECT pass_number, pass_started_at, forced, last_eviction_ts FROM sweep_pass WHERE id=1"
+    )
     if row is None:  # pragma: no cover - 0017 seeds it; a missing row is a broken DB
         raise RuntimeError("sweep_pass row is missing — migration 0017 did not run")
-    return SweepPass(number=int(row["pass_number"]), started_at=str(row["pass_started_at"]))
+    ack = row["last_eviction_ts"]
+    return SweepPass(
+        number=int(row["pass_number"]),
+        started_at=str(row["pass_started_at"]),
+        forced=bool(row["forced"]),
+        last_eviction_ts=str(ack) if ack is not None else None,
+    )
+
+
+async def restart_pass(pool: Pool, *, started_at: str, eviction_ts: str) -> SweepPass:
+    """Open a new, forced pass whose boundary is ``started_at`` (an eviction time).
+
+    Every game last attempted at-or-before the eviction becomes a candidate
+    again. ``started_at`` arrives in ISO-8601 (``YYYY-MM-DDTHH:MM:SSZ``) and is
+    stored in ``CURRENT_TIMESTAMP`` format, because the candidate query compares
+    it as text with ``games.last_measure_attempt_at`` and the ISO ``T`` would sort
+    after the space.
+
+    Unguarded on purpose: an eviction supersedes whatever pass is in flight. A
+    sweep still running on the old pass calls ``complete_pass`` with a stale view,
+    and that call's pass-number guard makes it a no-op.
+    """
+    # Boundary = min(eviction ts, LXC now) + margin, or now + margin when the ts
+    # cannot be parsed (strftime gives NULL for e.g. month 13). The min() stops a
+    # NAS clock that runs ahead from making a boundary no measurement can pass;
+    # the margin covers the rest of the burst (see EVICTION_BOUNDARY_MARGIN_SEC).
+    await pool.execute_write(
+        "UPDATE sweep_pass SET pass_number = pass_number + 1, "
+        "pass_started_at = datetime("
+        "  coalesce(min(CAST(strftime('%s', ?) AS INTEGER), CAST(strftime('%s','now') AS INTEGER)),"
+        "           CAST(strftime('%s','now') AS INTEGER)) + ?, 'unixepoch'), "
+        "forced = 1, last_eviction_ts = ? WHERE id = 1",
+        (started_at, EVICTION_BOUNDARY_MARGIN_SEC, eviction_ts),
+    )
+    nxt = await read_pass(pool)
+    _log.info(
+        "sweep.pass_restarted",
+        pass_number=nxt.number,
+        pass_started_at=nxt.started_at,
+        eviction_ts=eviction_ts,
+    )
+    return nxt
 
 
 async def complete_pass(pool: Pool, current: SweepPass) -> SweepPass:
@@ -59,7 +118,7 @@ async def complete_pass(pool: Pool, current: SweepPass) -> SweepPass:
     """
     await pool.execute_write(
         "UPDATE sweep_pass SET pass_number = pass_number + 1, "
-        "pass_started_at = CURRENT_TIMESTAMP WHERE id = 1 AND pass_number = ?",
+        "pass_started_at = CURRENT_TIMESTAMP, forced = 0 WHERE id = 1 AND pass_number = ?",
         (current.number,),
     )
     nxt = await read_pass(pool)

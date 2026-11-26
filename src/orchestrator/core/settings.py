@@ -180,6 +180,10 @@ class Settings(BaseSettings):
     # cache — the agent mounts /lancache/lancache/cache here, so GOG lives at
     # /data/cache/GOG alongside the nginx `cache/` dir.
     manual_downloads_cache_path: Path = Path("/data/cache")
+    # Feature B (agent side): cache-catcher's eviction-events file, on the
+    # cache-catcher-events volume mounted read-only into the agent. Absent until
+    # the first eviction — the endpoint treats a missing file as "no events".
+    eviction_events_path: Path = Path("/cache-events/eviction-events.jsonl")
     cache_slice_size_bytes: int = Field(default=10_485_760, gt=0)
     cache_levels: str = Field(default="2:2", pattern=r"^\d+(:\d+)*$")
     # F7: nginx $cacheidentifier for Steam traffic (the lancache map sets
@@ -284,6 +288,10 @@ class Settings(BaseSettings):
     # Seconds between polls of SteamPrefill's downloaded record (the T1 trigger);
     # 0 disables the poller, otherwise at least 60.
     steam_download_poll_sec: int = Field(default=600, ge=0, le=86400)
+    # Feature B: seconds between polls of the agent for cache-catcher eviction
+    # events; also how quickly the next sweep of an eviction-forced pass is
+    # chained. 0 disables the poller, otherwise at least 60.
+    eviction_poll_sec: int = Field(default=300, ge=0, le=86400)
 
     # Circuit breaker on mass cache-state loss (2026-09-04 design). A degraded
     # agent returns plausible-but-false measurements — on 2026-08-31 it read 65 of
@@ -524,6 +532,14 @@ class Settings(BaseSettings):
         """0 disables the T1 poller; otherwise at least 60 s so it cannot hammer the agent."""
         if 0 < v < 60:
             raise ValueError(f"steam_download_poll_sec must be 0 (off) or >= 60, got {v}")
+        return v
+
+    @field_validator("eviction_poll_sec", mode="after")
+    @classmethod
+    def _validate_eviction_poll_sec(cls, v: int) -> int:
+        """0 disables the eviction poller; otherwise at least 60 s."""
+        if 0 < v < 60:
+            raise ValueError(f"eviction_poll_sec must be 0 (off) or >= 60, got {v}")
         return v
 
     @field_validator("fetch_manifests_cron", mode="after")

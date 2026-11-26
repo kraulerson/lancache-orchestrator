@@ -91,12 +91,31 @@ Both files live in the container's `/log` volume, which survives `docker rm`:
 ```sh
 scp tools/cache_catcher/delete_actor.py tools/cache_catcher/kuma.py \
     tools/cache_catcher/key_budget.py tools/cache_catcher/key_budget_probe.py \
+    tools/cache_catcher/eviction_events.py \
     tools/cache_catcher/fanotify_guard.py karl@192.168.1.30:/tmp/
 ssh karl@192.168.1.30 'for f in delete_actor.py kuma.py key_budget.py \
-                                key_budget_probe.py fanotify_guard.py; do \
+                                key_budget_probe.py eviction_events.py fanotify_guard.py; do \
                          docker cp /tmp/$f cache-catcher:/log/$f; done && \
                        docker restart cache-catcher'
 ```
+
+**Eviction events (Feature 32).** For each eviction alert it actually *sends*, the
+guard appends one JSON line to `/events/eviction-events.jsonl`:
+`{"ts", "deletes", "window_s", "actor"}`, with `ts` in ISO UTC. Nothing is
+written for a cooldown-suppressed alert, for `mode000`, or for a commanded purge.
+
+- The file is on the `cache-catcher-events` volume, which the agent mounts
+  read-only to serve it to the orchestrator.
+- The write is best-effort and happens after the email and the Kuma push. A
+  failure is logged as `EVENT-WRITE FAILED (...)` and never blocks the alert.
+- `eviction_events.py` must be copied into `/log` with the others. Without it the
+  guard fails to import.
+- **The first Feature 32 deploy needs a container recreate, not the `docker
+  restart` above**, because the `/events` volume mount is new; see
+  `docs/deploy/live-configuration.md` §2.1a. After that, code-only changes use the
+  restart recipe as before. At startup the guard logs
+  `EVENTS /events/eviction-events.jsonl: writable`; anything else means the mount
+  is wrong.
 
 `/log/entrypoint.sh` runs the guard as the container's main process, so a restart
 picks up the new code. Verify afterwards:

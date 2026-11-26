@@ -272,6 +272,13 @@ class AgentClient:
         result: dict[str, Any] = resp.json()
         return result
 
+    async def eviction_events(self, since: str | None) -> list[dict[str, Any]]:
+        """Feature B: cache-catcher's eviction events newer than ``since`` (ISO UTC)."""
+        params = {"since": since} if since is not None else None
+        resp = await self._request("GET", "/v1/cache/eviction-events", params=params)
+        result: list[dict[str, Any]] = resp.json()["events"]
+        return result
+
     async def steam_chunk_count(self, app_id: int) -> int:
         """#390: the agent's count of chunks a validate of this app would stat.
         Long read timeout: counting ARK took 18 s under load, and the default 30 s

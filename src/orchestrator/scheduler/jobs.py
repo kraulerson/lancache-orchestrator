@@ -87,6 +87,17 @@ async def enqueue_validation_sweep(
             _log.info("scheduler.sweep.queued", full=full, source=source)
         else:
             _log.info("scheduler.sweep.dedup_skip")
+            if source == "scheduler":
+                # Feature B (final-review I2): an eviction-forced chain holds the one
+                # sweep slot most of the time. Promote the in-flight row so the
+                # scheduler-only sweep monitor still pushes for this cron slot (the
+                # worker re-reads source before the heartbeat).
+                promoted = await pool.execute_write(
+                    "UPDATE jobs SET source='scheduler' WHERE kind='sweep' "
+                    "AND state IN ('queued','running') AND source <> 'scheduler'"
+                )
+                if promoted:
+                    _log.info("scheduler.sweep.promoted_to_scheduler", rows=promoted)
         return inserted
     except PoolError as e:
         _log.error("scheduler.sweep.db_error", reason=str(e)[:200])

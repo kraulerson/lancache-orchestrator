@@ -22,6 +22,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from orchestrator.scheduler.eviction_watch import EvictionWatch
 from orchestrator.scheduler.jobs import (
     enqueue_auto_classify_block,
     enqueue_fetch_manifests,
@@ -52,6 +53,7 @@ AUTO_CLASSIFY_BLOCK_JOB_ID = "auto_classify_block"
 FETCH_MANIFESTS_JOB_ID = "fetch_manifests"
 NEW_GAMES_CHECK_JOB_ID = "new_games_check"
 STEAM_DOWNLOAD_WATCH_JOB_ID = "steam_download_watch"
+EVICTION_WATCH_JOB_ID = "eviction_watch"
 
 
 class SchedulerManager:
@@ -79,6 +81,7 @@ class SchedulerManager:
         new_games_check_enabled: bool = True,
         new_games_check_cron: str = "30 2,8,14,20 * * *",
         steam_download_poll_sec: int = 600,
+        eviction_poll_sec: int = 300,
         agent_client: AgentClient | None = None,
     ) -> None:
         self._pool = pool
@@ -95,6 +98,7 @@ class SchedulerManager:
         self._new_games_check_enabled = new_games_check_enabled
         self._new_games_check_cron = new_games_check_cron
         self._steam_download_poll_sec = steam_download_poll_sec
+        self._eviction_poll_sec = eviction_poll_sec
         self._scheduler: AsyncIOScheduler | None = None
         # Serializes start()/shutdown() so the lifecycle stays atomic even if
         # they are ever called concurrently (e.g. a future restart endpoint).
@@ -241,6 +245,23 @@ class SchedulerManager:
                     trigger=IntervalTrigger(seconds=self._steam_download_poll_sec),
                     id=STEAM_DOWNLOAD_WATCH_JOB_ID,
                     name="Poll SteamPrefill downloaded record",
+                    replace_existing=True,
+                )
+
+            if (
+                self._validation_sweep_enabled
+                and self._agent_client is not None
+                and self._eviction_poll_sec > 0
+            ):
+                # Feature B: an uncommanded cache eviction restarts the sweep pass
+                # and this job chains sweeps until it completes. It only enqueues
+                # sweeps, so it is off when sweeps are.
+                eviction_watch = EvictionWatch(self._pool, self._agent_client)
+                scheduler.add_job(
+                    eviction_watch.poll,
+                    trigger=IntervalTrigger(seconds=self._eviction_poll_sec),
+                    id=EVICTION_WATCH_JOB_ID,
+                    name="Poll cache-catcher eviction events",
                     replace_existing=True,
                 )
 

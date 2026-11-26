@@ -19,6 +19,57 @@ for handoff clarity. Categories are ordered by impact severity.
 
 ## [Unreleased]
 
+### Added — an uncommanded cache eviction makes the orchestrator re-check the whole library (Feature 32) — 2026-11-24
+
+Feature B of the New - Not Cached design (section 3b; Karl's P2 and N1). Before
+this, an eviction turned Kuma 220 DOWN and sent an email, but the cache status of
+every game measured before it stayed as it was until the weekly Wednesday sweep
+happened to reach each one.
+- **Added: cache-catcher records its eviction alerts.** Each *sent* eviction alert
+  (not a cooldown-suppressed one, not `mode000`, never a commanded purge) appends
+  one JSON line to `/events/eviction-events.jsonl`. The new module
+  `tools/cache_catcher/eviction_events.py` writes it after the email and the Kuma
+  push, and a write failure is logged and swallowed, never raised.
+- **Added: agent `GET /v1/cache/eviction-events?since=`.** It reads
+  `eviction_events_path` (default `/cache-events/eviction-events.jsonl`, on a
+  read-only mount). A missing file means no events. A missing directory (the volume
+  is not mounted) is a 503, so it can never look like "no evictions". Malformed,
+  partial or non-ISO lines are skipped, and the response holds at most the newest
+  1,000 events. cache-catcher logs `EVENTS <path>: writable|MISSING|READ-ONLY` at
+  startup.
+- **Added: control-plane `EvictionWatch`.** It polls every `eviction_poll_sec`
+  (300; `0` turns it off; otherwise at least 60).
+  - A new event restarts the sweep pass, so every game measured before the
+    eviction is measured again, and queues a sweep (`source='trigger'`). The
+    boundary is the earlier of the event time and now, plus 20 min, which covers
+    the rest of the burst (cache-catcher's 15-min alert cooldown) and a NAS clock
+    running ahead. An unparseable time falls back to now.
+  - A Wednesday cron sweep that dedups against a forced sweep promotes it to
+    `source='scheduler'`, so the sweep monitor (180) still sees the schedule run.
+  - The watch does not chain while the latest sweep failed within the measurement
+    breaker's window.
+  - While that forced pass is unfinished, a poll that finds no sweep queued or
+    running queues the next one.
+  - Running only when sweeps are enabled and an agent is configured.
+- **Data Model: migration 0020.** `sweep_pass` gains `forced` (0/1) and
+  `last_eviction_ts`, the newest event acted on, so a restart never acts twice.
+  `restart_pass()` stores the boundary in `CURRENT_TIMESTAMP` format, which is
+  what `last_measure_attempt_at` is compared against. `complete_pass()` clears
+  `forced`.
+- **Infrastructure:** a new NAS volume `cache-catcher-events`, mounted read-write
+  in cache-catcher and read-only in the agent. See
+  `docs/deploy/live-configuration.md`.
+- **Monitoring:** no new monitor. Kuma 220 already alerts on the eviction itself.
+  Forced sweeps are `trigger`-sourced and push the scheduler-only sweep monitor (180)
+  only when a cron slot promotes them, so a dead scheduler stays visible. The forced
+  pass shows in the `eviction_watch.*` and `sweep.*` logs and in
+  `sweep_pass.forced`.
+- **Changed from the design:**
+  - The design had a partially finished sweep queue its own successor. That cannot
+    work: its own row is still `running` and the in-flight index drops the insert.
+    The watch does the chaining instead.
+  - The acted-on timestamp lives in `sweep_pass`, not in a new table.
+
 ### Added — "New - Not Cached": a recently bought game is measured within hours and an uncached one raises an alert (Feature 31) — 2026-11-21
 
 A game bought on 2026-11-19 showed Unknown until the weekly Wednesday sweep reached

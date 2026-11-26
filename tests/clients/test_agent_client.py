@@ -566,3 +566,26 @@ async def test_steam_prefill_poll_ceiling_exceeds_the_agent_side_timeout():
         f"poll ceiling {seen['poll_timeout']}s must outlast the agent-side "
         f"timeout {driver_timeout}s, or the agent's timeout can never fire"
     )
+
+
+async def test_eviction_events_passes_since_and_returns_the_list():
+    """Feature B: one GET with ``since``; returns the agent's event list."""
+
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.path == "/v1/cache/eviction-events"
+        assert request.url.params["since"] == "2026-11-20T01:00:00Z"
+        return httpx.Response(200, json={"events": [{"ts": "2026-11-21T02:00:00Z"}]})
+
+    client = _client(handler)
+    events = await client.eviction_events("2026-11-20T01:00:00Z")
+    assert events == [{"ts": "2026-11-21T02:00:00Z"}]
+
+
+async def test_eviction_events_without_since_sends_no_param():
+    def handler(request):
+        assert "since" not in request.url.params
+        return httpx.Response(200, json={"events": []})
+
+    client = _client(handler)
+    assert await client.eviction_events(None) == []
