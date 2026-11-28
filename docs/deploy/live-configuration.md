@@ -590,11 +590,17 @@ Uptime Kuma **v2.4.0**, systemd unit `uptime-kuma`, database
   "is cache loss happening now": DOWN on an `eviction` or `mode000` alert,
   latched DOWN for 1 h after the last one, UP otherwise.
 
-- **`job:orch-new-games-check`** and **`orch:new-games-overdue`** — push type,
-  group **119**, notification **3** (binding is not optional), heartbeat interval
-  about 7 h (the cron fires every 6 h). **To be created at deploy** (Feature 31, deploy step
-  with a change card); their push URLs go into `/root/orch-lxc.env` as
-  `ORCH_KUMA_PUSH_NEW_GAMES` and `ORCH_KUMA_PUSH_NEW_GAMES_OVERDUE`.
+- **`job:orch-new-games-check`** (Kuma **298**) and **`orch:new-games-overdue`**
+  (Kuma **299**). Both are push type, in group **119**, bound to notification
+  **3** (the binding is not optional). Their push URLs are in `/root/orch-lxc.env`
+  as `ORCH_KUMA_PUSH_NEW_GAMES` and `ORCH_KUMA_PUSH_NEW_GAMES_OVERDUE`.
+  - **Heartbeat interval: 13 h (46800 s).** They were created at 7 h on
+    2026-11-22 and are raised at the Feature 32 deploy (Karl's K1, 2026-11-25).
+  - **Why 13 h:** the cron fires every 6 h, but during an eviction-forced re-check
+    pass (Feature 32) sweeps hold the single job queue for about 5.5 h at a time.
+    About one forced pass in four delays a check past 7 h, which gave a false DOWN.
+  - **The trade-off:** a genuinely stalled check scheduler is noticed about 6 h
+    later than before.
   - `job:orch-new-games-check` answers **only** "is the scheduled check running".
     The scheduler pushes it when a scheduled run finishes; trigger, API and CLI
     runs never do, so they cannot mask a dead scheduler. When the cron fires while

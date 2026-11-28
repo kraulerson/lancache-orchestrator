@@ -64,6 +64,11 @@ happened to reach each one.
   only when a cron slot promotes them, so a dead scheduler stays visible. The forced
   pass shows in the `eviction_watch.*` and `sweep.*` logs and in
   `sweep_pass.forced`.
+- **Changed (monitoring): Kuma 298 and 299 go from about 7 h to a 13 h heartbeat
+  interval** (Karl's K1, applied at deploy). A forced pass holds the job queue for
+  about 5.5 h per sweep, so a 6-hourly new-games check could miss a 7 h window with
+  nothing wrong. The trade-off is that a stalled check scheduler is noticed about
+  6 h later.
 - **Changed from the design:**
   - The design had a partially finished sweep queue its own successor. That cannot
     work: its own row is still `running` and the in-flight index drops the insert.
