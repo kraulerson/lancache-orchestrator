@@ -31,6 +31,10 @@ from delete_actor import ACTOR_ORCHESTRATOR, classify_actor, counts_toward_evict
 import kuma
 from key_budget_probe import load_cfg, probe_loop
 
+# Feature B: each SENT eviction alert is also recorded for the orchestrator, which
+# restarts its sweep pass at the eviction time. Best-effort; never raises.
+from eviction_events import EVENTS_PATH, append_event, events_mount_status
+
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
 FAN_CLASS_NOTIF = 0x0
@@ -171,7 +175,7 @@ def send_email(subject, body):
         log("ALERT-EMAIL FAILED (%s): %s" % (type(e).__name__, subject))
 
 
-def alert(kind, subject, body):
+def alert(kind, subject, body, *, deletes=None, actor=None):
     now = time.time()
     last = _last_sent.get(kind, 0)
     if now - last < COOLDOWN:
@@ -182,6 +186,16 @@ def alert(kind, subject, body):
     send_email(subject, body)
     if kind in EVICT_ALERT_KINDS:
         kuma.push(load_cfg().get("KUMA_PUSH_CACHE_EVICTION"), "down", subject)
+    # Last, so a write failure can never pre-empt the email or the Kuma push.
+    # Only a real eviction re-checks the library; mode000 is a permissions fault.
+    if kind == "eviction":
+        append_event(
+            EVENTS_PATH,
+            deletes=deletes if deletes is not None else 0,
+            window_s=EVICT_WINDOW,
+            actor=actor or "other",
+            log=log,
+        )
 
 
 def proc_info(pid):
@@ -325,6 +339,8 @@ def handle_delete(kind, pid, comm, exe, name, cmd):
                 "Latest: actor=%s comm=%s name=%s cmd=[%s]\n"
                 "This is the mass-eviction signature. Check the cache index (keys_zone)."
                 % (EVICT_THRESHOLD, EVICT_WINDOW, actor, comm, name, cmd),
+                deletes=len(_evict_ts),
+                actor=actor,
             )
 
 
@@ -390,6 +406,9 @@ def main():
         "FANOTIFY guard started (delete+attrib; evict>=%d/%ds; email cooldown %ds)"
         % (EVICT_THRESHOLD, EVICT_WINDOW, COOLDOWN)
     )
+    # Feature B: say up front whether eviction events can be recorded, so a missing
+    # cache-catcher-events mount is visible in `docker logs`, not silent.
+    log("EVENTS %s: %s" % (EVENTS_PATH, events_mount_status(EVENTS_PATH)))
 
     # Daemon threads: a dead thread takes its own monitor silent-and-red while
     # the others stay green, so a partial failure stays visible.

@@ -84,8 +84,8 @@ print or copy the secret values anywhere — `ORCH_TOKEN` and the five
 | `ORCH_KUMA_PUSH_NEW_GAMES_OVERDUE` | *(secret URL)* | `orch:new-games-overdue`; see §3.1 and below. Monitor id assigned when created |
 
 **New - Not Cached settings (Feature 31) — all absent from the file and at their
-defaults. The two push URLs above are NOT in the file yet: they are added to
-`/root/orch-lxc.env` at deploy, after the monitors are created.** An unset push URL disables that push.
+defaults. The two push URLs above were added to `/root/orch-lxc.env` at the
+2026-11-22 deploy (Kuma 298 and 299).** An unset push URL disables that push.
 
 | Setting (env `ORCH_<NAME>`) | Default | Meaning |
 |---|---|---|
@@ -101,6 +101,23 @@ The poller needs `ORCH_AGENT_ENABLED=true` and `NEW_GAMES_CHECK_ENABLED=true`
 baseline is in memory, so that first poll only records it and triggers nothing; the
 cron covers that gap. Run a check by hand with `orchestrator-cli cache check-new`
 (it queues a check of new games; a manual run never pushes either monitor).
+
+**Eviction re-check setting (Feature 32) — absent from the file, at its default.**
+
+| Setting (env `ORCH_<NAME>`) | Default | Meaning |
+|---|---|---|
+| `EVICTION_POLL_SEC` | `300` | seconds between polls of the agent's `/v1/cache/eviction-events`; also the longest gap before the next sweep of an eviction-forced pass is queued. `0` disables it; otherwise at least 60 |
+
+- **When it runs.** The watch runs only with `ORCH_AGENT_ENABLED=true` and
+  `VALIDATION_SWEEP_ENABLED=true`, because it only queues sweeps.
+- **What a new event does.** It restarts the sweep pass at the eviction time and
+  queues a `trigger` sweep. Until the pass completes, a sweep is re-queued whenever
+  none is queued or running.
+- **Where to see it.** Forced sweeps do not push the sweep monitor (180), which
+  is scheduler-only. Watch `eviction_watch.*` in the logs, or
+  `SELECT forced, last_eviction_ts FROM sweep_pass`.
+- **An older agent.** If the agent lacks the endpoint, every poll logs
+  `eviction_watch.agent_error` and nothing is triggered.
 
 **Deliberately absent:** `ORCH_VALIDATION_SWEEP_ENABLED`. It defaults to `true`,
 so the scheduled validation sweep is on. Do not "helpfully" add it set to
@@ -376,6 +393,47 @@ healthcheck:
   start_period: 10s
 ```
 
+### 2.1a The `cache-catcher-events` volume (Feature 32)
+
+cache-catcher writes each sent eviction alert to `eviction-events.jsonl`. The agent
+serves it to the control plane, which restarts the sweep pass. The NAS compose file
+`/home/karl/lancache-host/docker-compose.yml` is **not in this repository**. Make
+these edits there, with a change card, and back the file up first.
+
+```yaml
+# under the top-level volumes: (all volumes here are external)
+  cache-catcher-events: { external: true }
+
+# under services.cache-catcher.volumes:
+      - cache-catcher-events:/events
+
+# under services.orchestrator-agent.volumes (read-only on purpose):
+      - cache-catcher-events:/cache-events:ro
+```
+
+The agent mounts this dedicated volume, not cache-catcher's `/log`. `/log` holds
+the SMTP credentials and the Kuma push URLs.
+
+**Deploy order:**
+1. Create the volume and edit the compose file:
+   `docker volume create cache-catcher-events`, then the compose edits above.
+2. Recreate the agent on the new image. Verify uid 0 and 256/256 buckets (§2.5),
+   and the mount: `docker exec orchestrator-agent test -d /cache-events && echo ok`.
+3. Copy cache-catcher's code, including the new `eviction_events.py`, into `/log`,
+   then recreate cache-catcher (its volumes changed). Verify Kuma 219 and 220
+   resume, and that `docker logs cache-catcher` shows `EVENTS
+   /events/eviction-events.jsonl: writable`.
+4. Run the control-plane deploy (migration 0020, then `EvictionWatch`).
+
+`eviction-events.jsonl` does not exist until the first eviction, and a missing
+file is normal. A missing *directory* is not: the agent then answers 503 and the
+control plane logs `eviction_watch.agent_error` on every poll.
+
+**Note:** the deliberate Kuma 220 test recipe (12 deletes in a scratch directory)
+now also triggers a full forced re-check, about 25 h of sweeping. Run it only when
+that is acceptable. A stuck forced pass is cleared under a change card with
+`UPDATE sweep_pass SET forced = 0 WHERE id = 1`.
+
 ### 2.2 `agent.env` (not version controlled)
 
 Names and non-secret values: `ORCH_TOKEN` *(secret, matches the LXC)*,
@@ -532,11 +590,17 @@ Uptime Kuma **v2.4.0**, systemd unit `uptime-kuma`, database
   "is cache loss happening now": DOWN on an `eviction` or `mode000` alert,
   latched DOWN for 1 h after the last one, UP otherwise.
 
-- **`job:orch-new-games-check`** and **`orch:new-games-overdue`** — push type,
-  group **119**, notification **3** (binding is not optional), heartbeat interval
-  about 7 h (the cron fires every 6 h). **To be created at deploy** (Feature 31, deploy step
-  with a change card); their push URLs go into `/root/orch-lxc.env` as
-  `ORCH_KUMA_PUSH_NEW_GAMES` and `ORCH_KUMA_PUSH_NEW_GAMES_OVERDUE`.
+- **`job:orch-new-games-check`** (Kuma **298**) and **`orch:new-games-overdue`**
+  (Kuma **299**). Both are push type, in group **119**, bound to notification
+  **3** (the binding is not optional). Their push URLs are in `/root/orch-lxc.env`
+  as `ORCH_KUMA_PUSH_NEW_GAMES` and `ORCH_KUMA_PUSH_NEW_GAMES_OVERDUE`.
+  - **Heartbeat interval: 13 h (46800 s).** They were created at 7 h on
+    2026-11-22 and are raised at the Feature 32 deploy (Karl's K1, 2026-11-25).
+  - **Why 13 h:** the cron fires every 6 h, but during an eviction-forced re-check
+    pass (Feature 32) sweeps hold the single job queue for about 5.5 h at a time.
+    About one forced pass in four delays a check past 7 h, which gave a false DOWN.
+  - **The trade-off:** a genuinely stalled check scheduler is noticed about 6 h
+    later than before.
   - `job:orch-new-games-check` answers **only** "is the scheduled check running".
     The scheduler pushes it when a scheduled run finishes; trigger, API and CLI
     runs never do, so they cannot mask a dead scheduler. When the cron fires while

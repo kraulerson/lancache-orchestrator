@@ -240,6 +240,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         new_games_check_enabled=settings.new_games_check_enabled,
         new_games_check_cron=settings.new_games_check_cron,
         steam_download_poll_sec=settings.steam_download_poll_sec,
+        eviction_poll_sec=settings.eviction_poll_sec,
         # Piece 1: lets auto_classify_block actuate the Steam selection prune on
         # the agent (only used when agent_enabled). None-safe when the agent is off.
         agent_client=agent_client if settings.agent_enabled else None,

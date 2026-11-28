@@ -15,7 +15,15 @@ from orchestrator.agent.background import track_background_task
 from orchestrator.agent.constants import AGENT_BODY_SIZE_CAP_BYTES
 from orchestrator.agent.jobs import AgentJobStore
 from orchestrator.agent.manifest_archive import manifest_archive_sync_loop
-from orchestrator.agent.routers import epic, health, manual_downloads, pull, stat, steam
+from orchestrator.agent.routers import (
+    cache_events,
+    epic,
+    health,
+    manual_downloads,
+    pull,
+    stat,
+    steam,
+)
 from orchestrator.api.middleware import (
     BearerAuthMiddleware,
     BodySizeCapMiddleware,
@@ -149,6 +157,7 @@ def create_agent_app(*, settings: Settings | None = None) -> FastAPI:
     app.include_router(steam.router)
     app.include_router(epic.router)
     app.include_router(manual_downloads.router)
+    app.include_router(cache_events.router)
 
     # Security wiring (mirrors the API). Middleware added LAST is OUTERMOST, so
     # SourceAllowlist (added second) wraps BearerAuth: a request is first checked
